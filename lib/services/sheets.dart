@@ -11,6 +11,18 @@ class MissingColumnException implements Exception {
   String toString() => 'This sheet is missing a required column: $missingColumn';
 }
 
+class HeaderIndices {
+  final int idColIndex;
+  final int nameColIndex;
+  final int folderColIndex;
+
+  const HeaderIndices({
+    required this.idColIndex,
+    required this.nameColIndex,
+    required this.folderColIndex,
+  });
+}
+
 class SheetParseResult {
   final List<Patient> patients;
   final int skippedRows;
@@ -27,6 +39,41 @@ class SheetsService {
   /// Regular expression to match and extract Google Spreadsheet ID from URL.
   static final RegExp _sheetUrlRegex =
       RegExp(r'/spreadsheets/d/([a-zA-Z0-9-_]+)');
+
+  /// Parses header row dynamically, regardless of column order.
+  /// Throws [MissingColumnException] if Patient ID, Patient Name, or Drive Folder ID is missing.
+  static HeaderIndices parseHeaderIndices(List<dynamic> rawHeaderRow) {
+    int idColIndex = -1;
+    int nameColIndex = -1;
+    int folderColIndex = -1;
+
+    for (int i = 0; i < rawHeaderRow.length; i++) {
+      final header = rawHeaderRow[i]?.toString().trim().toLowerCase() ?? '';
+      if (header == AppConfig.patientIdHeader.toLowerCase()) {
+        idColIndex = i;
+      } else if (header == AppConfig.patientNameHeader.toLowerCase()) {
+        nameColIndex = i;
+      } else if (header == AppConfig.driveFolderIdHeader.toLowerCase()) {
+        folderColIndex = i;
+      }
+    }
+
+    if (idColIndex == -1) {
+      throw MissingColumnException(AppConfig.patientIdHeader);
+    }
+    if (nameColIndex == -1) {
+      throw MissingColumnException(AppConfig.patientNameHeader);
+    }
+    if (folderColIndex == -1) {
+      throw MissingColumnException(AppConfig.driveFolderIdHeader);
+    }
+
+    return HeaderIndices(
+      idColIndex: idColIndex,
+      nameColIndex: nameColIndex,
+      folderColIndex: folderColIndex,
+    );
+  }
 
   /// Extracts the spreadsheet ID from a Google Sheets URL or returns the raw ID
   /// if already formatted as a standalone Google resource identifier.
@@ -97,33 +144,10 @@ class SheetsService {
     }
 
     // First row is the header row
-    final headerRow = rawRows.first.map((e) => e?.toString().trim() ?? '').toList();
-
-    int idColIndex = -1;
-    int nameColIndex = -1;
-    int folderColIndex = -1;
-
-    for (int i = 0; i < headerRow.length; i++) {
-      final header = headerRow[i];
-      if (header.toLowerCase() == AppConfig.patientIdHeader.toLowerCase()) {
-        idColIndex = i;
-      } else if (header.toLowerCase() == AppConfig.patientNameHeader.toLowerCase()) {
-        nameColIndex = i;
-      } else if (header.toLowerCase() == AppConfig.driveFolderIdHeader.toLowerCase()) {
-        folderColIndex = i;
-      }
-    }
-
-    // Verify all 3 required columns exist
-    if (idColIndex == -1) {
-      throw MissingColumnException(AppConfig.patientIdHeader);
-    }
-    if (nameColIndex == -1) {
-      throw MissingColumnException(AppConfig.patientNameHeader);
-    }
-    if (folderColIndex == -1) {
-      throw MissingColumnException(AppConfig.driveFolderIdHeader);
-    }
+    final headerIndices = parseHeaderIndices(rawRows.first);
+    final idColIndex = headerIndices.idColIndex;
+    final nameColIndex = headerIndices.nameColIndex;
+    final folderColIndex = headerIndices.folderColIndex;
 
     final validPatients = <Patient>[];
     final seenIds = <String>{};

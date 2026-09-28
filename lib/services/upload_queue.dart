@@ -23,17 +23,20 @@ class QueueStatus {
     required this.failedCount,
   });
 
-  bool get isIdle => activeCount == 0 && failedCount == 0;
   bool get hasFailures => failedCount > 0;
+  bool get hasWork => activeCount > 0 || failedCount > 0;
+  bool get isIdle => activeCount == 0 && failedCount == 0;
 }
 
 class UploadQueueService extends ChangeNotifier {
-  final AppDatabase _database;
-  final GoogleAuthService _authService;
-  final DriveService _driveService;
-  final Connectivity _connectivity;
+  final AppDatabase database;
+  final GoogleAuthService authService;
+  final DriveService driveService;
+  final Connectivity connectivity;
+  final String? customDocsDirectory;
 
   bool _isProcessing = false;
+  bool _disposed = false;
   StreamSubscription<List<ConnectivityResult>>? _connectivitySub;
   static const _uuid = Uuid();
 
@@ -41,36 +44,48 @@ class UploadQueueService extends ChangeNotifier {
   static const List<int> _retryDelaysSeconds = [5, 15, 30, 60];
 
   UploadQueueService({
-    required this._database,
-    required this._authService,
-    required this._driveService,
+    required this.database,
+    required this.authService,
+    required this.driveService,
     Connectivity? connectivity,
-  }) : _connectivity = connectivity ?? Connectivity() {
+    this.customDocsDirectory,
+  }) : connectivity = connectivity ?? Connectivity() {
     _initConnectivityListener();
   }
 
   void _initConnectivityListener() {
-    _connectivitySub = _connectivity.onConnectivityChanged.listen((results) {
-      final isDisconnected =
-          results.contains(ConnectivityResult.none) && results.length == 1;
-      if (!isDisconnected) {
-        // Connectivity change is used as a hint to wake up the queue.
-        // The Drive upload request itself determines if API access actually succeeds.
-        processQueue();
-      }
-    });
+    try {
+      _connectivitySub = connectivity.onConnectivityChanged.listen((results) {
+        final isDisconnected =
+            results.contains(ConnectivityResult.none) && results.length == 1;
+        if (!isDisconnected) {
+          // Connectivity change is used as a hint to wake up the queue.
+          // The Drive upload request itself determines if API access actually succeeds.
+          processQueue();
+        }
+      });
+    } catch (_) {
+      // In test environments, connectivity stream may not be available.
+    }
+  }
+
+  void _safeNotifyListeners() {
+    if (!_disposed) {
+      notifyListeners();
+    }
   }
 
   @override
   void dispose() {
+    _disposed = true;
     _connectivitySub?.cancel();
     super.dispose();
   }
 
   /// Gets current queue status counts.
   Future<QueueStatus> getStatus() async {
-    final active = await _database.getActiveUploadsCount();
-    final failed = await _database.getFailedUploadsCount();
+    final active = await database.getActiveUploadsCount();
+    final failed = await database.getFailedUploadsCount();
     return QueueStatus(activeCount: active, failedCount: failed);
   }
 
@@ -89,8 +104,9 @@ class UploadQueueService extends ChangeNotifier {
     final fileName = '${patient.id}_${dateStr}_$shortUuid.jpg';
 
     // Store in private app documents directory (photo_queue/)
-    final docsDir = await getApplicationDocumentsDirectory();
-    final queueDir = Directory(p.join(docsDir.path, AppConfig.photoQueueDirName));
+    final String basePath = customDocsDirectory ??
+        (await getApplicationDocumentsDirectory()).path;
+    final queueDir = Directory(p.join(basePath, AppConfig.photoQueueDirName));
     if (!queueDir.existsSync()) {
       queueDir.createSync(recursive: true);
     }
@@ -117,8 +133,8 @@ class UploadQueueService extends ChangeNotifier {
       createdAt: now,
     );
 
-    await _database.insertUpload(item);
-    notifyListeners();
+    await database.insertUpload(item);
+    _safeNotifyListeners();
 
     // Trigger queue processing asynchronously (unawaited)
     unawaited(processQueue());
@@ -128,31 +144,31 @@ class UploadQueueService extends ChangeNotifier {
 
   /// Main background upload loop.
   Future<void> processQueue() async {
-    if (_isProcessing) return;
+    if (_disposed || _isProcessing) return;
     _isProcessing = true;
 
     try {
-      while (true) {
-        final item = await _database.getNextPendingUpload();
+      while (!_disposed) {
+        final item = await database.getNextPendingUpload();
         if (item == null) break;
 
         final localFile = File(item.localPath);
         if (!localFile.existsSync()) {
           // File was deleted or missing; mark failed and stop retrying
-          await _database.updateUpload(item.copyWith(
+          await database.updateUpload(item.copyWith(
             status: UploadStatus.failed,
             lastError: 'Local photo file not found at ${item.localPath}',
           ));
-          notifyListeners();
+          _safeNotifyListeners();
           continue;
         }
 
         // Mark item as uploading
-        await _database.updateUpload(item.copyWith(status: UploadStatus.uploading));
-        notifyListeners();
+        await database.updateUpload(item.copyWith(status: UploadStatus.uploading));
+        _safeNotifyListeners();
 
         // Obtain authenticated client
-        final client = await _authService.getAuthenticatedClient();
+        final client = await authService.getAuthenticatedClient();
         if (client == null) {
           // Authentication currently unavailable
           await _handleFailure(
@@ -163,7 +179,7 @@ class UploadQueueService extends ChangeNotifier {
         }
 
         try {
-          final driveFileId = await _driveService.uploadPhoto(
+          final driveFileId = await driveService.uploadPhoto(
             client: client,
             file: localFile,
             folderId: item.driveFolderId,
@@ -181,9 +197,9 @@ class UploadQueueService extends ChangeNotifier {
           }
 
           // 2. Delete row from SQLite database
-          await _database.deleteUpload(item.id);
+          await database.deleteUpload(item.id);
           debugPrint('Upload finalized and record removed for: ${item.fileName} ($driveFileId)');
-          notifyListeners();
+          _safeNotifyListeners();
         } catch (e) {
           debugPrint('Upload attempt failed for ${item.fileName}: $e');
           await _handleFailure(item, e.toString());
@@ -191,7 +207,7 @@ class UploadQueueService extends ChangeNotifier {
       }
     } finally {
       _isProcessing = false;
-      notifyListeners();
+      _safeNotifyListeners();
     }
   }
 
@@ -207,34 +223,36 @@ class UploadQueueService extends ChangeNotifier {
       );
 
       // Keep status as waiting so it gets picked up again after backoff
-      await _database.updateUpload(item.copyWith(
+      await database.updateUpload(item.copyWith(
         status: UploadStatus.waiting,
         retryCount: nextRetryCount,
         lastError: errorMessage,
       ));
-      notifyListeners();
+      _safeNotifyListeners();
 
       // Schedule delayed retry
       Future.delayed(Duration(seconds: delaySeconds), () {
-        processQueue();
+        if (!_disposed) {
+          processQueue();
+        }
       });
     } else {
       debugPrint(
         'Upload exceeded max retries for ${item.fileName}. Marking failed. Error: $errorMessage',
       );
-      await _database.updateUpload(item.copyWith(
+      await database.updateUpload(item.copyWith(
         status: UploadStatus.failed,
         retryCount: nextRetryCount,
         lastError: errorMessage,
       ));
-      notifyListeners();
+      _safeNotifyListeners();
     }
   }
 
   /// Manual retry for all failed uploads.
   Future<void> retryFailedUploads() async {
-    await _database.resetFailedToWaiting();
-    notifyListeners();
+    await database.resetFailedToWaiting();
+    _safeNotifyListeners();
     await processQueue();
   }
 }

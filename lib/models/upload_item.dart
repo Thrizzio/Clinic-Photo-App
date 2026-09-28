@@ -46,7 +46,9 @@ class UploadItem {
     UploadStatus? status,
     int? retryCount,
     String? lastError,
+    bool clearLastError = false,
     String? driveFileId,
+    bool clearDriveFileId = false,
     DateTime? createdAt,
   }) {
     return UploadItem(
@@ -57,8 +59,8 @@ class UploadItem {
       fileName: fileName ?? this.fileName,
       status: status ?? this.status,
       retryCount: retryCount ?? this.retryCount,
-      lastError: lastError ?? this.lastError,
-      driveFileId: driveFileId ?? this.driveFileId,
+      lastError: clearLastError ? null : (lastError ?? this.lastError),
+      driveFileId: clearDriveFileId ? null : (driveFileId ?? this.driveFileId),
       createdAt: createdAt ?? this.createdAt,
     );
   }
