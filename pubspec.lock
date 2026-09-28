@@ -281,7 +281,7 @@ packages:
     source: hosted
     version: "17.0.0"
   googleapis_auth:
-    dependency: transitive
+    dependency: "direct main"
     description:
       name: googleapis_auth
       sha256: d31822528becea550f7c7a9ab73a4518e31e48f201ab574be7e141f262923f27
