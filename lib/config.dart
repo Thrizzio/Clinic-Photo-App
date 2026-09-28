@@ -4,6 +4,11 @@
 abstract final class AppConfig {
   static const String appName = 'Clinic Photos';
 
+  /// Google OAuth 2.0 Web Client ID / Server Client ID from Google Cloud Console.
+  /// Required by Google Identity Services (Credential Manager) on modern Android.
+  static const String serverClientId =
+      '911718488219-1u6n82fet84vt0gv6o1vjuo69oa2hgcp.apps.googleusercontent.com';
+
   /// Google OAuth 2.0 Scopes.
   /// - spreadsheets.readonly: To retrieve patient database rows & tabs
   /// - drive: Broad scope intentional for internal one-doctor clinic to upload

@@ -19,7 +19,9 @@ class GoogleAuthService {
   Future<void> ensureInitialized() async {
     if (_initialized) return;
     try {
-      await _googleSignIn.initialize();
+      await _googleSignIn.initialize(
+        serverClientId: AppConfig.serverClientId,
+      );
       _initialized = true;
 
       _googleSignIn.authenticationEvents.listen((event) {
