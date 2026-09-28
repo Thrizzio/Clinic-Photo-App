@@ -1,0 +1,84 @@
+# ===== Secrets & env — never push these =====
+.env
+.env.local
+.env.*.local
+.env.production
+*.pem
+*.key
+*.p12
+serviceAccountKey.json
+service-account*.json
+google-services.json
+GoogleService-Info.plist
+.runtimeconfig.json
+
+# ===== OS junk =====
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ===== Editor / IDE =====
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+*.swo
+*~
+
+# ===== Antigravity IDE local state =====
+.antigravitycli/
+.antigravity/
+cache/projects.json
+
+# ===== Node / npm / yarn =====
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-store/
+
+# ===== Next.js / React =====
+.next/
+out/
+build/
+dist/
+*.tsbuildinfo
+.turbo/
+
+# ===== Flutter / Dart =====
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+build/
+android/local.properties
+android/**/gradle-wrapper.jar
+ios/Flutter/flutter_export_environment.sh
+ios/Pods/
+*.iml
+
+
+#google-services.json / GoogleService-Info.plist — I've included these as ignored since they can contain project identifiers you might not want in a public repo, but Firebase apps sometimes need them committed for teammates to build locally. If your dairy app repo is private with just your team of 3, it's fine to un-ignore these and commit them — just don't do that on a public repo.
+.idea/ — fully ignored above since it's JetBrains-specific machine config. If you and your teammates want to share run configs, some teams selectively commit .idea/runConfigurations/ — not necessary unless you hit that need.
+
+# ===== Firebase =====
+.firebase/
+firebase-debug.log
+firestore-debug.log
+ui-debug.log
+functions/node_modules/
+
+# ===== Logs =====
+*.log
+logs/
+
+# ===== Test / coverage =====
+coverage/
+.nyc_output/
+
+# ===== Misc caches =====
+.cache/
+.eslintcache
