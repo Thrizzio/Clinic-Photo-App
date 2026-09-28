@@ -9,16 +9,28 @@ class GoogleAuthService {
   final GoogleSignIn _googleSignIn;
   GoogleSignInAccount? _currentAccount;
   bool _initialized = false;
+  Future<void>? _initFuture;
 
   GoogleAuthService([GoogleSignIn? googleSignIn])
       : _googleSignIn = googleSignIn ?? GoogleSignIn.instance;
 
   GoogleSignInAccount? get currentAccount => _currentAccount;
 
-  /// Ensures GoogleSignIn is initialized once.
+  /// Ensures GoogleSignIn is initialized exactly once before authentication.
   Future<void> ensureInitialized() async {
     if (_initialized) return;
+    if (_initFuture != null) {
+      await _initFuture;
+      return;
+    }
+    _initFuture = _doInitialize();
+    await _initFuture;
+  }
+
+  Future<void> _doInitialize() async {
     try {
+      // Modern Google Identity Services on Android requires the Web OAuth 2.0
+      // client ID as serverClientId. Do not pass Android client ID as clientId.
       await _googleSignIn.initialize(
         serverClientId: AppConfig.serverClientId,
       );
@@ -50,7 +62,7 @@ class GoogleAuthService {
     }
   }
 
-  /// Triggers standard interactive Google Sign-In prompt.
+  /// Triggers interactive Google Sign-In prompt.
   Future<GoogleSignInAccount?> signIn() async {
     await ensureInitialized();
     try {
