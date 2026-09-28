@@ -68,7 +68,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
       await widget.database.replacePatients(result.patients);
       final now = DateTime.now();
-      await widget.configService.updateLastSync(now);
+      await widget.configService.updateLastSync(
+        now,
+        lastSyncedRow: result.totalRows,
+        isFullSync: true,
+      );
 
       setState(() {
         _config = widget.configService.loadConfig();
@@ -78,7 +82,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('✓ Synced ${result.patients.length} patients'),
+            content: Text('✓ Full reconciliation: ${result.patients.length} patients from ${result.totalRows} rows'),
             backgroundColor: Colors.green.shade800,
           ),
         );
@@ -176,6 +180,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
             title: const Text('Last Synced', style: TextStyle(fontSize: 13, color: Colors.black54)),
             subtitle: Text(_formatLastSync(_config.lastPatientSync)),
           ),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('Last Synced Row', style: TextStyle(fontSize: 13, color: Colors.black54)),
+            subtitle: Text('${_config.lastSyncedRow} rows processed'),
+          ),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('Last Full Reconciliation', style: TextStyle(fontSize: 13, color: Colors.black54)),
+            subtitle: Text(_formatLastSync(_config.lastFullSync)),
+          ),
           const SizedBox(height: 16),
 
           OutlinedButton.icon(
@@ -186,7 +200,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     child: CircularProgressIndicator(strokeWidth: 2),
                   )
                 : const Icon(Icons.sync),
-            label: const Text('Sync Now'),
+            label: const Text('Sync Now (Full Reconciliation)'),
             onPressed: _isSyncing ? null : _handleSyncNow,
           ),
           const SizedBox(height: 8),

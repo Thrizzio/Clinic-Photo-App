@@ -8,6 +8,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 
 import '../config.dart';
+import '../models/capture_session.dart';
 import '../models/patient.dart';
 import '../models/upload_item.dart';
 import 'database.dart';
@@ -51,6 +52,7 @@ class UploadQueueService extends ChangeNotifier {
     this.customDocsDirectory,
   }) : connectivity = connectivity ?? Connectivity() {
     _initConnectivityListener();
+    recoverOrphanedUnassignedPhotos();
   }
 
   void _initConnectivityListener() {
@@ -59,8 +61,6 @@ class UploadQueueService extends ChangeNotifier {
         final isDisconnected =
             results.contains(ConnectivityResult.none) && results.length == 1;
         if (!isDisconnected) {
-          // Connectivity change is used as a hint to wake up the queue.
-          // The Drive upload request itself determines if API access actually succeeds.
           processQueue();
         }
       });
@@ -89,23 +89,29 @@ class UploadQueueService extends ChangeNotifier {
     return QueueStatus(activeCount: active, failedCount: failed);
   }
 
-  /// Immediately moves captured photo to private app directory, enqueues
-  /// upload record in SQLite, and wakes the upload worker in the background.
-  ///
-  /// CRITICAL REQUIREMENT: This method returns immediately without waiting
-  /// for Google Drive so the camera is ready for the next capture instantly.
+  Future<String> _getBasePath() async {
+    return customDocsDirectory ??
+        (await getApplicationDocumentsDirectory()).path;
+  }
+
+  /// Workflow A: Immediately moves captured photo to private app directory,
+  /// enqueues upload record in SQLite, and wakes the upload worker in the background.
   Future<UploadItem> enqueuePhoto({
     required Patient patient,
     required String capturedTempPath,
   }) async {
+    if (!patient.isUploadable) {
+      throw ArgumentError(
+        'Cannot enqueue photo: Patient ${patient.id} does not have an available Drive folder.',
+      );
+    }
+
     final now = DateTime.now();
     final shortUuid = _uuid.v4().substring(0, 4);
     final dateStr = DateFormat('yyyy-MM-dd_HH-mm-ss').format(now);
     final fileName = '${patient.id}_${dateStr}_$shortUuid.jpg';
 
-    // Store in private app documents directory (photo_queue/)
-    final String basePath = customDocsDirectory ??
-        (await getApplicationDocumentsDirectory()).path;
+    final basePath = await _getBasePath();
     final queueDir = Directory(p.join(basePath, AppConfig.photoQueueDirName));
     if (!queueDir.existsSync()) {
       queueDir.createSync(recursive: true);
@@ -114,13 +120,19 @@ class UploadQueueService extends ChangeNotifier {
     final localPath = p.join(queueDir.path, fileName);
     final tempFile = File(capturedTempPath);
 
-    // Move or copy image file to private storage
-    if (tempFile.existsSync()) {
-      await tempFile.copy(localPath);
-      try {
-        await tempFile.delete();
-      } catch (_) {}
+    if (!tempFile.existsSync()) {
+      throw FileSystemException('Captured camera temp file does not exist', capturedTempPath);
     }
+
+    await tempFile.copy(localPath);
+    final savedFile = File(localPath);
+    if (!savedFile.existsSync()) {
+      throw FileSystemException('Failed to verify saved photo in private storage', localPath);
+    }
+
+    try {
+      await tempFile.delete();
+    } catch (_) {}
 
     final item = UploadItem(
       id: _uuid.v4(),
@@ -136,10 +148,159 @@ class UploadQueueService extends ChangeNotifier {
     await database.insertUpload(item);
     _safeNotifyListeners();
 
-    // Trigger queue processing asynchronously (unawaited)
     unawaited(processQueue());
 
     return item;
+  }
+
+  /// Workflow B: Creates a new unassigned capture session.
+  Future<CaptureSession> createUnassignedSession() async {
+    final session = CaptureSession(
+      id: _uuid.v4(),
+      patientId: null,
+      createdAt: DateTime.now(),
+      status: 'unassigned',
+      photoCount: 0,
+    );
+    await database.insertSession(session);
+    _safeNotifyListeners();
+    return session;
+  }
+
+  /// Workflow B: Saves a photo captured during an unassigned session.
+  /// Photos remain in 'unassigned' state and do NOT wake the upload queue.
+  Future<UploadItem> enqueueUnassignedPhoto({
+    required String sessionId,
+    required String capturedTempPath,
+  }) async {
+    final now = DateTime.now();
+    final shortUuid = _uuid.v4().substring(0, 4);
+    final dateStr = DateFormat('yyyy-MM-dd_HH-mm-ss').format(now);
+    final fileName = 'unassigned_${dateStr}_$shortUuid.jpg';
+
+    final basePath = await _getBasePath();
+    final sessionDir = Directory(
+      p.join(basePath, AppConfig.photoQueueDirName, AppConfig.unassignedDirName, sessionId),
+    );
+    if (!sessionDir.existsSync()) {
+      sessionDir.createSync(recursive: true);
+    }
+
+    final localPath = p.join(sessionDir.path, fileName);
+    final tempFile = File(capturedTempPath);
+
+    if (!tempFile.existsSync()) {
+      throw FileSystemException('Captured camera temp file does not exist', capturedTempPath);
+    }
+
+    await tempFile.copy(localPath);
+    final savedFile = File(localPath);
+    if (!savedFile.existsSync()) {
+      throw FileSystemException('Failed to verify saved photo in private storage', localPath);
+    }
+
+    try {
+      await tempFile.delete();
+    } catch (_) {}
+
+    final item = UploadItem(
+      id: _uuid.v4(),
+      sessionId: sessionId,
+      patientId: null,
+      driveFolderId: null,
+      localPath: localPath,
+      fileName: fileName,
+      status: UploadStatus.unassigned,
+      retryCount: 0,
+      createdAt: now,
+    );
+
+    await database.insertUpload(item);
+    _safeNotifyListeners();
+
+    return item;
+  }
+
+  /// Recovers any physical photo files in photo_queue/unassigned/ that were
+  /// saved to disk but missing from the SQLite uploads table.
+  Future<void> recoverOrphanedUnassignedPhotos() async {
+    try {
+      final basePath = await _getBasePath();
+      final unassignedDir = Directory(
+        p.join(basePath, AppConfig.photoQueueDirName, AppConfig.unassignedDirName),
+      );
+      if (!unassignedDir.existsSync()) return;
+
+      final sessionDirs = unassignedDir.listSync().whereType<Directory>();
+      for (final sDir in sessionDirs) {
+        final sessionId = p.basename(sDir.path);
+        var session = await database.getSession(sessionId);
+        if (session == null) {
+          session = CaptureSession(
+            id: sessionId,
+            patientId: null,
+            createdAt: sDir.statSync().changed,
+            status: 'unassigned',
+            photoCount: 0,
+          );
+          await database.insertSession(session);
+        }
+
+        final photoFiles = sDir
+            .listSync()
+            .whereType<File>()
+            .where((f) => f.path.toLowerCase().endsWith('.jpg'));
+        final existingUploads = await database.getUploadsForSession(sessionId);
+        final existingPaths = existingUploads.map((u) => u.localPath).toSet();
+
+        for (final file in photoFiles) {
+          if (!existingPaths.contains(file.path)) {
+            final fileName = p.basename(file.path);
+            await database.insertUpload(
+              UploadItem(
+                id: _uuid.v4(),
+                sessionId: sessionId,
+                patientId: null,
+                driveFolderId: null,
+                localPath: file.path,
+                fileName: fileName,
+                status: UploadStatus.unassigned,
+                retryCount: 0,
+                createdAt: file.statSync().changed,
+              ),
+            );
+            debugPrint('RECOVERED unassigned photo: $fileName for session $sessionId');
+          }
+        }
+      }
+      _safeNotifyListeners();
+    } catch (e) {
+      debugPrint('Error recovering orphaned unassigned photos: $e');
+    }
+  }
+
+  /// Workflow B: Assigns an unassigned session to a verified patient.
+  /// Validates that patient has an available Drive folder, transitions all photos
+  /// to 'waiting', and wakes the background upload worker.
+  Future<void> assignSession({
+    required String sessionId,
+    required Patient patient,
+  }) async {
+    if (!patient.isUploadable) {
+      throw ArgumentError(
+        'Cannot assign session: Patient ${patient.id} folder status is ${patient.folderStatus.name}.',
+      );
+    }
+
+    await database.assignSessionToPatient(
+      sessionId: sessionId,
+      patientId: patient.id,
+      driveFolderId: patient.driveFolderId!,
+    );
+
+    _safeNotifyListeners();
+
+    unawaited(processQueue());
   }
 
   /// Main background upload loop.
@@ -154,7 +315,6 @@ class UploadQueueService extends ChangeNotifier {
 
         final localFile = File(item.localPath);
         if (!localFile.existsSync()) {
-          // File was deleted or missing; mark failed and stop retrying
           await database.updateUpload(item.copyWith(
             status: UploadStatus.failed,
             lastError: 'Local photo file not found at ${item.localPath}',
@@ -163,31 +323,37 @@ class UploadQueueService extends ChangeNotifier {
           continue;
         }
 
-        // Mark item as uploading
+        if (item.driveFolderId == null || item.driveFolderId!.isEmpty) {
+          await database.updateUpload(item.copyWith(
+            status: UploadStatus.failed,
+            lastError: 'Missing Drive folder ID for upload',
+          ));
+          _safeNotifyListeners();
+          continue;
+        }
+
         await database.updateUpload(item.copyWith(status: UploadStatus.uploading));
         _safeNotifyListeners();
 
-        // Obtain authenticated client
         final client = await authService.getAuthenticatedClient();
         if (client == null) {
-          // Authentication currently unavailable
           await _handleFailure(
             item,
             'Google account authorization not available. Please sign in.',
           );
-          break; // Stop loop until auth/connectivity restores
+          break;
         }
 
         try {
           final driveFileId = await driveService.uploadPhoto(
             client: client,
             file: localFile,
-            folderId: item.driveFolderId,
+            folderId: item.driveFolderId!,
             fileName: item.fileName,
           );
 
           // DRIVE CONFIRMED:
-          // 1. Delete local file from private storage
+          // 1. Delete local file
           if (localFile.existsSync()) {
             try {
               localFile.deleteSync();
@@ -196,8 +362,23 @@ class UploadQueueService extends ChangeNotifier {
             }
           }
 
-          // 2. Delete row from SQLite database
+          // 2. Delete row from uploads
           await database.deleteUpload(item.id);
+
+          // 3. If item belonged to an unassigned session, check if session is completed
+          if (item.sessionId != null) {
+            final remaining = await database.getUploadsForSession(item.sessionId!);
+            if (remaining.isEmpty) {
+              await database.deleteSession(item.sessionId!);
+              try {
+                final sessionDir = Directory(p.dirname(item.localPath));
+                if (sessionDir.existsSync()) {
+                  sessionDir.deleteSync(recursive: true);
+                }
+              } catch (_) {}
+            }
+          }
+
           debugPrint('Upload finalized and record removed for: ${item.fileName} ($driveFileId)');
           _safeNotifyListeners();
         } catch (e) {
@@ -211,8 +392,7 @@ class UploadQueueService extends ChangeNotifier {
     }
   }
 
-  /// Handles upload failure with bounded gentle retries.
-  /// Delays: 5s, 15s, 30s, 60s -> stop automatic retries and mark failed.
+  /// Handles upload failure with bounded gentle retries: 5s, 15s, 30s, 60s.
   Future<void> _handleFailure(UploadItem item, String errorMessage) async {
     final nextRetryCount = item.retryCount + 1;
 
@@ -222,7 +402,6 @@ class UploadQueueService extends ChangeNotifier {
         'Upload failed for ${item.fileName}. Will retry attempt $nextRetryCount in ${delaySeconds}s. Error: $errorMessage',
       );
 
-      // Keep status as waiting so it gets picked up again after backoff
       await database.updateUpload(item.copyWith(
         status: UploadStatus.waiting,
         retryCount: nextRetryCount,
@@ -230,7 +409,6 @@ class UploadQueueService extends ChangeNotifier {
       ));
       _safeNotifyListeners();
 
-      // Schedule delayed retry
       Future.delayed(Duration(seconds: delaySeconds), () {
         if (!_disposed) {
           processQueue();

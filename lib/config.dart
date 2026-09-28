@@ -18,12 +18,15 @@ abstract final class AppConfig {
     'https://www.googleapis.com/auth/drive',
   ];
 
-  /// Standard column header names in the clinic Google Sheet.
+  /// Standard column header names in the clinic Google Sheet (Visits table).
   /// Column order in the spreadsheet does not matter.
   static const String patientIdHeader = 'Patient ID';
   static const String patientNameHeader = 'Patient Name';
-  static const String driveFolderIdHeader = 'Drive Folder ID';
+  static const String photosDriveHeader = 'Photos (Drive)';
+  static const String legacyDriveFolderIdHeader = 'Drive Folder ID';
+  static const String driveFolderIdHeader = legacyDriveFolderIdHeader;
 
-  /// Private app-specific folder for queued clinical photos.
+  /// Private app-specific folders for queued and unassigned clinical photos.
   static const String photoQueueDirName = 'photo_queue';
+  static const String unassignedDirName = 'unassigned';
 }

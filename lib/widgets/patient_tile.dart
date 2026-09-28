@@ -18,7 +18,7 @@ class PatientTile extends StatelessWidget {
     return InkWell(
       onTap: onTap,
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
         decoration: BoxDecoration(
           border: Border(
             bottom: BorderSide(
@@ -47,17 +47,66 @@ class PatientTile extends StatelessWidget {
             ),
             const SizedBox(width: 16),
             Expanded(
-              child: Text(
-                patient.name,
-                style: const TextStyle(
-                  fontSize: 17,
-                  fontWeight: FontWeight.w500,
-                ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    patient.name,
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  if (patient.folderStatus == FolderStatus.missing)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: Row(
+                        children: [
+                          Icon(Icons.folder_off_outlined, size: 13, color: Colors.amber.shade800),
+                          const SizedBox(width: 4),
+                          Text(
+                            'Missing Drive folder in Visits',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Colors.amber.shade900,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ],
+                      ),
+                    )
+                  else if (patient.folderStatus == FolderStatus.conflict)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: Row(
+                        children: [
+                          Icon(Icons.warning_amber_rounded, size: 13, color: Colors.red.shade700),
+                          const SizedBox(width: 4),
+                          Text(
+                            'Conflicting Drive folders in Visits',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Colors.red.shade800,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                ],
               ),
             ),
             Icon(
-              Icons.chevron_right,
-              color: theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.5),
+              patient.isUploadable
+                  ? Icons.chevron_right
+                  : Icons.info_outline,
+              color: patient.isUploadable
+                  ? theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.5)
+                  : (patient.folderStatus == FolderStatus.conflict
+                      ? Colors.red.shade400
+                      : Colors.amber.shade700),
+              size: 20,
             ),
           ],
         ),

@@ -43,7 +43,7 @@ class _ClinicSetupScreenState extends State<ClinicSetupScreen> {
   List<String> _availableTabs = [];
   String? _selectedTab;
   List<Patient> _validatedPatients = [];
-  int _skippedRowCount = 0;
+  int _totalRowCount = 0;
 
   @override
   void initState() {
@@ -135,7 +135,7 @@ class _ClinicSetupScreenState extends State<ClinicSetupScreen> {
 
       setState(() {
         _validatedPatients = result.patients;
-        _skippedRowCount = result.skippedRows;
+        _totalRowCount = result.totalRows;
         _currentStep = _SetupStep.validateSummary;
         _isLoading = false;
       });
@@ -174,6 +174,8 @@ class _ClinicSetupScreenState extends State<ClinicSetupScreen> {
         sheetTabName: tab,
         hasCompletedSetup: true,
         lastPatientSync: now.toIso8601String(),
+        lastSyncedRow: _totalRowCount,
+        lastFullSync: now.toIso8601String(),
       );
       await widget.configService.saveConfig(newConfig);
 
@@ -341,6 +343,13 @@ class _ClinicSetupScreenState extends State<ClinicSetupScreen> {
   }
 
   Widget _buildValidateSummaryStep() {
+    final availableCount =
+        _validatedPatients.where((p) => p.folderStatus == FolderStatus.available).length;
+    final missingCount =
+        _validatedPatients.where((p) => p.folderStatus == FolderStatus.missing).length;
+    final conflictCount =
+        _validatedPatients.where((p) => p.folderStatus == FolderStatus.conflict).length;
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -359,10 +368,10 @@ class _ClinicSetupScreenState extends State<ClinicSetupScreen> {
               children: [
                 Row(
                   children: [
-                    const Icon(Icons.check_circle, color: Colors.green, size: 20),
+                    const Icon(Icons.people, color: Colors.blue, size: 20),
                     const SizedBox(width: 8),
                     Text(
-                      '${_validatedPatients.length} patients ready',
+                      '${_validatedPatients.length} unique patients',
                       style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
                     ),
                   ],
@@ -370,24 +379,40 @@ class _ClinicSetupScreenState extends State<ClinicSetupScreen> {
                 const SizedBox(height: 8),
                 Row(
                   children: [
-                    const Icon(Icons.folder, color: Colors.blue, size: 20),
+                    const Icon(Icons.check_circle, color: Colors.green, size: 20),
                     const SizedBox(width: 8),
                     Text(
-                      '${_validatedPatients.length} Drive folders verified',
+                      '$availableCount Drive folders verified',
                       style: const TextStyle(fontSize: 14),
                     ),
                   ],
                 ),
-                if (_skippedRowCount > 0) ...[
+                if (missingCount > 0) ...[
                   const SizedBox(height: 12),
                   Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Icon(Icons.warning_amber_rounded, color: Colors.orange, size: 20),
+                      const Icon(Icons.warning_amber_rounded, color: Colors.amber, size: 20),
                       const SizedBox(width: 8),
                       Expanded(
                         child: Text(
-                          '$_skippedRowCount rows skipped (missing Drive Folder ID or incomplete)',
+                          '$missingCount patients missing Drive folder in Visits (capture blocked)',
+                          style: const TextStyle(color: Colors.black87, fontSize: 13),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+                if (conflictCount > 0) ...[
+                  const SizedBox(height: 12),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Icon(Icons.error_outline, color: Colors.orange, size: 20),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          '$conflictCount patients have conflicting Drive folders across visits',
                           style: const TextStyle(color: Colors.black87, fontSize: 13),
                         ),
                       ),

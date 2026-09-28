@@ -7,6 +7,8 @@ class ConfigService {
   static const String _keySpreadsheetUrl = 'spreadsheetUrl';
   static const String _keySheetTabName = 'sheetTabName';
   static const String _keyLastPatientSync = 'lastPatientSync';
+  static const String _keyLastSyncedRow = 'lastSyncedRow';
+  static const String _keyLastFullSync = 'lastFullSync';
 
   final SharedPreferences _prefs;
 
@@ -24,6 +26,8 @@ class ConfigService {
       spreadsheetUrl: _prefs.getString(_keySpreadsheetUrl) ?? '',
       sheetTabName: _prefs.getString(_keySheetTabName) ?? '',
       lastPatientSync: _prefs.getString(_keyLastPatientSync),
+      lastSyncedRow: _prefs.getInt(_keyLastSyncedRow) ?? 1,
+      lastFullSync: _prefs.getString(_keyLastFullSync),
     );
   }
 
@@ -32,13 +36,24 @@ class ConfigService {
     await _prefs.setString(_keySpreadsheetId, config.spreadsheetId);
     await _prefs.setString(_keySpreadsheetUrl, config.spreadsheetUrl);
     await _prefs.setString(_keySheetTabName, config.sheetTabName);
+    await _prefs.setInt(_keyLastSyncedRow, config.lastSyncedRow);
     if (config.lastPatientSync != null) {
       await _prefs.setString(_keyLastPatientSync, config.lastPatientSync!);
     }
+    if (config.lastFullSync != null) {
+      await _prefs.setString(_keyLastFullSync, config.lastFullSync!);
+    }
   }
 
-  Future<void> updateLastSync(DateTime syncTime) async {
-    await _prefs.setString(_keyLastPatientSync, syncTime.toIso8601String());
+  Future<void> updateLastSync(DateTime syncTime, {int? lastSyncedRow, bool isFullSync = false}) async {
+    final iso = syncTime.toIso8601String();
+    await _prefs.setString(_keyLastPatientSync, iso);
+    if (lastSyncedRow != null) {
+      await _prefs.setInt(_keyLastSyncedRow, lastSyncedRow);
+    }
+    if (isFullSync) {
+      await _prefs.setString(_keyLastFullSync, iso);
+    }
   }
 
   Future<void> clearConfig() async {
@@ -47,5 +62,7 @@ class ConfigService {
     await _prefs.remove(_keySpreadsheetUrl);
     await _prefs.remove(_keySheetTabName);
     await _prefs.remove(_keyLastPatientSync);
+    await _prefs.remove(_keyLastSyncedRow);
+    await _prefs.remove(_keyLastFullSync);
   }
 }

@@ -44,38 +44,42 @@ void main() {
       expect(patient.driveFolderId, 'folder_xyz');
     });
 
-    test('Drive Folder ID validation rule: skips patient if folder ID is empty or null', () {
+    test('Drive Folder ID validation rule: sets folderStatus to missing and blocks upload if folder ID is empty or null', () {
       final rowMapEmptyFolder = {
         AppConfig.patientIdHeader: 'P003',
         AppConfig.patientNameHeader: 'Arjun Mehta',
-        AppConfig.driveFolderIdHeader: '',
+        AppConfig.photosDriveHeader: '',
       };
 
-      expect(
-        Patient.fromRow(
-          rowMap: rowMapEmptyFolder,
-          idCol: AppConfig.patientIdHeader,
-          nameCol: AppConfig.patientNameHeader,
-          folderCol: AppConfig.driveFolderIdHeader,
-        ),
-        isNull,
+      final patientEmpty = Patient.fromRow(
+        rowMap: rowMapEmptyFolder,
+        idCol: AppConfig.patientIdHeader,
+        nameCol: AppConfig.patientNameHeader,
+        folderCol: AppConfig.photosDriveHeader,
       );
+
+      expect(patientEmpty, isNotNull);
+      expect(patientEmpty!.folderStatus, FolderStatus.missing);
+      expect(patientEmpty.driveFolderId, isNull);
+      expect(patientEmpty.isUploadable, isFalse);
 
       final rowMapNullFolder = {
         AppConfig.patientIdHeader: 'P003',
         AppConfig.patientNameHeader: 'Arjun Mehta',
-        AppConfig.driveFolderIdHeader: null,
+        AppConfig.photosDriveHeader: null,
       };
 
-      expect(
-        Patient.fromRow(
-          rowMap: rowMapNullFolder,
-          idCol: AppConfig.patientIdHeader,
-          nameCol: AppConfig.patientNameHeader,
-          folderCol: AppConfig.driveFolderIdHeader,
-        ),
-        isNull,
+      final patientNull = Patient.fromRow(
+        rowMap: rowMapNullFolder,
+        idCol: AppConfig.patientIdHeader,
+        nameCol: AppConfig.patientNameHeader,
+        folderCol: AppConfig.photosDriveHeader,
       );
+
+      expect(patientNull, isNotNull);
+      expect(patientNull!.folderStatus, FolderStatus.missing);
+      expect(patientNull.driveFolderId, isNull);
+      expect(patientNull.isUploadable, isFalse);
     });
 
     test('skips patient if ID or Name is empty', () {

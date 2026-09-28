@@ -1,10 +1,12 @@
 enum UploadStatus {
+  unassigned,
   waiting,
   uploading,
   failed;
 
   static UploadStatus fromString(String value) {
     return switch (value.toLowerCase()) {
+      'unassigned' => UploadStatus.unassigned,
       'uploading' => UploadStatus.uploading,
       'failed' => UploadStatus.failed,
       _ => UploadStatus.waiting,
@@ -14,8 +16,9 @@ enum UploadStatus {
 
 class UploadItem {
   final String id;
-  final String patientId;
-  final String driveFolderId;
+  final String? sessionId;
+  final String? patientId;
+  final String? driveFolderId;
   final String localPath;
   final String fileName;
   final UploadStatus status;
@@ -26,8 +29,9 @@ class UploadItem {
 
   const UploadItem({
     required this.id,
-    required this.patientId,
-    required this.driveFolderId,
+    this.sessionId,
+    this.patientId,
+    this.driveFolderId,
     required this.localPath,
     required this.fileName,
     this.status = UploadStatus.waiting,
@@ -39,6 +43,7 @@ class UploadItem {
 
   UploadItem copyWith({
     String? id,
+    String? sessionId,
     String? patientId,
     String? driveFolderId,
     String? localPath,
@@ -53,6 +58,7 @@ class UploadItem {
   }) {
     return UploadItem(
       id: id ?? this.id,
+      sessionId: sessionId ?? this.sessionId,
       patientId: patientId ?? this.patientId,
       driveFolderId: driveFolderId ?? this.driveFolderId,
       localPath: localPath ?? this.localPath,
@@ -68,6 +74,7 @@ class UploadItem {
   Map<String, dynamic> toMap() {
     return {
       'id': id,
+      'session_id': sessionId,
       'patient_id': patientId,
       'drive_folder_id': driveFolderId,
       'local_path': localPath,
@@ -83,8 +90,9 @@ class UploadItem {
   factory UploadItem.fromMap(Map<String, dynamic> map) {
     return UploadItem(
       id: map['id'] as String,
-      patientId: map['patient_id'] as String,
-      driveFolderId: map['drive_folder_id'] as String,
+      sessionId: map['session_id'] as String?,
+      patientId: map['patient_id'] as String?,
+      driveFolderId: map['drive_folder_id'] as String?,
       localPath: map['local_path'] as String,
       fileName: map['file_name'] as String,
       status: UploadStatus.fromString(map['status'] as String),
@@ -97,5 +105,5 @@ class UploadItem {
 
   @override
   String toString() =>
-      'UploadItem(id: $id, patient: $patientId, status: ${status.name}, retries: $retryCount)';
+      'UploadItem(id: $id, session: $sessionId, patient: $patientId, status: ${status.name}, retries: $retryCount)';
 }

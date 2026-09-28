@@ -1,5 +1,6 @@
 import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart';
+import '../models/capture_session.dart';
 import '../models/patient.dart';
 import '../models/upload_item.dart';
 
@@ -10,15 +11,52 @@ abstract class AppDatabase {
   /// Replaces the entire patients cache with fresh records.
   Future<void> replacePatients(List<Patient> patients);
 
+  /// Upserts a batch of patients (used during incremental sync).
+  Future<void> upsertPatients(List<Patient> patients);
+
+  /// Retrieves a single patient by ID.
+  Future<Patient?> getPatient(String id);
+
   /// Retrieves all cached patients sorted by ID.
   Future<List<Patient>> getPatients();
 
   /// Case-insensitive search by Patient ID or Name.
   Future<List<Patient>> searchPatients(String query);
 
+  // --- Capture Sessions Operations ---
+
+  /// Inserts a new capture session.
+  Future<void> insertSession(CaptureSession session);
+
+  /// Retrieves a capture session by ID.
+  Future<CaptureSession?> getSession(String id);
+
+  /// Retrieves all unassigned sessions with their photo counts.
+  Future<List<CaptureSession>> getUnassignedSessions();
+
+  /// Gets the count of pending unassigned sessions.
+  Future<int> getUnassignedSessionsCount();
+
+  /// Updates an existing capture session.
+  Future<void> updateSession(CaptureSession session);
+
+  /// Deletes a capture session.
+  Future<void> deleteSession(String id);
+
+  /// Gets all uploads belonging to a given session.
+  Future<List<UploadItem>> getUploadsForSession(String sessionId);
+
+  /// Atomically assigns an unassigned session and all its photos to a patient,
+  /// transitioning all photos to waiting status for upload.
+  Future<void> assignSessionToPatient({
+    required String sessionId,
+    required String patientId,
+    required String driveFolderId,
+  });
+
   // --- Upload Queue Operations ---
 
-  /// Inserts a new pending upload item.
+  /// Inserts a new upload item.
   Future<void> insertUpload(UploadItem item);
 
   /// Updates an existing upload item (status, retries, errors).
@@ -59,11 +97,13 @@ abstract class AppDatabase {
   /// In-memory implementation for fast unit tests without FFI/native assets.
   factory AppDatabase.inMemory({
     Map<String, Patient>? initialPatients,
+    Map<String, CaptureSession>? initialSessions,
     Map<String, UploadItem>? initialUploads,
     bool performCrashRecovery = true,
   }) {
     return InMemoryAppDatabase(
       initialPatients: initialPatients,
+      initialSessions: initialSessions,
       initialUploads: initialUploads,
       performCrashRecovery: performCrashRecovery,
     );
@@ -73,7 +113,7 @@ abstract class AppDatabase {
 /// SQLite-backed production database implementation for Android.
 class SqliteAppDatabase implements AppDatabase {
   static const String _dbName = 'clinic_photos.db';
-  static const int _dbVersion = 1;
+  static const int _dbVersion = 3;
 
   final Database db;
 
@@ -95,15 +135,26 @@ class SqliteAppDatabase implements AppDatabase {
             CREATE TABLE patients (
               id TEXT PRIMARY KEY,
               name TEXT NOT NULL,
-              drive_folder_id TEXT NOT NULL
+              drive_folder_id TEXT,
+              folder_status TEXT NOT NULL
+            )
+          ''');
+
+          await db.execute('''
+            CREATE TABLE capture_sessions (
+              id TEXT PRIMARY KEY,
+              patient_id TEXT,
+              created_at TEXT NOT NULL,
+              status TEXT NOT NULL
             )
           ''');
 
           await db.execute('''
             CREATE TABLE uploads (
               id TEXT PRIMARY KEY,
-              patient_id TEXT NOT NULL,
-              drive_folder_id TEXT NOT NULL,
+              session_id TEXT,
+              patient_id TEXT,
+              drive_folder_id TEXT,
               local_path TEXT NOT NULL,
               file_name TEXT NOT NULL,
               status TEXT NOT NULL,
@@ -114,9 +165,35 @@ class SqliteAppDatabase implements AppDatabase {
             )
           ''');
         },
+        onUpgrade: (db, oldVersion, newVersion) async {
+          if (oldVersion < 2) {
+            await db.execute('''
+              CREATE TABLE IF NOT EXISTS capture_sessions (
+                id TEXT PRIMARY KEY,
+                patient_id TEXT,
+                created_at TEXT NOT NULL,
+                status TEXT NOT NULL
+              )
+            ''');
+
+            try {
+              await db.execute(
+                "ALTER TABLE patients ADD COLUMN folder_status TEXT NOT NULL DEFAULT 'available'",
+              );
+            } catch (_) {}
+          }
+
+          if (oldVersion < 3) {
+            await _ensureUploadsTableSchema(db);
+          }
+        },
         onOpen: (db) async {
+          // Ensure schema compatibility on existing databases (nullable patient_id / drive_folder_id)
+          await _ensureUploadsTableSchema(db);
+
           // Crash recovery: Any upload that was interrupted in 'uploading'
           // status is reset to 'waiting' so processing will resume cleanly.
+          // Note: 'unassigned' photos are untouched by crash recovery.
           await db.update(
             'uploads',
             {'status': UploadStatus.waiting.name},
@@ -128,6 +205,57 @@ class SqliteAppDatabase implements AppDatabase {
     );
 
     return SqliteAppDatabase(database);
+  }
+
+  /// Migrates uploads table if patient_id has a NOT NULL constraint or session_id is missing.
+  static Future<void> _ensureUploadsTableSchema(Database db) async {
+    final tableInfo = await db.rawQuery("PRAGMA table_info(uploads)");
+    if (tableInfo.isEmpty) return;
+
+    final patientIdCol = tableInfo.firstWhere(
+      (c) => c['name'] == 'patient_id',
+      orElse: () => <String, Object?>{},
+    );
+    final hasSessionId = tableInfo.any((c) => c['name'] == 'session_id');
+
+    final isPatientIdNotNull = patientIdCol['notnull'] == 1;
+    final needsMigration = isPatientIdNotNull || !hasSessionId;
+
+    if (needsMigration) {
+      await db.transaction((txn) async {
+        await txn.execute('ALTER TABLE uploads RENAME TO _uploads_old');
+        await txn.execute('''
+          CREATE TABLE uploads (
+            id TEXT PRIMARY KEY,
+            session_id TEXT,
+            patient_id TEXT,
+            drive_folder_id TEXT,
+            local_path TEXT NOT NULL,
+            file_name TEXT NOT NULL,
+            status TEXT NOT NULL,
+            retry_count INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT,
+            drive_file_id TEXT,
+            created_at TEXT NOT NULL
+          )
+        ''');
+
+        if (hasSessionId) {
+          await txn.execute('''
+            INSERT INTO uploads (id, session_id, patient_id, drive_folder_id, local_path, file_name, status, retry_count, last_error, drive_file_id, created_at)
+            SELECT id, session_id, patient_id, drive_folder_id, local_path, file_name, status, retry_count, last_error, drive_file_id, created_at
+            FROM _uploads_old
+          ''');
+        } else {
+          await txn.execute('''
+            INSERT INTO uploads (id, session_id, patient_id, drive_folder_id, local_path, file_name, status, retry_count, last_error, drive_file_id, created_at)
+            SELECT id, NULL, patient_id, drive_folder_id, local_path, file_name, status, retry_count, last_error, drive_file_id, created_at
+            FROM _uploads_old
+          ''');
+        }
+        await txn.execute('DROP TABLE _uploads_old');
+      });
+    }
   }
 
   // --- Patients Cache Operations ---
@@ -142,6 +270,49 @@ class SqliteAppDatabase implements AppDatabase {
       }
       await batch.commit(noResult: true);
     });
+  }
+
+  @override
+  Future<void> upsertPatients(List<Patient> patients) async {
+    await db.transaction((txn) async {
+      for (final incoming in patients) {
+        final existingRows = await txn.query(
+          'patients',
+          where: 'id = ?',
+          whereArgs: [incoming.id],
+          limit: 1,
+        );
+
+        if (existingRows.isEmpty) {
+          await txn.insert(
+            'patients',
+            incoming.toMap(),
+            conflictAlgorithm: ConflictAlgorithm.replace,
+          );
+        } else {
+          final existing = Patient.fromMap(existingRows.first);
+          final merged = Patient.merge(existing, incoming);
+          await txn.update(
+            'patients',
+            merged.toMap(),
+            where: 'id = ?',
+            whereArgs: [incoming.id],
+          );
+        }
+      }
+    });
+  }
+
+  @override
+  Future<Patient?> getPatient(String id) async {
+    final rows = await db.query(
+      'patients',
+      where: 'id = ?',
+      whereArgs: [id],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    return Patient.fromMap(rows.first);
   }
 
   @override
@@ -167,6 +338,110 @@ class SqliteAppDatabase implements AppDatabase {
       orderBy: 'id ASC',
     );
     return rows.map(Patient.fromMap).toList();
+  }
+
+  // --- Capture Sessions Operations ---
+
+  @override
+  Future<void> insertSession(CaptureSession session) async {
+    await db.insert('capture_sessions', session.toMap());
+  }
+
+  @override
+  Future<CaptureSession?> getSession(String id) async {
+    final rows = await db.query(
+      'capture_sessions',
+      where: 'id = ?',
+      whereArgs: [id],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    final count = Sqflite.firstIntValue(await db.rawQuery(
+      'SELECT COUNT(*) FROM uploads WHERE session_id = ?',
+      [id],
+    ));
+    return CaptureSession.fromMap(rows.first, photoCount: count ?? 0);
+  }
+
+  @override
+  Future<List<CaptureSession>> getUnassignedSessions() async {
+    final rows = await db.rawQuery('''
+      SELECT s.*, COUNT(u.id) as photo_count
+      FROM capture_sessions s
+      LEFT JOIN uploads u ON s.id = u.session_id
+      WHERE s.status = 'unassigned'
+      GROUP BY s.id
+      ORDER BY s.created_at DESC
+    ''');
+    return rows.map(CaptureSession.fromMap).toList();
+  }
+
+  @override
+  Future<int> getUnassignedSessionsCount() async {
+    final count = Sqflite.firstIntValue(await db.rawQuery(
+      "SELECT COUNT(*) FROM capture_sessions WHERE status = 'unassigned'",
+    ));
+    return count ?? 0;
+  }
+
+  @override
+  Future<void> updateSession(CaptureSession session) async {
+    await db.update(
+      'capture_sessions',
+      session.toMap(),
+      where: 'id = ?',
+      whereArgs: [session.id],
+    );
+  }
+
+  @override
+  Future<void> deleteSession(String id) async {
+    await db.delete(
+      'capture_sessions',
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
+  @override
+  Future<List<UploadItem>> getUploadsForSession(String sessionId) async {
+    final rows = await db.query(
+      'uploads',
+      where: 'session_id = ?',
+      whereArgs: [sessionId],
+      orderBy: 'created_at ASC',
+    );
+    return rows.map(UploadItem.fromMap).toList();
+  }
+
+  @override
+  Future<void> assignSessionToPatient({
+    required String sessionId,
+    required String patientId,
+    required String driveFolderId,
+  }) async {
+    await db.transaction((txn) async {
+      await txn.update(
+        'capture_sessions',
+        {
+          'patient_id': patientId,
+          'status': 'assigned',
+        },
+        where: 'id = ?',
+        whereArgs: [sessionId],
+      );
+
+      await txn.update(
+        'uploads',
+        {
+          'patient_id': patientId,
+          'drive_folder_id': driveFolderId,
+          'status': UploadStatus.waiting.name,
+        },
+        where: 'session_id = ?',
+        whereArgs: [sessionId],
+      );
+    });
   }
 
   // --- Upload Queue Operations ---
@@ -253,15 +528,20 @@ class SqliteAppDatabase implements AppDatabase {
 /// Pure Dart in-memory database implementation for testing.
 class InMemoryAppDatabase implements AppDatabase {
   final Map<String, Patient> _patients = {};
+  final Map<String, CaptureSession> _sessions = {};
   final Map<String, UploadItem> _uploads = {};
 
   InMemoryAppDatabase({
     Map<String, Patient>? initialPatients,
+    Map<String, CaptureSession>? initialSessions,
     Map<String, UploadItem>? initialUploads,
     bool performCrashRecovery = true,
   }) {
     if (initialPatients != null) {
       _patients.addAll(initialPatients);
+    }
+    if (initialSessions != null) {
+      _sessions.addAll(initialSessions);
     }
     if (initialUploads != null) {
       _uploads.addAll(initialUploads);
@@ -288,6 +568,23 @@ class InMemoryAppDatabase implements AppDatabase {
   }
 
   @override
+  Future<void> upsertPatients(List<Patient> patients) async {
+    for (final incoming in patients) {
+      final existing = _patients[incoming.id];
+      if (existing == null) {
+        _patients[incoming.id] = incoming;
+      } else {
+        _patients[incoming.id] = Patient.merge(existing, incoming);
+      }
+    }
+  }
+
+  @override
+  Future<Patient?> getPatient(String id) async {
+    return _patients[id];
+  }
+
+  @override
   Future<List<Patient>> getPatients() async {
     final list = _patients.values.toList();
     list.sort((a, b) => a.id.compareTo(b.id));
@@ -308,6 +605,82 @@ class InMemoryAppDatabase implements AppDatabase {
     matches.sort((a, b) => a.id.compareTo(b.id));
     return matches;
   }
+
+  // --- Sessions Operations ---
+
+  @override
+  Future<void> insertSession(CaptureSession session) async {
+    _sessions[session.id] = session;
+  }
+
+  @override
+  Future<CaptureSession?> getSession(String id) async {
+    final session = _sessions[id];
+    if (session == null) return null;
+    final count = _uploads.values.where((u) => u.sessionId == id).length;
+    return session.copyWith(photoCount: count);
+  }
+
+  @override
+  Future<List<CaptureSession>> getUnassignedSessions() async {
+    final list = _sessions.values
+        .where((s) => s.status == 'unassigned')
+        .map((s) {
+          final count = _uploads.values.where((u) => u.sessionId == s.id).length;
+          return s.copyWith(photoCount: count);
+        })
+        .toList();
+    list.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    return list;
+  }
+
+  @override
+  Future<int> getUnassignedSessionsCount() async {
+    return _sessions.values.where((s) => s.status == 'unassigned').length;
+  }
+
+  @override
+  Future<void> updateSession(CaptureSession session) async {
+    _sessions[session.id] = session;
+  }
+
+  @override
+  Future<void> deleteSession(String id) async {
+    _sessions.remove(id);
+  }
+
+  @override
+  Future<List<UploadItem>> getUploadsForSession(String sessionId) async {
+    final list = _uploads.values.where((u) => u.sessionId == sessionId).toList();
+    list.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    return list;
+  }
+
+  @override
+  Future<void> assignSessionToPatient({
+    required String sessionId,
+    required String patientId,
+    required String driveFolderId,
+  }) async {
+    final session = _sessions[sessionId];
+    if (session != null) {
+      _sessions[sessionId] = session.copyWith(
+        patientId: patientId,
+        status: 'assigned',
+      );
+    }
+    for (final entry in _uploads.entries.toList()) {
+      if (entry.value.sessionId == sessionId) {
+        _uploads[entry.key] = entry.value.copyWith(
+          patientId: patientId,
+          driveFolderId: driveFolderId,
+          status: UploadStatus.waiting,
+        );
+      }
+    }
+  }
+
+  // --- Upload Queue Operations ---
 
   @override
   Future<void> insertUpload(UploadItem item) async {
@@ -369,6 +742,7 @@ class InMemoryAppDatabase implements AppDatabase {
   }
 
   Map<String, UploadItem> dumpUploads() => Map.from(_uploads);
+  Map<String, CaptureSession> dumpSessions() => Map.from(_sessions);
   Map<String, Patient> dumpPatients() => Map.from(_patients);
 
   @override

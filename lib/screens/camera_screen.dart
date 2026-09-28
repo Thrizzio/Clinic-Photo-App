@@ -5,14 +5,16 @@ import '../services/upload_queue.dart';
 import '../widgets/upload_status.dart';
 
 class CameraScreen extends StatefulWidget {
-  final Patient patient;
+  final Patient? patient;
+  final String? sessionId;
   final UploadQueueService queueService;
 
   const CameraScreen({
     super.key,
-    required this.patient,
+    this.patient,
+    this.sessionId,
     required this.queueService,
-  });
+  }) : assert(patient != null || sessionId != null, 'Either patient or sessionId must be provided');
 
   @override
   State<CameraScreen> createState() => _CameraScreenState();
@@ -25,6 +27,8 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
   int _sessionPhotoCount = 0;
   FlashMode _flashMode = FlashMode.auto;
   String? _errorMessage;
+
+  bool get _isUnassigned => widget.sessionId != null;
 
   @override
   void initState() {
@@ -58,22 +62,25 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
     try {
       final cameras = await availableCameras();
       if (cameras.isEmpty) {
-        setState(() {
-          _errorMessage = 'No camera found on this device.';
-        });
+        if (mounted) {
+          setState(() {
+            _errorMessage = 'No camera found on this device.';
+          });
+        }
         return;
       }
 
-      // Prefer rear camera
-      final rearCamera = cameras.firstWhere(
-        (cam) => cam.lensDirection == CameraLensDirection.back,
+      // Select back camera
+      final camera = cameras.firstWhere(
+        (c) => c.lensDirection == CameraLensDirection.back,
         orElse: () => cameras.first,
       );
 
       final controller = CameraController(
-        rearCamera,
+        camera,
         ResolutionPreset.high,
         enableAudio: false,
+        imageFormatGroup: ImageFormatGroup.jpeg,
       );
 
       await controller.initialize();
@@ -121,7 +128,18 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
   /// waiting for Google Drive. Upload work must never block the camera UI.
   Future<void> _capturePhoto() async {
     final controller = _controller;
-    if (controller == null || !controller.value.isInitialized || _isTakingPhoto) {
+    debugPrint('CAPTURE: shutter pressed');
+
+    if (controller == null) {
+      debugPrint('CAPTURE BLOCKED: controller is null');
+      return;
+    }
+    if (!controller.value.isInitialized) {
+      debugPrint('CAPTURE BLOCKED: controller is not initialized');
+      return;
+    }
+    if (_isTakingPhoto) {
+      debugPrint('CAPTURE BLOCKED: already capturing photo');
       return;
     }
 
@@ -130,21 +148,42 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
     });
 
     try {
+      debugPrint('CAPTURE: calling controller.takePicture()');
       final xFile = await controller.takePicture();
+      debugPrint('CAPTURE: takePicture returned ${xFile.path}');
 
-      // Immediately pass to persistent queue and increment in-memory session counter
-      await widget.queueService.enqueuePhoto(
-        patient: widget.patient,
-        capturedTempPath: xFile.path,
-      );
+      if (_isUnassigned) {
+        debugPrint('CAPTURE: enqueuing unassigned photo for session ${widget.sessionId}');
+        await widget.queueService.enqueueUnassignedPhoto(
+          sessionId: widget.sessionId!,
+          capturedTempPath: xFile.path,
+        );
+      } else {
+        debugPrint('CAPTURE: enqueuing photo for patient ${widget.patient!.id}');
+        await widget.queueService.enqueuePhoto(
+          patient: widget.patient!,
+          capturedTempPath: xFile.path,
+        );
+      }
+
+      debugPrint('CAPTURE: photo successfully persisted and enqueued');
 
       if (mounted) {
         setState(() {
           _sessionPhotoCount++;
         });
       }
-    } catch (e) {
-      debugPrint('Photo capture error: $e');
+    } catch (e, stackTrace) {
+      debugPrint('CAPTURE ERROR: $e\n$stackTrace');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to save photo: $e'),
+            backgroundColor: Colors.red.shade800,
+            duration: const Duration(seconds: 4),
+          ),
+        );
+      }
     } finally {
       if (mounted) {
         setState(() {
@@ -178,6 +217,9 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
   }
 
   Widget _buildHeader() {
+    final title = _isUnassigned ? 'New / Unassigned Patient' : widget.patient!.name;
+    final subtitle = _isUnassigned ? 'Unassigned Photo Session' : 'ID: ${widget.patient!.id}';
+
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       color: Colors.black87,
@@ -185,7 +227,7 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
         children: [
           IconButton(
             icon: const Icon(Icons.arrow_back, color: Colors.white),
-            onPressed: () => Navigator.of(context).pop(),
+            onPressed: () => Navigator.of(context).pop(_sessionPhotoCount),
           ),
           const SizedBox(width: 8),
           Expanded(
@@ -194,7 +236,7 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text(
-                  widget.patient.name,
+                  title,
                   style: const TextStyle(
                     color: Colors.white,
                     fontSize: 18,
@@ -203,7 +245,7 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
                   overflow: TextOverflow.ellipsis,
                 ),
                 Text(
-                  widget.patient.id,
+                  subtitle,
                   style: TextStyle(
                     color: Colors.white.withValues(alpha: 0.7),
                     fontSize: 13,
@@ -218,18 +260,12 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
               switch (_flashMode) {
                 FlashMode.auto => Icons.flash_auto,
                 FlashMode.always => Icons.flash_on,
-                _ => Icons.flash_off,
+                FlashMode.off => Icons.flash_off,
+                _ => Icons.flash_auto,
               },
               color: Colors.white,
             ),
             onPressed: _toggleFlash,
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text(
-              'Done',
-              style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-            ),
           ),
         ],
       ),
@@ -241,10 +277,22 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
       return Center(
         child: Padding(
           padding: const EdgeInsets.all(24.0),
-          child: Text(
-            _errorMessage!,
-            style: const TextStyle(color: Colors.white70, fontSize: 16),
-            textAlign: TextAlign.center,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.error_outline, color: Colors.redAccent, size: 48),
+              const SizedBox(height: 16),
+              Text(
+                _errorMessage!,
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.white, fontSize: 16),
+              ),
+              const SizedBox(height: 16),
+              ElevatedButton(
+                onPressed: _initializeCamera,
+                child: const Text('Retry Camera'),
+              ),
+            ],
           ),
         ),
       );
@@ -266,57 +314,88 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
 
   Widget _buildBottomControls() {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-      color: Colors.black,
+      color: Colors.black87,
+      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // Counts and Upload Status
+          // Minimal non-intrusive upload status pill
+          UploadStatusPill(queueService: widget.queueService, isDarkBackground: true),
+          const SizedBox(height: 16),
+
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text(
-                'Photos: $_sessionPhotoCount',
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 16,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-              UploadStatusPill(
-                queueService: widget.queueService,
-                isDarkBackground: true,
-              ),
-            ],
-          ),
-          const SizedBox(height: 20),
-
-          // Shutter Button
-          Center(
-            child: GestureDetector(
-              onTap: _isTakingPhoto ? null : _capturePhoto,
-              child: Container(
-                width: 76,
-                height: 76,
+              // Photo Counter Pill
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
                 decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  border: Border.all(color: Colors.white, width: 4),
-                  color: Colors.transparent,
+                  color: Colors.white12,
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(color: Colors.white24, width: 1),
                 ),
-                child: Center(
-                  child: Container(
-                    width: 60,
-                    height: 60,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: _isTakingPhoto ? Colors.grey : Colors.white,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.photo_camera, size: 16, color: Colors.white),
+                    const SizedBox(width: 6),
+                    Text(
+                      '$_sessionPhotoCount taken',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
+              // Tactical High-Responsiveness Shutter Button
+              GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: _capturePhoto,
+                child: Container(
+                  width: 76,
+                  height: 76,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    border: Border.all(color: Colors.white, width: 4),
+                  ),
+                  child: Center(
+                    child: Container(
+                      width: 60,
+                      height: 60,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: _isTakingPhoto ? Colors.grey : Colors.white,
+                      ),
                     ),
                   ),
                 ),
               ),
-            ),
+
+              // Done Button
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(_sessionPhotoCount),
+                style: TextButton.styleFrom(
+                  backgroundColor: Colors.white12,
+                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                ),
+                child: const Text(
+                  'Done',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 15,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ],
           ),
-          const SizedBox(height: 8),
         ],
       ),
     );
