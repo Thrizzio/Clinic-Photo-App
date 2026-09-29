@@ -6,6 +6,7 @@ class ConfigService {
   static const String _keySpreadsheetId = 'spreadsheetId';
   static const String _keySpreadsheetUrl = 'spreadsheetUrl';
   static const String _keySheetTabName = 'sheetTabName';
+  static const String _keyParentDriveFolderId = 'parentDriveFolderId';
   static const String _keyLastPatientSync = 'lastPatientSync';
   static const String _keyLastSyncedRow = 'lastSyncedRow';
   static const String _keyLastFullSync = 'lastFullSync';
@@ -25,6 +26,7 @@ class ConfigService {
       spreadsheetId: _prefs.getString(_keySpreadsheetId) ?? '',
       spreadsheetUrl: _prefs.getString(_keySpreadsheetUrl) ?? '',
       sheetTabName: _prefs.getString(_keySheetTabName) ?? '',
+      parentDriveFolderId: _prefs.getString(_keyParentDriveFolderId) ?? '',
       lastPatientSync: _prefs.getString(_keyLastPatientSync),
       lastSyncedRow: _prefs.getInt(_keyLastSyncedRow) ?? 1,
       lastFullSync: _prefs.getString(_keyLastFullSync),
@@ -36,6 +38,7 @@ class ConfigService {
     await _prefs.setString(_keySpreadsheetId, config.spreadsheetId);
     await _prefs.setString(_keySpreadsheetUrl, config.spreadsheetUrl);
     await _prefs.setString(_keySheetTabName, config.sheetTabName);
+    await _prefs.setString(_keyParentDriveFolderId, config.parentDriveFolderId);
     await _prefs.setInt(_keyLastSyncedRow, config.lastSyncedRow);
     if (config.lastPatientSync != null) {
       await _prefs.setString(_keyLastPatientSync, config.lastPatientSync!);
@@ -61,6 +64,7 @@ class ConfigService {
     await _prefs.remove(_keySpreadsheetId);
     await _prefs.remove(_keySpreadsheetUrl);
     await _prefs.remove(_keySheetTabName);
+    await _prefs.remove(_keyParentDriveFolderId);
     await _prefs.remove(_keyLastPatientSync);
     await _prefs.remove(_keyLastSyncedRow);
     await _prefs.remove(_keyLastFullSync);

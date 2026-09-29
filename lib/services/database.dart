@@ -46,12 +46,16 @@ abstract class AppDatabase {
   /// Gets all uploads belonging to a given session.
   Future<List<UploadItem>> getUploadsForSession(String sessionId);
 
+  /// Updates a patient's cached record.
+  Future<void> updatePatient(Patient patient);
+
   /// Atomically assigns an unassigned session and all its photos to a patient,
   /// transitioning all photos to waiting status for upload.
   Future<void> assignSessionToPatient({
     required String sessionId,
     required String patientId,
     required String driveFolderId,
+    Map<String, ({String fileName, String localPath})>? renamedPhotos,
   });
 
   // --- Upload Queue Operations ---
@@ -64,6 +68,9 @@ abstract class AppDatabase {
 
   /// Deletes an upload item once Drive upload is confirmed successful.
   Future<void> deleteUpload(String id);
+
+  /// Deletes multiple upload items in a single transaction.
+  Future<void> deleteUploads(List<String> ids);
 
   /// Gets the next waiting upload item to process.
   Future<UploadItem?> getNextPendingUpload();
@@ -113,7 +120,7 @@ abstract class AppDatabase {
 /// SQLite-backed production database implementation for Android.
 class SqliteAppDatabase implements AppDatabase {
   static const String _dbName = 'clinic_photos.db';
-  static const int _dbVersion = 3;
+  static const int _dbVersion = 4;
 
   final Database db;
 
@@ -136,7 +143,8 @@ class SqliteAppDatabase implements AppDatabase {
               id TEXT PRIMARY KEY,
               name TEXT NOT NULL,
               drive_folder_id TEXT,
-              folder_status TEXT NOT NULL
+              folder_status TEXT NOT NULL,
+              updated_at TEXT
             )
           ''');
 
@@ -161,9 +169,18 @@ class SqliteAppDatabase implements AppDatabase {
               retry_count INTEGER NOT NULL DEFAULT 0,
               last_error TEXT,
               drive_file_id TEXT,
-              created_at TEXT NOT NULL
+              created_at TEXT NOT NULL,
+              captured_at TEXT NOT NULL,
+              sequence_number INTEGER NOT NULL DEFAULT 1
             )
           ''');
+
+          await db.execute(
+            'CREATE INDEX IF NOT EXISTS idx_uploads_patient_id ON uploads(patient_id)',
+          );
+          await db.execute(
+            'CREATE INDEX IF NOT EXISTS idx_uploads_session_id ON uploads(session_id)',
+          );
         },
         onUpgrade: (db, oldVersion, newVersion) async {
           if (oldVersion < 2) {
@@ -185,6 +202,22 @@ class SqliteAppDatabase implements AppDatabase {
 
           if (oldVersion < 3) {
             await _ensureUploadsTableSchema(db);
+          }
+
+          if (oldVersion < 4) {
+            try {
+              await db.execute("ALTER TABLE patients ADD COLUMN updated_at TEXT");
+            } catch (_) {}
+            try {
+              await db.execute("ALTER TABLE uploads ADD COLUMN captured_at TEXT");
+            } catch (_) {}
+            try {
+              await db.execute("ALTER TABLE uploads ADD COLUMN sequence_number INTEGER NOT NULL DEFAULT 1");
+            } catch (_) {}
+            try {
+              await db.execute("CREATE INDEX IF NOT EXISTS idx_uploads_patient_id ON uploads(patient_id)");
+              await db.execute("CREATE INDEX IF NOT EXISTS idx_uploads_session_id ON uploads(session_id)");
+            } catch (_) {}
           }
         },
         onOpen: (db) async {
@@ -415,10 +448,21 @@ class SqliteAppDatabase implements AppDatabase {
   }
 
   @override
+  Future<void> updatePatient(Patient patient) async {
+    await db.update(
+      'patients',
+      patient.toMap(),
+      where: 'id = ?',
+      whereArgs: [patient.id],
+    );
+  }
+
+  @override
   Future<void> assignSessionToPatient({
     required String sessionId,
     required String patientId,
     required String driveFolderId,
+    Map<String, ({String fileName, String localPath})>? renamedPhotos,
   }) async {
     await db.transaction((txn) async {
       await txn.update(
@@ -431,16 +475,33 @@ class SqliteAppDatabase implements AppDatabase {
         whereArgs: [sessionId],
       );
 
-      await txn.update(
-        'uploads',
-        {
-          'patient_id': patientId,
-          'drive_folder_id': driveFolderId,
-          'status': UploadStatus.waiting.name,
-        },
-        where: 'session_id = ?',
-        whereArgs: [sessionId],
-      );
+      if (renamedPhotos != null && renamedPhotos.isNotEmpty) {
+        for (final entry in renamedPhotos.entries) {
+          await txn.update(
+            'uploads',
+            {
+              'patient_id': patientId,
+              'drive_folder_id': driveFolderId,
+              'file_name': entry.value.fileName,
+              'local_path': entry.value.localPath,
+              'status': UploadStatus.waiting.name,
+            },
+            where: 'id = ? AND session_id = ?',
+            whereArgs: [entry.key, sessionId],
+          );
+        }
+      } else {
+        await txn.update(
+          'uploads',
+          {
+            'patient_id': patientId,
+            'drive_folder_id': driveFolderId,
+            'status': UploadStatus.waiting.name,
+          },
+          where: 'session_id = ?',
+          whereArgs: [sessionId],
+        );
+      }
     });
   }
 
@@ -468,6 +529,18 @@ class SqliteAppDatabase implements AppDatabase {
       where: 'id = ?',
       whereArgs: [id],
     );
+  }
+
+  @override
+  Future<void> deleteUploads(List<String> ids) async {
+    if (ids.isEmpty) return;
+    await db.transaction((txn) async {
+      final batch = txn.batch();
+      for (final id in ids) {
+        batch.delete('uploads', where: 'id = ?', whereArgs: [id]);
+      }
+      await batch.commit(noResult: true);
+    });
   }
 
   @override
@@ -657,10 +730,16 @@ class InMemoryAppDatabase implements AppDatabase {
   }
 
   @override
+  Future<void> updatePatient(Patient patient) async {
+    _patients[patient.id] = patient;
+  }
+
+  @override
   Future<void> assignSessionToPatient({
     required String sessionId,
     required String patientId,
     required String driveFolderId,
+    Map<String, ({String fileName, String localPath})>? renamedPhotos,
   }) async {
     final session = _sessions[sessionId];
     if (session != null) {
@@ -671,9 +750,12 @@ class InMemoryAppDatabase implements AppDatabase {
     }
     for (final entry in _uploads.entries.toList()) {
       if (entry.value.sessionId == sessionId) {
+        final rename = renamedPhotos?[entry.key];
         _uploads[entry.key] = entry.value.copyWith(
           patientId: patientId,
           driveFolderId: driveFolderId,
+          fileName: rename?.fileName,
+          localPath: rename?.localPath,
           status: UploadStatus.waiting,
         );
       }
@@ -695,6 +777,13 @@ class InMemoryAppDatabase implements AppDatabase {
   @override
   Future<void> deleteUpload(String id) async {
     _uploads.remove(id);
+  }
+
+  @override
+  Future<void> deleteUploads(List<String> ids) async {
+    for (final id in ids) {
+      _uploads.remove(id);
+    }
   }
 
   @override

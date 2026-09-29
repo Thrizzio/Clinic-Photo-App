@@ -1,11 +1,13 @@
 enum FolderStatus {
   available,
   missing,
+  creating,
   conflict;
 
   static FolderStatus fromString(String value) {
     return switch (value.toLowerCase()) {
       'available' => FolderStatus.available,
+      'creating' => FolderStatus.creating,
       'conflict' => FolderStatus.conflict,
       _ => FolderStatus.missing,
     };
@@ -17,13 +19,18 @@ class Patient {
   final String name;
   final String? driveFolderId;
   final FolderStatus folderStatus;
+  final DateTime? updatedAt;
 
   const Patient({
     required this.id,
     required this.name,
     this.driveFolderId,
     this.folderStatus = FolderStatus.available,
+    this.updatedAt,
   });
+
+  /// Alias for id matching V3 specification.
+  String get patientId => id;
 
   /// True if photos can be captured and uploaded for this patient.
   bool get isUploadable =>
@@ -67,6 +74,7 @@ class Patient {
       name: incoming.name.isNotEmpty ? incoming.name : existing.name,
       driveFolderId: mergedFolderId,
       folderStatus: mergedStatus,
+      updatedAt: DateTime.now(),
     );
   }
 
@@ -91,6 +99,7 @@ class Patient {
         name: rawName,
         driveFolderId: null,
         folderStatus: FolderStatus.missing,
+        updatedAt: DateTime.now(),
       );
     }
 
@@ -99,6 +108,7 @@ class Patient {
       name: rawName,
       driveFolderId: rawFolder,
       folderStatus: FolderStatus.available,
+      updatedAt: DateTime.now(),
     );
   }
 
@@ -109,18 +119,22 @@ class Patient {
       'name': name,
       'drive_folder_id': driveFolderId,
       'folder_status': folderStatus.name,
+      'updated_at': (updatedAt ?? DateTime.now()).toIso8601String(),
     };
   }
 
   /// Create from SQLite map
   factory Patient.fromMap(Map<String, dynamic> map) {
     return Patient(
-      id: map['id'] as String,
+      id: (map['patient_id'] ?? map['id']) as String,
       name: map['name'] as String,
       driveFolderId: map['drive_folder_id'] as String?,
       folderStatus: FolderStatus.fromString(
         map['folder_status'] as String? ?? 'available',
       ),
+      updatedAt: map['updated_at'] != null
+          ? DateTime.tryParse(map['updated_at'] as String)
+          : null,
     );
   }
 
@@ -129,12 +143,14 @@ class Patient {
     String? name,
     String? driveFolderId,
     FolderStatus? folderStatus,
+    DateTime? updatedAt,
   }) {
     return Patient(
       id: id ?? this.id,
       name: name ?? this.name,
       driveFolderId: driveFolderId ?? this.driveFolderId,
       folderStatus: folderStatus ?? this.folderStatus,
+      updatedAt: updatedAt ?? this.updatedAt,
     );
   }
 

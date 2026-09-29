@@ -2,6 +2,7 @@ class ClinicConfig {
   final String spreadsheetId;
   final String spreadsheetUrl;
   final String sheetTabName;
+  final String parentDriveFolderId;
   final bool hasCompletedSetup;
   final String? lastPatientSync;
   final int lastSyncedRow;
@@ -11,6 +12,7 @@ class ClinicConfig {
     required this.spreadsheetId,
     required this.spreadsheetUrl,
     required this.sheetTabName,
+    this.parentDriveFolderId = '',
     this.hasCompletedSetup = false,
     this.lastPatientSync,
     this.lastSyncedRow = 1,
@@ -21,6 +23,7 @@ class ClinicConfig {
     String? spreadsheetId,
     String? spreadsheetUrl,
     String? sheetTabName,
+    String? parentDriveFolderId,
     bool? hasCompletedSetup,
     String? lastPatientSync,
     int? lastSyncedRow,
@@ -30,6 +33,7 @@ class ClinicConfig {
       spreadsheetId: spreadsheetId ?? this.spreadsheetId,
       spreadsheetUrl: spreadsheetUrl ?? this.spreadsheetUrl,
       sheetTabName: sheetTabName ?? this.sheetTabName,
+      parentDriveFolderId: parentDriveFolderId ?? this.parentDriveFolderId,
       hasCompletedSetup: hasCompletedSetup ?? this.hasCompletedSetup,
       lastPatientSync: lastPatientSync ?? this.lastPatientSync,
       lastSyncedRow: lastSyncedRow ?? this.lastSyncedRow,
@@ -39,5 +43,5 @@ class ClinicConfig {
 
   @override
   String toString() =>
-      'ClinicConfig(sheetId: $spreadsheetId, tab: $sheetTabName, setup: $hasCompletedSetup, lastSyncedRow: $lastSyncedRow)';
+      'ClinicConfig(sheetId: $spreadsheetId, tab: $sheetTabName, parentFolder: $parentDriveFolderId, setup: $hasCompletedSetup, lastSyncedRow: $lastSyncedRow)';
 }
