@@ -15,6 +15,7 @@ class SettingsScreen extends StatefulWidget {
   final SheetsService sheetsService;
   final AppDatabase database;
   final UploadQueueService queueService;
+  final DriveService? driveService;
 
   const SettingsScreen({
     super.key,
@@ -23,6 +24,7 @@ class SettingsScreen extends StatefulWidget {
     required this.sheetsService,
     required this.database,
     required this.queueService,
+    this.driveService,
   });
 
   @override
@@ -111,6 +113,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           sheetsService: widget.sheetsService,
           database: widget.database,
           queueService: widget.queueService,
+          driveService: widget.driveService,
           isReconfiguration: true,
         ),
       ),
@@ -174,6 +177,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
             contentPadding: EdgeInsets.zero,
             title: const Text('Sheet Tab', style: TextStyle(fontSize: 13, color: Colors.black54)),
             subtitle: Text(_config.sheetTabName, style: const TextStyle(fontWeight: FontWeight.w500)),
+          ),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('Parent Drive Folder', style: TextStyle(fontSize: 13, color: Colors.black54)),
+            subtitle: Text(
+              _config.parentDriveFolderId.isNotEmpty
+                  ? _config.parentDriveFolderId
+                  : 'Not configured',
+              style: const TextStyle(fontWeight: FontWeight.w500),
+            ),
           ),
           ListTile(
             contentPadding: EdgeInsets.zero,

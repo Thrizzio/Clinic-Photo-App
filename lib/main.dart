@@ -88,6 +88,7 @@ class ClinicPhotosApp extends StatelessWidget {
               sheetsService: sheetsService,
               database: database,
               queueService: queueService,
+              driveService: driveService,
             )
           : WelcomeScreen(
               authService: authService,
@@ -95,6 +96,7 @@ class ClinicPhotosApp extends StatelessWidget {
               sheetsService: sheetsService,
               database: database,
               queueService: queueService,
+              driveService: driveService,
             ),
     );
   }

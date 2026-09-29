@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../services/config_service.dart';
 import '../services/database.dart';
+import '../services/drive.dart';
 import '../services/google_auth.dart';
 import '../services/sheets.dart';
 import '../services/upload_queue.dart';
@@ -13,6 +14,7 @@ class WelcomeScreen extends StatefulWidget {
   final SheetsService sheetsService;
   final AppDatabase database;
   final UploadQueueService queueService;
+  final DriveService? driveService;
 
   const WelcomeScreen({
     super.key,
@@ -21,6 +23,7 @@ class WelcomeScreen extends StatefulWidget {
     required this.sheetsService,
     required this.database,
     required this.queueService,
+    this.driveService,
   });
 
   @override
@@ -52,6 +55,7 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
       if (!mounted) return;
 
       final config = widget.configService.loadConfig();
+      final driveService = widget.driveService ?? DriveService();
       if (config.hasCompletedSetup) {
         Navigator.of(context).pushReplacement(
           MaterialPageRoute(
@@ -61,6 +65,7 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
               sheetsService: widget.sheetsService,
               database: widget.database,
               queueService: widget.queueService,
+              driveService: driveService,
             ),
           ),
         );
@@ -73,6 +78,7 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
               sheetsService: widget.sheetsService,
               database: widget.database,
               queueService: widget.queueService,
+              driveService: driveService,
             ),
           ),
         );

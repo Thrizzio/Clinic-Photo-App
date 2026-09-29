@@ -3,6 +3,7 @@ import '../models/clinic_config.dart';
 import '../models/patient.dart';
 import '../services/config_service.dart';
 import '../services/database.dart';
+import '../services/drive.dart';
 import '../services/google_auth.dart';
 import '../services/sheets.dart';
 import '../services/upload_queue.dart';
@@ -14,6 +15,7 @@ class ClinicSetupScreen extends StatefulWidget {
   final SheetsService sheetsService;
   final AppDatabase database;
   final UploadQueueService queueService;
+  final DriveService? driveService;
   final bool isReconfiguration;
 
   const ClinicSetupScreen({
@@ -23,6 +25,7 @@ class ClinicSetupScreen extends StatefulWidget {
     required this.sheetsService,
     required this.database,
     required this.queueService,
+    this.driveService,
     this.isReconfiguration = false,
   });
 
@@ -30,11 +33,13 @@ class ClinicSetupScreen extends StatefulWidget {
   State<ClinicSetupScreen> createState() => _ClinicSetupScreenState();
 }
 
-enum _SetupStep { enterUrl, selectTab, validateSummary }
+enum _SetupStep { enterUrl, selectTab, configureDriveFolder, validateSummary }
 
 class _ClinicSetupScreenState extends State<ClinicSetupScreen> {
   _SetupStep _currentStep = _SetupStep.enterUrl;
   final _urlController = TextEditingController();
+  final _driveFolderController = TextEditingController();
+  late final DriveService _driveService = widget.driveService ?? DriveService();
 
   bool _isLoading = false;
   String? _errorMessage;
@@ -42,6 +47,7 @@ class _ClinicSetupScreenState extends State<ClinicSetupScreen> {
   String? _extractedSpreadsheetId;
   List<String> _availableTabs = [];
   String? _selectedTab;
+  String? _parentDriveFolderId;
   List<Patient> _validatedPatients = [];
   int _totalRowCount = 0;
 
@@ -51,12 +57,17 @@ class _ClinicSetupScreenState extends State<ClinicSetupScreen> {
     if (widget.isReconfiguration) {
       final config = widget.configService.loadConfig();
       _urlController.text = config.spreadsheetUrl;
+      _driveFolderController.text = config.parentDriveFolderId;
+      if (config.parentDriveFolderId.isNotEmpty) {
+        _parentDriveFolderId = config.parentDriveFolderId;
+      }
     }
   }
 
   @override
   void dispose() {
     _urlController.dispose();
+    _driveFolderController.dispose();
     super.dispose();
   }
 
@@ -136,7 +147,7 @@ class _ClinicSetupScreenState extends State<ClinicSetupScreen> {
       setState(() {
         _validatedPatients = result.patients;
         _totalRowCount = result.totalRows;
-        _currentStep = _SetupStep.validateSummary;
+        _currentStep = _SetupStep.configureDriveFolder;
         _isLoading = false;
       });
     } on MissingColumnException catch (e) {
@@ -152,10 +163,57 @@ class _ClinicSetupScreenState extends State<ClinicSetupScreen> {
     }
   }
 
+  Future<void> _handleDriveFolderSubmitted() async {
+    final input = _driveFolderController.text.trim();
+    final folderId = SheetsService.extractDriveFolderId(input);
+
+    if (folderId == null) {
+      setState(() {
+        _errorMessage = 'Please enter a valid Google Drive folder link or folder ID.';
+      });
+      return;
+    }
+
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
+
+    try {
+      final client = await widget.authService.getAuthenticatedClient();
+      if (client == null) {
+        throw Exception('Google authorization expired. Please sign in again.');
+      }
+
+      final hasAccess = await _driveService.verifyFolderAccess(
+        client: client,
+        folderId: folderId,
+      );
+
+      if (!hasAccess) {
+        throw Exception(
+          'Cannot access this Drive folder. Please verify the folder exists and your account has permission to view and create files in it.',
+        );
+      }
+
+      setState(() {
+        _parentDriveFolderId = folderId;
+        _currentStep = _SetupStep.validateSummary;
+        _isLoading = false;
+      });
+    } catch (e) {
+      setState(() {
+        _isLoading = false;
+        _errorMessage = 'Drive folder verification failed: $e';
+      });
+    }
+  }
+
   Future<void> _handleFinishSetup() async {
     final spreadsheetId = _extractedSpreadsheetId;
     final tab = _selectedTab;
-    if (spreadsheetId == null || tab == null) return;
+    final parentFolderId = _parentDriveFolderId;
+    if (spreadsheetId == null || tab == null || parentFolderId == null) return;
 
     setState(() {
       _isLoading = true;
@@ -172,6 +230,7 @@ class _ClinicSetupScreenState extends State<ClinicSetupScreen> {
         spreadsheetId: spreadsheetId,
         spreadsheetUrl: _urlController.text.trim(),
         sheetTabName: tab,
+        parentDriveFolderId: parentFolderId,
         hasCompletedSetup: true,
         lastPatientSync: now.toIso8601String(),
         lastSyncedRow: _totalRowCount,
@@ -222,6 +281,7 @@ class _ClinicSetupScreenState extends State<ClinicSetupScreen> {
           child: switch (_currentStep) {
             _SetupStep.enterUrl => _buildEnterUrlStep(),
             _SetupStep.selectTab => _buildSelectTabStep(),
+            _SetupStep.configureDriveFolder => _buildConfigureDriveFolderStep(),
             _SetupStep.validateSummary => _buildValidateSummaryStep(),
           },
         ),
@@ -342,6 +402,66 @@ class _ClinicSetupScreenState extends State<ClinicSetupScreen> {
     );
   }
 
+  Widget _buildConfigureDriveFolderStep() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const Text(
+          'Parent Drive Folder',
+          style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 8),
+        const Text(
+          'Paste the Google Drive folder link where clinical photo folders will be organized.\n\nThe app will create a subfolder for each patient:\n"<Patient ID> - <Patient Name>"',
+          style: TextStyle(color: Colors.black54, fontSize: 14),
+        ),
+        const SizedBox(height: 24),
+        TextField(
+          controller: _driveFolderController,
+          decoration: const InputDecoration(
+            border: OutlineInputBorder(),
+            hintText: 'https://drive.google.com/drive/folders/...',
+            labelText: 'Google Drive Folder Link or ID',
+            prefixIcon: Icon(Icons.folder_shared_outlined),
+          ),
+          keyboardType: TextInputType.url,
+          autocorrect: false,
+        ),
+        const SizedBox(height: 16),
+        if (_errorMessage != null) _buildErrorBanner(_errorMessage!),
+        const Spacer(),
+        Row(
+          children: [
+            Expanded(
+              child: OutlinedButton(
+                onPressed: () {
+                  setState(() {
+                    _currentStep = _SetupStep.selectTab;
+                    _errorMessage = null;
+                  });
+                },
+                child: const Text('Back'),
+              ),
+            ),
+            const SizedBox(width: 16),
+            Expanded(
+              child: FilledButton(
+                onPressed: _isLoading ? null : _handleDriveFolderSubmitted,
+                child: _isLoading
+                    ? const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                      )
+                    : const Text('Continue'),
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
   Widget _buildValidateSummaryStep() {
     final availableCount =
         _validatedPatients.where((p) => p.folderStatus == FolderStatus.available).length;
@@ -354,7 +474,7 @@ class _ClinicSetupScreenState extends State<ClinicSetupScreen> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         const Text(
-          'Patient Database Ready',
+          'Clinic Setup Summary',
           style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
         ),
         const SizedBox(height: 16),
@@ -368,35 +488,63 @@ class _ClinicSetupScreenState extends State<ClinicSetupScreen> {
               children: [
                 Row(
                   children: [
-                    const Icon(Icons.people, color: Colors.blue, size: 20),
+                    const Icon(Icons.table_chart_outlined, color: Colors.indigo, size: 20),
                     const SizedBox(width: 8),
-                    Text(
-                      '${_validatedPatients.length} unique patients',
-                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                    Expanded(
+                      child: Text(
+                        'Sheet: $_selectedTab',
+                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+                        overflow: TextOverflow.ellipsis,
+                      ),
                     ),
                   ],
                 ),
                 const SizedBox(height: 8),
                 Row(
                   children: [
-                    const Icon(Icons.check_circle, color: Colors.green, size: 20),
+                    const Icon(Icons.people, color: Colors.blue, size: 20),
                     const SizedBox(width: 8),
                     Text(
-                      '$availableCount Drive folders verified',
+                      '${_validatedPatients.length} unique patients ($_totalRowCount rows)',
                       style: const TextStyle(fontSize: 14),
                     ),
                   ],
                 ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    const Icon(Icons.folder, color: Colors.teal, size: 20),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Parent Drive Folder: ${_parentDriveFolderId ?? ""}',
+                        style: const TextStyle(fontSize: 13),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+                ),
+                const Divider(height: 24),
+                Row(
+                  children: [
+                    const Icon(Icons.check_circle, color: Colors.green, size: 18),
+                    const SizedBox(width: 8),
+                    Text(
+                      '$availableCount existing folders linked',
+                      style: const TextStyle(fontSize: 13),
+                    ),
+                  ],
+                ),
                 if (missingCount > 0) ...[
-                  const SizedBox(height: 12),
+                  const SizedBox(height: 8),
                   Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Icon(Icons.warning_amber_rounded, color: Colors.amber, size: 20),
+                      const Icon(Icons.info_outline, color: Colors.blueGrey, size: 18),
                       const SizedBox(width: 8),
                       Expanded(
                         child: Text(
-                          '$missingCount patients missing Drive folder in Visits (capture blocked)',
+                          '$missingCount unlinked patients: folders will be created automatically in your parent Drive folder upon photo capture.',
                           style: const TextStyle(color: Colors.black87, fontSize: 13),
                         ),
                       ),
@@ -404,11 +552,11 @@ class _ClinicSetupScreenState extends State<ClinicSetupScreen> {
                   ),
                 ],
                 if (conflictCount > 0) ...[
-                  const SizedBox(height: 12),
+                  const SizedBox(height: 8),
                   Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Icon(Icons.error_outline, color: Colors.orange, size: 20),
+                      const Icon(Icons.warning_amber_rounded, color: Colors.orange, size: 18),
                       const SizedBox(width: 8),
                       Expanded(
                         child: Text(
@@ -426,18 +574,36 @@ class _ClinicSetupScreenState extends State<ClinicSetupScreen> {
         const SizedBox(height: 16),
         if (_errorMessage != null) _buildErrorBanner(_errorMessage!),
         const Spacer(),
-        SizedBox(
-          height: 50,
-          child: FilledButton(
-            onPressed: _isLoading ? null : _handleFinishSetup,
-            child: _isLoading
-                ? const SizedBox(
-                    width: 24,
-                    height: 24,
-                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
-                  )
-                : const Text('Save & Start', style: TextStyle(fontSize: 16)),
-          ),
+        Row(
+          children: [
+            Expanded(
+              child: OutlinedButton(
+                onPressed: () {
+                  setState(() {
+                    _currentStep = _SetupStep.configureDriveFolder;
+                    _errorMessage = null;
+                  });
+                },
+                child: const Text('Back'),
+              ),
+            ),
+            const SizedBox(width: 16),
+            Expanded(
+              child: FilledButton(
+                onPressed: _isLoading ? null : _handleFinishSetup,
+                child: _isLoading
+                    ? const SizedBox(
+                        width: 24,
+                        height: 24,
+                        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                      )
+                    : Text(
+                        widget.isReconfiguration ? 'Update Configuration' : 'Save & Start',
+                        style: const TextStyle(fontSize: 16),
+                      ),
+              ),
+            ),
+          ],
         ),
       ],
     );
