@@ -5,6 +5,7 @@ import '../services/config_service.dart';
 import '../services/database.dart';
 import '../services/drive.dart';
 import '../services/google_auth.dart';
+import '../services/patient_folder_service.dart';
 import '../services/sheets.dart';
 import '../services/upload_queue.dart';
 import '../widgets/patient_tile.dart';
@@ -43,6 +44,13 @@ class _PatientsScreenState extends State<PatientsScreen> {
   bool _isSyncing = false;
   String? _syncStatusMessage;
   bool _isOffline = false;
+  late final PatientFolderService _patientFolderService = PatientFolderService(
+    driveService: widget.driveService ?? DriveService(),
+    sheetsService: widget.sheetsService,
+    authService: widget.authService,
+    configService: widget.configService,
+    database: widget.database,
+  );
 
   @override
   void initState() {
@@ -252,6 +260,7 @@ class _PatientsScreenState extends State<PatientsScreen> {
         builder: (_) => UnassignedPhotosScreen(
           database: widget.database,
           queueService: widget.queueService,
+          folderService: _patientFolderService,
         ),
       ),
     );

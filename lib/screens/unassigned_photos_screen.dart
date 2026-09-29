@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../models/capture_session.dart';
 import '../services/database.dart';
+import '../services/patient_folder_service.dart';
 import '../services/upload_queue.dart';
 import '../widgets/patient_assignment_sheet.dart';
 import '../widgets/unassigned_session_tile.dart';
@@ -9,11 +10,13 @@ import 'session_detail_screen.dart';
 class UnassignedPhotosScreen extends StatefulWidget {
   final AppDatabase database;
   final UploadQueueService queueService;
+  final PatientFolderService? folderService;
 
   const UnassignedPhotosScreen({
     super.key,
     required this.database,
     required this.queueService,
+    this.folderService,
   });
 
   @override
@@ -47,6 +50,7 @@ class _UnassignedPhotosScreenState extends State<UnassignedPhotosScreen> {
           session: session,
           database: widget.database,
           queueService: widget.queueService,
+          folderService: widget.folderService,
         ),
       ),
     );
@@ -62,6 +66,7 @@ class _UnassignedPhotosScreenState extends State<UnassignedPhotosScreen> {
       sessionId: session.id,
       database: widget.database,
       queueService: widget.queueService,
+      folderService: widget.folderService,
     );
 
     if (assigned == true) {

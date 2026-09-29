@@ -25,6 +25,7 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
   bool _isCameraInitialized = false;
   bool _isTakingPhoto = false;
   int _sessionPhotoCount = 0;
+  int _sequenceNumber = 0;
   FlashMode _flashMode = FlashMode.auto;
   String? _errorMessage;
 
@@ -152,17 +153,25 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
       final xFile = await controller.takePicture();
       debugPrint('CAPTURE: takePicture returned ${xFile.path}');
 
+      _sequenceNumber++;
+      final capturedAt = DateTime.now();
+
       if (_isUnassigned) {
         debugPrint('CAPTURE: enqueuing unassigned photo for session ${widget.sessionId}');
         await widget.queueService.enqueueUnassignedPhoto(
           sessionId: widget.sessionId!,
           capturedTempPath: xFile.path,
+          capturedAt: capturedAt,
+          sequenceNumber: _sequenceNumber,
         );
       } else {
         debugPrint('CAPTURE: enqueuing photo for patient ${widget.patient!.id}');
         await widget.queueService.enqueuePhoto(
           patient: widget.patient!,
           capturedTempPath: xFile.path,
+          sessionId: widget.sessionId,
+          capturedAt: capturedAt,
+          sequenceNumber: _sequenceNumber,
         );
       }
 

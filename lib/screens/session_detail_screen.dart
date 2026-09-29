@@ -4,19 +4,23 @@ import 'package:intl/intl.dart';
 import '../models/capture_session.dart';
 import '../models/upload_item.dart';
 import '../services/database.dart';
+import '../services/patient_folder_service.dart';
 import '../services/upload_queue.dart';
 import '../widgets/patient_assignment_sheet.dart';
+import '../widgets/selection_thumbnail.dart';
 
 class SessionDetailScreen extends StatefulWidget {
   final CaptureSession session;
   final AppDatabase database;
   final UploadQueueService queueService;
+  final PatientFolderService? folderService;
 
   const SessionDetailScreen({
     super.key,
     required this.session,
     required this.database,
     required this.queueService,
+    this.folderService,
   });
 
   @override
@@ -26,6 +30,8 @@ class SessionDetailScreen extends StatefulWidget {
 class _SessionDetailScreenState extends State<SessionDetailScreen> {
   List<UploadItem> _photos = [];
   bool _isLoading = true;
+  bool _isSelectionMode = false;
+  final Set<String> _selectedPhotoIds = {};
 
   @override
   void initState() {
@@ -43,17 +49,156 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
     }
   }
 
+  void _toggleSelection(String photoId) {
+    setState(() {
+      if (_selectedPhotoIds.contains(photoId)) {
+        _selectedPhotoIds.remove(photoId);
+        if (_selectedPhotoIds.isEmpty) {
+          _isSelectionMode = false;
+        }
+      } else {
+        _selectedPhotoIds.add(photoId);
+      }
+    });
+  }
+
+  void _toggleSelectAll() {
+    setState(() {
+      if (_selectedPhotoIds.length == _photos.length) {
+        _selectedPhotoIds.clear();
+        _isSelectionMode = false;
+      } else {
+        _selectedPhotoIds.addAll(_photos.map((p) => p.id));
+      }
+    });
+  }
+
+  Future<void> _confirmDeleteSelected() async {
+    final count = _selectedPhotoIds.length;
+    if (count == 0) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogCtx) => AlertDialog(
+        title: Text('Delete $count ${count == 1 ? 'Photo' : 'Photos'}?'),
+        content: Text(
+          'Are you sure you want to delete $count selected ${count == 1 ? 'photo' : 'photos'}? '
+          'This action permanently removes the files from device storage.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogCtx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.red.shade700),
+            onPressed: () => Navigator.of(dialogCtx).pop(true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    setState(() {
+      _isLoading = true;
+    });
+
+    final idsToDelete = _selectedPhotoIds.toList();
+    final photosToDelete = _photos.where((p) => idsToDelete.contains(p.id)).toList();
+
+    // 1. Physically delete local files
+    for (final photo in photosToDelete) {
+      final file = File(photo.localPath);
+      if (file.existsSync()) {
+        try {
+          file.deleteSync();
+        } catch (e) {
+          debugPrint('Error deleting local photo file: $e');
+        }
+      }
+    }
+
+    // 2. Delete database records
+    await widget.database.deleteUploads(idsToDelete);
+
+    // 3. Reload photos
+    final remaining = await widget.database.getUploadsForSession(widget.session.id);
+
+    if (remaining.isEmpty) {
+      // 4. Session is now empty: remove session from database
+      await widget.database.deleteSession(widget.session.id);
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('All photos deleted. Session removed.'),
+            backgroundColor: Colors.orange.shade800,
+          ),
+        );
+        Navigator.of(context).pop(true);
+      }
+      return;
+    }
+
+    if (mounted) {
+      setState(() {
+        _photos = remaining;
+        _selectedPhotoIds.clear();
+        _isSelectionMode = false;
+        _isLoading = false;
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Deleted $count ${count == 1 ? 'photo' : 'photos'}.'),
+          backgroundColor: Colors.green.shade800,
+        ),
+      );
+    }
+  }
+
   Future<void> _handleAssign() async {
     final assigned = await PatientAssignmentSheet.show(
       context,
       sessionId: widget.session.id,
       database: widget.database,
       queueService: widget.queueService,
+      folderService: widget.folderService,
     );
 
     if (assigned == true && mounted) {
       Navigator.of(context).pop(true);
     }
+  }
+
+  void _showFullScreenPreview(UploadItem photo) {
+    final file = File(photo.localPath);
+    if (!file.existsSync()) return;
+
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => Scaffold(
+          backgroundColor: Colors.black,
+          appBar: AppBar(
+            backgroundColor: Colors.black,
+            iconTheme: const IconThemeData(color: Colors.white),
+            title: Text(
+              photo.fileName,
+              style: const TextStyle(color: Colors.white, fontSize: 14),
+            ),
+          ),
+          body: Center(
+            child: InteractiveViewer(
+              minScale: 0.5,
+              maxScale: 4.0,
+              child: Image.file(file),
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   @override
@@ -63,13 +208,44 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Session Photos'),
+        leading: _isSelectionMode
+            ? IconButton(
+                icon: const Icon(Icons.close),
+                onPressed: () {
+                  setState(() {
+                    _isSelectionMode = false;
+                    _selectedPhotoIds.clear();
+                  });
+                },
+              )
+            : null,
+        title: Text(_isSelectionMode ? '${_selectedPhotoIds.length} Selected' : 'Session Photos'),
         actions: [
-          TextButton.icon(
-            onPressed: _handleAssign,
-            icon: const Icon(Icons.person_add_alt_1),
-            label: const Text('Assign'),
-          ),
+          if (_isSelectionMode)
+            TextButton(
+              onPressed: _toggleSelectAll,
+              child: Text(
+                _selectedPhotoIds.length == _photos.length ? 'Deselect All' : 'Select All',
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              ),
+            )
+          else ...[
+            if (_photos.isNotEmpty)
+              IconButton(
+                icon: const Icon(Icons.checklist),
+                tooltip: 'Select Photos',
+                onPressed: () {
+                  setState(() {
+                    _isSelectionMode = true;
+                  });
+                },
+              ),
+            TextButton.icon(
+              onPressed: _handleAssign,
+              icon: const Icon(Icons.person_add_alt_1),
+              label: const Text('Assign'),
+            ),
+          ],
         ],
       ),
       body: _isLoading
@@ -79,26 +255,45 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
               children: [
                 Container(
                   width: double.infinity,
-                  padding: const EdgeInsets.all(16),
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                   color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.4),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Text(
-                        dateFormatted,
-                        style: const TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                        ),
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            dateFormatted,
+                            style: const TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            '${_photos.length} ${_photos.length == 1 ? 'photo' : 'photos'} captured in this session',
+                            style: TextStyle(
+                              fontSize: 13,
+                              color: theme.colorScheme.onSurfaceVariant,
+                            ),
+                          ),
+                        ],
                       ),
-                      const SizedBox(height: 4),
-                      Text(
-                        '${_photos.length} ${_photos.length == 1 ? 'photo' : 'photos'} captured in this session',
-                        style: TextStyle(
-                          fontSize: 14,
-                          color: theme.colorScheme.onSurfaceVariant,
+                      if (!_isSelectionMode && _photos.isNotEmpty)
+                        OutlinedButton.icon(
+                          onPressed: () {
+                            setState(() {
+                              _isSelectionMode = true;
+                            });
+                          },
+                          icon: const Icon(Icons.check_box_outlined, size: 16),
+                          label: const Text('Select'),
+                          style: OutlinedButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                            visualDensity: VisualDensity.compact,
+                          ),
                         ),
-                      ),
                     ],
                   ),
                 ),
@@ -115,18 +310,27 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
                           itemCount: _photos.length,
                           itemBuilder: (context, index) {
                             final photo = _photos[index];
-                            final file = File(photo.localPath);
-                            return ClipRRect(
-                              borderRadius: BorderRadius.circular(8),
-                              child: file.existsSync()
-                                  ? Image.file(
-                                      file,
-                                      fit: BoxFit.cover,
-                                    )
-                                  : Container(
-                                      color: Colors.grey.shade300,
-                                      child: const Icon(Icons.broken_image),
-                                    ),
+                            final isSelected = _selectedPhotoIds.contains(photo.id);
+
+                            return SelectionThumbnail(
+                              photo: photo,
+                              isSelectionMode: _isSelectionMode,
+                              isSelected: isSelected,
+                              onTap: () {
+                                if (_isSelectionMode) {
+                                  _toggleSelection(photo.id);
+                                } else {
+                                  _showFullScreenPreview(photo);
+                                }
+                              },
+                              onLongPress: () {
+                                if (!_isSelectionMode) {
+                                  setState(() {
+                                    _isSelectionMode = true;
+                                    _selectedPhotoIds.add(photo.id);
+                                  });
+                                }
+                              },
                             );
                           },
                         ),
@@ -136,14 +340,25 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
       bottomNavigationBar: SafeArea(
         child: Padding(
           padding: const EdgeInsets.all(16),
-          child: FilledButton.icon(
-            onPressed: _handleAssign,
-            icon: const Icon(Icons.person_add_alt_1),
-            label: const Text('Assign to Patient'),
-            style: FilledButton.styleFrom(
-              padding: const EdgeInsets.symmetric(vertical: 16),
-            ),
-          ),
+          child: _isSelectionMode
+              ? FilledButton.icon(
+                  onPressed: _selectedPhotoIds.isEmpty ? null : _confirmDeleteSelected,
+                  icon: const Icon(Icons.delete_outline),
+                  label: Text('Delete Selected (${_selectedPhotoIds.length})'),
+                  style: FilledButton.styleFrom(
+                    backgroundColor: Colors.red.shade700,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                  ),
+                )
+              : FilledButton.icon(
+                  onPressed: _photos.isEmpty ? null : _handleAssign,
+                  icon: const Icon(Icons.person_add_alt_1),
+                  label: const Text('Assign to Patient'),
+                  style: FilledButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                  ),
+                ),
         ),
       ),
     );

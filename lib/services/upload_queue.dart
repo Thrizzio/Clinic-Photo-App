@@ -99,6 +99,9 @@ class UploadQueueService extends ChangeNotifier {
   Future<UploadItem> enqueuePhoto({
     required Patient patient,
     required String capturedTempPath,
+    String? sessionId,
+    DateTime? capturedAt,
+    int? sequenceNumber,
   }) async {
     if (!patient.isUploadable) {
       throw ArgumentError(
@@ -106,13 +109,28 @@ class UploadQueueService extends ChangeNotifier {
       );
     }
 
-    final now = DateTime.now();
-    final shortUuid = _uuid.v4().substring(0, 4);
-    final dateStr = DateFormat('yyyy-MM-dd_HH-mm-ss').format(now);
-    final fileName = '${patient.id}_${dateStr}_$shortUuid.jpg';
+    final now = capturedAt ?? DateTime.now();
+    final seq = sequenceNumber;
+    final String fileName;
+    if (seq != null) {
+      final dateStr = DateFormat('yyyyMMdd_HHmmss').format(now);
+      final seqStr = seq.toString().padLeft(3, '0');
+      fileName = '${patient.id}_${dateStr}_$seqStr.jpg';
+    } else {
+      final shortUuid = _uuid.v4().substring(0, 4);
+      final dateStr = DateFormat('yyyy-MM-dd_HH-mm-ss').format(now);
+      fileName = '${patient.id}_${dateStr}_$shortUuid.jpg';
+    }
 
     final basePath = await _getBasePath();
-    final queueDir = Directory(p.join(basePath, AppConfig.photoQueueDirName));
+    final Directory queueDir;
+    if (sessionId != null && sessionId.isNotEmpty) {
+      queueDir = Directory(
+        p.join(basePath, AppConfig.photoQueueDirName, 'patients', patient.id, sessionId),
+      );
+    } else {
+      queueDir = Directory(p.join(basePath, AppConfig.photoQueueDirName));
+    }
     if (!queueDir.existsSync()) {
       queueDir.createSync(recursive: true);
     }
@@ -136,6 +154,7 @@ class UploadQueueService extends ChangeNotifier {
 
     final item = UploadItem(
       id: _uuid.v4(),
+      sessionId: sessionId,
       patientId: patient.id,
       driveFolderId: patient.driveFolderId,
       localPath: localPath,
@@ -143,6 +162,8 @@ class UploadQueueService extends ChangeNotifier {
       status: UploadStatus.waiting,
       retryCount: 0,
       createdAt: now,
+      capturedAt: now,
+      sequenceNumber: seq ?? 1,
     );
 
     await database.insertUpload(item);
@@ -172,11 +193,21 @@ class UploadQueueService extends ChangeNotifier {
   Future<UploadItem> enqueueUnassignedPhoto({
     required String sessionId,
     required String capturedTempPath,
+    DateTime? capturedAt,
+    int? sequenceNumber,
   }) async {
-    final now = DateTime.now();
-    final shortUuid = _uuid.v4().substring(0, 4);
-    final dateStr = DateFormat('yyyy-MM-dd_HH-mm-ss').format(now);
-    final fileName = 'unassigned_${dateStr}_$shortUuid.jpg';
+    final now = capturedAt ?? DateTime.now();
+    final seq = sequenceNumber;
+    final String fileName;
+    if (seq != null) {
+      final dateStr = DateFormat('yyyyMMdd_HHmmss').format(now);
+      final seqStr = seq.toString().padLeft(3, '0');
+      fileName = 'unassigned_${dateStr}_$seqStr.jpg';
+    } else {
+      final shortUuid = _uuid.v4().substring(0, 4);
+      final dateStr = DateFormat('yyyy-MM-dd_HH-mm-ss').format(now);
+      fileName = 'unassigned_${dateStr}_$shortUuid.jpg';
+    }
 
     final basePath = await _getBasePath();
     final sessionDir = Directory(
@@ -213,6 +244,8 @@ class UploadQueueService extends ChangeNotifier {
       status: UploadStatus.unassigned,
       retryCount: 0,
       createdAt: now,
+      capturedAt: now,
+      sequenceNumber: seq ?? 1,
     );
 
     await database.insertUpload(item);
@@ -280,8 +313,9 @@ class UploadQueueService extends ChangeNotifier {
   }
 
   /// Workflow B: Assigns an unassigned session to a verified patient.
-  /// Validates that patient has an available Drive folder, transitions all photos
-  /// to 'waiting', and wakes the background upload worker.
+  /// Validates that patient has an available Drive folder, renames files to the
+  /// patient directory structure, transitions all photos to 'waiting', and wakes the
+  /// background upload worker.
   Future<void> assignSession({
     required String sessionId,
     required Patient patient,
@@ -292,10 +326,56 @@ class UploadQueueService extends ChangeNotifier {
       );
     }
 
+    final uploads = await database.getUploadsForSession(sessionId);
+    final basePath = await _getBasePath();
+    final patientSessionDir = Directory(
+      p.join(basePath, AppConfig.photoQueueDirName, 'patients', patient.id, sessionId),
+    );
+    if (!patientSessionDir.existsSync()) {
+      patientSessionDir.createSync(recursive: true);
+    }
+
+    final renamedPhotos = <String, ({String fileName, String localPath})>{};
+
+    for (var i = 0; i < uploads.length; i++) {
+      final item = uploads[i];
+      final originalFile = File(item.localPath);
+      final capturedAt = item.capturedAt;
+      final seq = item.sequenceNumber;
+      final dateStr = DateFormat('yyyyMMdd_HHmmss').format(capturedAt);
+      final seqStr = seq.toString().padLeft(3, '0');
+      final newFileName = '${patient.id}_${dateStr}_$seqStr.jpg';
+      final newLocalPath = p.join(patientSessionDir.path, newFileName);
+
+      if (originalFile.existsSync()) {
+        try {
+          originalFile.renameSync(newLocalPath);
+        } catch (_) {
+          originalFile.copySync(newLocalPath);
+          try {
+            originalFile.deleteSync();
+          } catch (_) {}
+        }
+      }
+
+      renamedPhotos[item.id] = (fileName: newFileName, localPath: newLocalPath);
+    }
+
+    // Clean up empty unassigned directory if empty
+    try {
+      final unassignedSessionDir = Directory(
+        p.join(basePath, AppConfig.photoQueueDirName, AppConfig.unassignedDirName, sessionId),
+      );
+      if (unassignedSessionDir.existsSync() && unassignedSessionDir.listSync().isEmpty) {
+        unassignedSessionDir.deleteSync(recursive: true);
+      }
+    } catch (_) {}
+
     await database.assignSessionToPatient(
       sessionId: sessionId,
       patientId: patient.id,
       driveFolderId: patient.driveFolderId!,
+      renamedPhotos: renamedPhotos,
     );
 
     _safeNotifyListeners();

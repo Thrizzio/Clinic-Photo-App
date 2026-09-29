@@ -1,18 +1,21 @@
 import 'package:flutter/material.dart';
 import '../models/patient.dart';
 import '../services/database.dart';
+import '../services/patient_folder_service.dart';
 import '../services/upload_queue.dart';
 
 class PatientAssignmentSheet extends StatefulWidget {
   final String sessionId;
   final AppDatabase database;
   final UploadQueueService queueService;
+  final PatientFolderService? folderService;
 
   const PatientAssignmentSheet({
     super.key,
     required this.sessionId,
     required this.database,
     required this.queueService,
+    this.folderService,
   });
 
   static Future<bool?> show(
@@ -20,6 +23,7 @@ class PatientAssignmentSheet extends StatefulWidget {
     required String sessionId,
     required AppDatabase database,
     required UploadQueueService queueService,
+    PatientFolderService? folderService,
   }) {
     return showModalBottomSheet<bool>(
       context: context,
@@ -31,6 +35,7 @@ class PatientAssignmentSheet extends StatefulWidget {
         sessionId: sessionId,
         database: database,
         queueService: queueService,
+        folderService: folderService,
       ),
     );
   }
@@ -72,16 +77,45 @@ class _PatientAssignmentSheetState extends State<PatientAssignmentSheet> {
       _errorMessage = null;
     });
 
+    Patient targetPatient = patient;
+
     if (patient.folderStatus == FolderStatus.missing) {
-      setState(() {
-        _errorMessage =
-            'Cannot assign to ${patient.name} (${patient.id}): This patient does not have a Google Drive folder in the Visits sheet. Photos remain safely saved.';
-      });
-      return;
+      if (widget.folderService != null) {
+        setState(() {
+          _isLoading = true;
+        });
+        try {
+          final resolved = await widget.folderService!.getOrCreatePatientFolder(patient);
+          if (resolved.patient.isUploadable) {
+            await widget.database.updatePatient(resolved.patient);
+            targetPatient = resolved.patient;
+          } else {
+            setState(() {
+              _isLoading = false;
+              _errorMessage =
+                  'Could not resolve Drive folder for ${patient.name} (${patient.id}). Status: ${resolved.patient.folderStatus.name}';
+            });
+            return;
+          }
+        } catch (e) {
+          setState(() {
+            _isLoading = false;
+            _errorMessage = 'Failed to create Drive folder: $e';
+          });
+          return;
+        }
+      } else {
+        setState(() {
+          _errorMessage =
+              'Cannot assign to ${patient.name} (${patient.id}): This patient does not have a Google Drive folder in the Visits sheet. Photos remain safely saved.';
+        });
+        return;
+      }
     }
 
-    if (patient.folderStatus == FolderStatus.conflict) {
+    if (targetPatient.folderStatus == FolderStatus.conflict) {
       setState(() {
+        _isLoading = false;
         _errorMessage =
             'Cannot assign to ${patient.name} (${patient.id}): This patient has conflicting Google Drive folders across different visits. Please resolve in the Visits sheet first.';
       });
@@ -91,7 +125,7 @@ class _PatientAssignmentSheetState extends State<PatientAssignmentSheet> {
     try {
       await widget.queueService.assignSession(
         sessionId: widget.sessionId,
-        patient: patient,
+        patient: targetPatient,
       );
 
       if (mounted) {
@@ -99,7 +133,7 @@ class _PatientAssignmentSheetState extends State<PatientAssignmentSheet> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              'Session assigned to ${patient.name}. Photos queued for upload.',
+              'Session assigned to ${targetPatient.name}. Photos queued for upload.',
             ),
             backgroundColor: Colors.green.shade800,
           ),
@@ -107,6 +141,7 @@ class _PatientAssignmentSheetState extends State<PatientAssignmentSheet> {
       }
     } catch (e) {
       setState(() {
+        _isLoading = false;
         _errorMessage = 'Assignment failed: $e';
       });
     }
