@@ -11,6 +11,7 @@ import '../services/upload_queue.dart';
 import '../widgets/patient_tile.dart';
 import '../widgets/upload_status.dart';
 import 'camera_screen.dart';
+import 'patient_photos_screen.dart';
 import 'settings_screen.dart';
 import 'unassigned_photos_screen.dart';
 
@@ -185,28 +186,37 @@ class _PatientsScreenState extends State<PatientsScreen> {
     }
   }
 
-  void _onPatientTapped(Patient patient) {
-    if (!patient.isUploadable) {
-      final isMissing = patient.folderStatus == FolderStatus.missing;
-      final title = isMissing ? 'Missing Drive Folder' : 'Conflicting Drive Folders';
-      final message = isMissing
-          ? 'Cannot capture photos for ${patient.name} (${patient.id}).\n\nNo Google Drive folder URL is specified in the Visits sheet for this patient. Please add a valid Drive folder URL to the sheet and refresh.'
-          : 'Cannot capture photos for ${patient.name} (${patient.id}).\n\nMultiple distinct Google Drive folders were found across visits for this patient. Please ensure only one consistent Drive folder is assigned in the Visits sheet and refresh.';
+  void _openPatientPhotos(Patient patient) {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => PatientPhotosScreen(
+          patient: patient,
+          authService: widget.authService,
+          driveService: widget.driveService ?? DriveService(),
+          folderService: _patientFolderService,
+          queueService: widget.queueService,
+        ),
+      ),
+    );
+  }
 
+  Future<void> _handleTakePhotosForPatient(Patient patient) async {
+    if (patient.folderStatus == FolderStatus.conflict) {
       showDialog(
         context: context,
         builder: (ctx) => AlertDialog(
-          title: Row(
+          title: const Row(
             children: [
-              Icon(
-                isMissing ? Icons.folder_off_outlined : Icons.warning_amber_rounded,
-                color: isMissing ? Colors.amber.shade800 : Colors.red.shade700,
-              ),
-              const SizedBox(width: 8),
-              Expanded(child: Text(title, style: const TextStyle(fontSize: 18))),
+              Icon(Icons.warning_amber_rounded, color: Colors.red),
+              SizedBox(width: 8),
+              Expanded(child: Text('Conflicting Drive Folders', style: TextStyle(fontSize: 18))),
             ],
           ),
-          content: Text(message),
+          content: Text(
+            'Cannot capture photos for ${patient.name} (${patient.id}).\n\n'
+            'Multiple distinct Google Drive folders were found across visits for this patient. '
+            'Please ensure only one consistent Drive folder is assigned in the Visits sheet and refresh.',
+          ),
           actions: [
             TextButton(
               onPressed: () => Navigator.of(ctx).pop(),
@@ -218,11 +228,134 @@ class _PatientsScreenState extends State<PatientsScreen> {
       return;
     }
 
+    Patient targetPatient = patient;
+
+    if (patient.folderStatus == FolderStatus.missing) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Row(
+            children: [
+              const SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+              ),
+              const SizedBox(width: 12),
+              Expanded(child: Text('Setting up Drive folder for ${patient.name}...')),
+            ],
+          ),
+          duration: const Duration(seconds: 4),
+        ),
+      );
+
+      try {
+        final res = await _patientFolderService.getOrCreatePatientFolder(patient);
+        if (res.patient.isUploadable) {
+          targetPatient = res.patient;
+          await widget.database.updatePatient(targetPatient);
+          await _loadCachedPatients();
+        } else {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('Could not create folder: ${res.patient.folderStatus.name}'),
+                backgroundColor: Colors.red,
+              ),
+            );
+          }
+          return;
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Failed to create Drive folder: $e'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+        return;
+      }
+    }
+
+    if (!mounted) return;
+
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => CameraScreen(
-          patient: patient,
+          patient: targetPatient,
           queueService: widget.queueService,
+        ),
+      ),
+    );
+  }
+
+  void _onPatientTapped(Patient patient) {
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 20, horizontal: 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  CircleAvatar(
+                    backgroundColor: Theme.of(ctx).colorScheme.primaryContainer,
+                    child: Text(
+                      patient.id.length > 3 ? patient.id.substring(patient.id.length - 3) : patient.id,
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: Theme.of(ctx).colorScheme.onPrimaryContainer,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          patient.name,
+                          style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                        ),
+                        Text('ID: ${patient.id}'),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              const Divider(),
+              ListTile(
+                leading: const Icon(Icons.camera_alt_outlined),
+                title: const Text('Take Photos'),
+                subtitle: Text(
+                  patient.folderStatus == FolderStatus.missing
+                      ? 'Creates Drive folder automatically'
+                      : 'Capture clinical photos directly for this patient',
+                ),
+                onTap: () {
+                  Navigator.of(ctx).pop();
+                  _handleTakePhotosForPatient(patient);
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.photo_library_outlined),
+                title: const Text('View Photos'),
+                subtitle: const Text('Browse chronological photo gallery from Drive'),
+                onTap: () {
+                  Navigator.of(ctx).pop();
+                  _openPatientPhotos(patient);
+                },
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -446,6 +579,8 @@ class _PatientsScreenState extends State<PatientsScreen> {
                               return PatientTile(
                                 patient: patient,
                                 onTap: () => _onPatientTapped(patient),
+                                onViewPhotos: () => _openPatientPhotos(patient),
+                                onTakePhotos: () => _handleTakePhotosForPatient(patient),
                               );
                             },
                           ),

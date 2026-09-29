@@ -108,7 +108,7 @@ class DriveService {
     final fileList = await driveApi.files.list(
       q: query,
       $fields: 'files(id, name, createdTime, thumbnailLink, webContentLink, size)',
-      orderBy: 'createdTime desc',
+      orderBy: 'name asc',
       pageSize: 100,
     );
 

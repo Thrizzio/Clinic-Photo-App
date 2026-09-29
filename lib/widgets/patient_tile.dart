@@ -4,11 +4,15 @@ import '../models/patient.dart';
 class PatientTile extends StatelessWidget {
   final Patient patient;
   final VoidCallback onTap;
+  final VoidCallback? onViewPhotos;
+  final VoidCallback? onTakePhotos;
 
   const PatientTile({
     super.key,
     required this.patient,
     required this.onTap,
+    this.onViewPhotos,
+    this.onTakePhotos,
   });
 
   @override
@@ -18,7 +22,7 @@ class PatientTile extends StatelessWidget {
     return InkWell(
       onTap: onTap,
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         decoration: BoxDecoration(
           border: Border(
             bottom: BorderSide(
@@ -45,7 +49,7 @@ class PatientTile extends StatelessWidget {
                 ),
               ),
             ),
-            const SizedBox(width: 16),
+            const SizedBox(width: 14),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -63,13 +67,13 @@ class PatientTile extends StatelessWidget {
                       padding: const EdgeInsets.only(top: 2),
                       child: Row(
                         children: [
-                          Icon(Icons.folder_off_outlined, size: 13, color: Colors.amber.shade800),
+                          Icon(Icons.auto_awesome, size: 12, color: theme.colorScheme.primary),
                           const SizedBox(width: 4),
                           Text(
-                            'Missing Drive folder in Visits',
+                            'Folder auto-creates on photo capture',
                             style: TextStyle(
                               fontSize: 12,
-                              color: Colors.amber.shade900,
+                              color: theme.colorScheme.primary,
                               fontWeight: FontWeight.w500,
                             ),
                           ),
@@ -97,17 +101,28 @@ class PatientTile extends StatelessWidget {
                 ],
               ),
             ),
-            Icon(
-              patient.isUploadable
-                  ? Icons.chevron_right
-                  : Icons.info_outline,
-              color: patient.isUploadable
-                  ? theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.5)
-                  : (patient.folderStatus == FolderStatus.conflict
-                      ? Colors.red.shade400
-                      : Colors.amber.shade700),
-              size: 20,
-            ),
+            if (onViewPhotos != null)
+              IconButton(
+                icon: const Icon(Icons.photo_library_outlined, size: 20),
+                tooltip: 'View Photos',
+                onPressed: onViewPhotos,
+              ),
+            if (onTakePhotos != null)
+              IconButton(
+                icon: const Icon(Icons.camera_alt_outlined, size: 20),
+                tooltip: 'Take Photos',
+                onPressed: onTakePhotos,
+              )
+            else
+              Icon(
+                patient.isUploadable ? Icons.chevron_right : Icons.info_outline,
+                color: patient.isUploadable
+                    ? theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.5)
+                    : (patient.folderStatus == FolderStatus.conflict
+                        ? Colors.red.shade400
+                        : Colors.amber.shade700),
+                size: 20,
+              ),
           ],
         ),
       ),
