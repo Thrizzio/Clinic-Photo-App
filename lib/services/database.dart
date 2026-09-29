@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart';
 import '../models/capture_session.dart';
@@ -120,7 +121,7 @@ abstract class AppDatabase {
 /// SQLite-backed production database implementation for Android.
 class SqliteAppDatabase implements AppDatabase {
   static const String _dbName = 'clinic_photos.db';
-  static const int _dbVersion = 4;
+  static const int _dbVersion = 5;
 
   final Database db;
 
@@ -147,6 +148,10 @@ class SqliteAppDatabase implements AppDatabase {
               updated_at TEXT
             )
           ''');
+
+          await db.execute(
+            'CREATE INDEX IF NOT EXISTS idx_patients_status ON patients(folder_status)',
+          );
 
           await db.execute('''
             CREATE TABLE capture_sessions (
@@ -219,9 +224,14 @@ class SqliteAppDatabase implements AppDatabase {
               await db.execute("CREATE INDEX IF NOT EXISTS idx_uploads_session_id ON uploads(session_id)");
             } catch (_) {}
           }
+
+          if (oldVersion < 5) {
+            await _ensurePatientsTableSchema(db);
+          }
         },
         onOpen: (db) async {
           // Ensure schema compatibility on existing databases (nullable patient_id / drive_folder_id)
+          await _ensurePatientsTableSchema(db);
           await _ensureUploadsTableSchema(db);
 
           // Crash recovery: Any upload that was interrupted in 'uploading'
@@ -240,6 +250,61 @@ class SqliteAppDatabase implements AppDatabase {
     return SqliteAppDatabase(database);
   }
 
+  /// Migrates patients table if drive_folder_id has a NOT NULL constraint
+  /// or if folder_status or updated_at are missing.
+  static Future<void> _ensurePatientsTableSchema(Database db) async {
+    final tableInfo = await db.rawQuery("PRAGMA table_info(patients)");
+    if (tableInfo.isEmpty) return;
+
+    final folderIdCol = tableInfo.firstWhere(
+      (c) => c['name'] == 'drive_folder_id',
+      orElse: () => <String, Object?>{},
+    );
+    final hasFolderStatus = tableInfo.any((c) => c['name'] == 'folder_status');
+    final hasUpdatedAt = tableInfo.any((c) => c['name'] == 'updated_at');
+
+    final isFolderIdNotNull = folderIdCol['notnull'] == 1;
+    final needsMigration = isFolderIdNotNull || !hasFolderStatus || !hasUpdatedAt;
+
+    if (needsMigration) {
+      await db.transaction((txn) async {
+        await txn.execute('ALTER TABLE patients RENAME TO _patients_old');
+        await txn.execute('''
+          CREATE TABLE patients (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            drive_folder_id TEXT,
+            folder_status TEXT NOT NULL,
+            updated_at TEXT
+          )
+        ''');
+
+        final oldColumns = await txn.rawQuery("PRAGMA table_info(_patients_old)");
+        final oldHasFolderStatus = oldColumns.any((c) => c['name'] == 'folder_status');
+        final oldHasUpdatedAt = oldColumns.any((c) => c['name'] == 'updated_at');
+
+        final selectStatus = oldHasFolderStatus ? "folder_status" : "'available'";
+        final selectUpdatedAt = oldHasUpdatedAt ? "updated_at" : "NULL";
+
+        await txn.execute('''
+          INSERT INTO patients (id, name, drive_folder_id, folder_status, updated_at)
+          SELECT id, name, drive_folder_id, $selectStatus, $selectUpdatedAt
+          FROM _patients_old
+        ''');
+
+        await txn.execute('DROP TABLE _patients_old');
+        await txn.execute(
+          'CREATE INDEX IF NOT EXISTS idx_patients_status ON patients(folder_status)',
+        );
+      });
+    }
+  }
+
+  /// Visible for unit testing schema migration.
+  @visibleForTesting
+  static Future<void> ensurePatientsTableSchemaForTesting(Database db) =>
+      _ensurePatientsTableSchema(db);
+
   /// Migrates uploads table if patient_id has a NOT NULL constraint or session_id is missing.
   static Future<void> _ensureUploadsTableSchema(Database db) async {
     final tableInfo = await db.rawQuery("PRAGMA table_info(uploads)");
@@ -250,9 +315,11 @@ class SqliteAppDatabase implements AppDatabase {
       orElse: () => <String, Object?>{},
     );
     final hasSessionId = tableInfo.any((c) => c['name'] == 'session_id');
+    final hasCapturedAt = tableInfo.any((c) => c['name'] == 'captured_at');
+    final hasSeq = tableInfo.any((c) => c['name'] == 'sequence_number');
 
     final isPatientIdNotNull = patientIdCol['notnull'] == 1;
-    final needsMigration = isPatientIdNotNull || !hasSessionId;
+    final needsMigration = isPatientIdNotNull || !hasSessionId || !hasCapturedAt || !hasSeq;
 
     if (needsMigration) {
       await db.transaction((txn) async {
@@ -269,24 +336,34 @@ class SqliteAppDatabase implements AppDatabase {
             retry_count INTEGER NOT NULL DEFAULT 0,
             last_error TEXT,
             drive_file_id TEXT,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            captured_at TEXT NOT NULL,
+            sequence_number INTEGER NOT NULL DEFAULT 1
           )
         ''');
 
-        if (hasSessionId) {
-          await txn.execute('''
-            INSERT INTO uploads (id, session_id, patient_id, drive_folder_id, local_path, file_name, status, retry_count, last_error, drive_file_id, created_at)
-            SELECT id, session_id, patient_id, drive_folder_id, local_path, file_name, status, retry_count, last_error, drive_file_id, created_at
-            FROM _uploads_old
-          ''');
-        } else {
-          await txn.execute('''
-            INSERT INTO uploads (id, session_id, patient_id, drive_folder_id, local_path, file_name, status, retry_count, last_error, drive_file_id, created_at)
-            SELECT id, NULL, patient_id, drive_folder_id, local_path, file_name, status, retry_count, last_error, drive_file_id, created_at
-            FROM _uploads_old
-          ''');
-        }
+        final oldColumns = await txn.rawQuery("PRAGMA table_info(_uploads_old)");
+        final oldHasSessionId = oldColumns.any((c) => c['name'] == 'session_id');
+        final oldHasCapturedAt = oldColumns.any((c) => c['name'] == 'captured_at');
+        final oldHasSeq = oldColumns.any((c) => c['name'] == 'sequence_number');
+
+        final selectSessionId = oldHasSessionId ? "session_id" : "NULL";
+        final selectCapturedAt = oldHasCapturedAt ? "captured_at" : "created_at";
+        final selectSeq = oldHasSeq ? "sequence_number" : "1";
+
+        await txn.execute('''
+          INSERT INTO uploads (id, session_id, patient_id, drive_folder_id, local_path, file_name, status, retry_count, last_error, drive_file_id, created_at, captured_at, sequence_number)
+          SELECT id, $selectSessionId, patient_id, drive_folder_id, local_path, file_name, status, retry_count, last_error, drive_file_id, created_at, $selectCapturedAt, $selectSeq
+          FROM _uploads_old
+        ''');
+
         await txn.execute('DROP TABLE _uploads_old');
+        await txn.execute(
+          'CREATE INDEX IF NOT EXISTS idx_uploads_patient_id ON uploads(patient_id)',
+        );
+        await txn.execute(
+          'CREATE INDEX IF NOT EXISTS idx_uploads_session_id ON uploads(session_id)',
+        );
       });
     }
   }
