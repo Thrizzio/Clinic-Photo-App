@@ -452,6 +452,12 @@ class SheetsService {
     }
   }
 
+  /// Formats incremental sync range string according to Section 23.5:
+  /// `Visits!A{lastSyncedRow}:Z{lastSyncedRow + 500}`
+  static String buildIncrementalRange(String sheetName, int lastSyncedRow, [int chunkSize = 500]) {
+    return '$sheetName!A$lastSyncedRow:Z${lastSyncedRow + chunkSize}';
+  }
+
   /// Converts a zero-based column index to A1 notation column letter(s) (e.g. 0 -> A, 14 -> O, 26 -> AA).
   static String columnIndexToA1Notation(int colIndex) {
     int c = colIndex;

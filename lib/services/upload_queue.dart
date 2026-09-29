@@ -142,14 +142,14 @@ class UploadQueueService extends ChangeNotifier {
       throw FileSystemException('Captured camera temp file does not exist', capturedTempPath);
     }
 
-    await tempFile.copy(localPath);
+    tempFile.copySync(localPath);
     final savedFile = File(localPath);
     if (!savedFile.existsSync()) {
       throw FileSystemException('Failed to verify saved photo in private storage', localPath);
     }
 
     try {
-      await tempFile.delete();
+      tempFile.deleteSync();
     } catch (_) {}
 
     final item = UploadItem(
@@ -224,14 +224,14 @@ class UploadQueueService extends ChangeNotifier {
       throw FileSystemException('Captured camera temp file does not exist', capturedTempPath);
     }
 
-    await tempFile.copy(localPath);
+    tempFile.copySync(localPath);
     final savedFile = File(localPath);
     if (!savedFile.existsSync()) {
       throw FileSystemException('Failed to verify saved photo in private storage', localPath);
     }
 
     try {
-      await tempFile.delete();
+      tempFile.deleteSync();
     } catch (_) {}
 
     final item = UploadItem(
