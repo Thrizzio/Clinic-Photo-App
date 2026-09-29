@@ -451,4 +451,86 @@ class SheetsService {
       return null;
     }
   }
+
+  /// Converts a zero-based column index to A1 notation column letter(s) (e.g. 0 -> A, 14 -> O, 26 -> AA).
+  static String columnIndexToA1Notation(int colIndex) {
+    int c = colIndex;
+    String result = '';
+    while (c >= 0) {
+      result = String.fromCharCode(65 + (c % 26)) + result;
+      c = (c ~/ 26) - 1;
+    }
+    return result;
+  }
+
+  /// Writes the [folderUrl] back to all blank Visits rows for the specified [patientId].
+  ///
+  /// Scans rows for matches and issues a single batchUpdate to write the folder URL to those cells.
+  Future<int> writePatientFolderUrl({
+    required AuthClient client,
+    required String spreadsheetId,
+    required String sheetName,
+    required String patientId,
+    required String folderUrl,
+    HeaderIndices? headerIndices,
+  }) async {
+    final sheetsApi = sheets.SheetsApi(client);
+
+    final valueRange = await sheetsApi.spreadsheets.values.get(
+      spreadsheetId,
+      sheetName,
+    );
+
+    final rawRows = valueRange.values;
+    if (rawRows == null || rawRows.isEmpty) return 0;
+
+    final rows = rawRows.cast<List<dynamic>>();
+    final headers = headerIndices ?? discoverHeaderIndices(rows);
+
+    final folderColLetter = columnIndexToA1Notation(headers.folderColIndex);
+    final List<sheets.ValueRange> dataToUpdate = [];
+
+    for (int r = headers.headerRowIndex + 1; r < rows.length; r++) {
+      final row = rows[r];
+      if (row.isEmpty) continue;
+
+      final id = headers.idColIndex < row.length
+          ? row[headers.idColIndex]?.toString().trim() ?? ''
+          : '';
+
+      if (id != patientId) continue;
+
+      final currentFolder = headers.folderColIndex < row.length
+          ? row[headers.folderColIndex]?.toString().trim() ?? ''
+          : '';
+
+      if (currentFolder.isEmpty) {
+        final rowNumber = r + 1; // 1-based row number
+        final cellRange = '$sheetName!$folderColLetter$rowNumber';
+        dataToUpdate.add(sheets.ValueRange(
+          range: cellRange,
+          values: [
+            [folderUrl],
+          ],
+        ));
+      }
+    }
+
+    if (dataToUpdate.isEmpty) return 0;
+
+    final batchRequest = sheets.BatchUpdateValuesRequest(
+      valueInputOption: 'USER_ENTERED',
+      data: dataToUpdate,
+    );
+
+    await sheetsApi.spreadsheets.values.batchUpdate(
+      batchRequest,
+      spreadsheetId,
+    );
+
+    debugPrint(
+      'Wrote Drive folder URL to ${dataToUpdate.length} blank Visits rows for Patient $patientId',
+    );
+    return dataToUpdate.length;
+  }
 }

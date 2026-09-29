@@ -10,10 +10,10 @@ abstract final class AppConfig {
       '911718488219-n05lbgpq9oh9tueutq2km3fvithtpnjh.apps.googleusercontent.com';
 
   /// Google OAuth 2.0 Scopes.
-  /// - spreadsheets.readonly: To retrieve patient database rows & tabs
-  /// - drive: Broad scope intentional for internal one-doctor clinic to upload
-  ///   into pre-existing clinic patient folders.
+  /// - spreadsheets: To read visits and write back generated Drive folder links
+  /// - drive: Broad scope to create patient folders and upload clinical photos.
   static const List<String> googleScopes = <String>[
+    'https://www.googleapis.com/auth/spreadsheets',
     'https://www.googleapis.com/auth/spreadsheets.readonly',
     'https://www.googleapis.com/auth/drive',
   ];

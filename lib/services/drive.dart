@@ -47,4 +47,107 @@ class DriveService {
       rethrow;
     }
   }
+
+  /// Searches for non-trashed folders with the exact given name inside the specified parent folder.
+  Future<List<drive.File>> findFoldersByName({
+    required AuthClient client,
+    required String parentFolderId,
+    required String folderName,
+  }) async {
+    final driveApi = drive.DriveApi(client);
+    final safeName = folderName.replaceAll(r'\', r'\\').replaceAll("'", r"\'");
+    final query =
+        "mimeType = 'application/vnd.google-apps.folder' and '$parentFolderId' in parents and name = '$safeName' and trashed = false";
+
+    final fileList = await driveApi.files.list(
+      q: query,
+      $fields: 'files(id, name)',
+    );
+
+    return fileList.files ?? <drive.File>[];
+  }
+
+  /// Creates a new Google Drive folder with [folderName] inside [parentFolderId].
+  Future<String> createFolder({
+    required AuthClient client,
+    required String parentFolderId,
+    required String folderName,
+  }) async {
+    final driveApi = drive.DriveApi(client);
+    final folderMetadata = drive.File()
+      ..name = folderName
+      ..mimeType = 'application/vnd.google-apps.folder'
+      ..parents = [parentFolderId];
+
+    final created = await driveApi.files.create(
+      folderMetadata,
+      $fields: 'id, name',
+    );
+
+    final id = created.id;
+    if (id == null || id.isEmpty) {
+      throw drive.DetailedApiRequestError(
+        500,
+        'Google Drive folder creation succeeded but returned no ID.',
+      );
+    }
+
+    debugPrint('Created Drive folder "$folderName" under parent $parentFolderId: $id');
+    return id;
+  }
+
+  /// Lists image files stored in a patient's Drive folder.
+  Future<List<drive.File>> listPatientPhotos({
+    required AuthClient client,
+    required String folderId,
+  }) async {
+    final driveApi = drive.DriveApi(client);
+    final query =
+        "'$folderId' in parents and trashed = false and mimeType contains 'image/'";
+
+    final fileList = await driveApi.files.list(
+      q: query,
+      $fields: 'files(id, name, createdTime, thumbnailLink, webContentLink, size)',
+      orderBy: 'createdTime desc',
+      pageSize: 100,
+    );
+
+    return fileList.files ?? <drive.File>[];
+  }
+
+  /// Fetches raw file bytes for preview (thumbnail or full image).
+  Future<Uint8List> getFileBytes({
+    required AuthClient client,
+    required String fileId,
+  }) async {
+    final driveApi = drive.DriveApi(client);
+    final media = await driveApi.files.get(
+      fileId,
+      downloadOptions: drive.DownloadOptions.fullMedia,
+    ) as drive.Media;
+
+    final List<int> bytes = [];
+    await for (final chunk in media.stream) {
+      bytes.addAll(chunk);
+    }
+    return Uint8List.fromList(bytes);
+  }
+
+  /// Verifies read/write access to a Drive folder (e.g. parent folder).
+  Future<bool> verifyFolderAccess({
+    required AuthClient client,
+    required String folderId,
+  }) async {
+    final driveApi = drive.DriveApi(client);
+    try {
+      final file = await driveApi.files.get(
+        folderId,
+        $fields: 'id, name, mimeType',
+      ) as drive.File;
+      return file.id != null && file.mimeType == 'application/vnd.google-apps.folder';
+    } catch (e) {
+      debugPrint('verifyFolderAccess failed for $folderId: $e');
+      return false;
+    }
+  }
 }
