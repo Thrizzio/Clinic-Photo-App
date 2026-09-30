@@ -27,6 +27,41 @@ class PatientPhotosScreen extends StatefulWidget {
     required this.queueService,
   });
 
+  /// Authoritative IST timestamp parser from filename (e.g. YYYYMMDD_HHMMSS_SSS) or Drive createdTime.
+  static DateTime parsePhotoTimestamp(drive.File file) {
+    final name = file.name ?? '';
+    final match = RegExp(r'(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})(?:_(\d{3}))?').firstMatch(name);
+    if (match != null) {
+      final year = int.parse(match.group(1)!);
+      final month = int.parse(match.group(2)!);
+      final day = int.parse(match.group(3)!);
+      final hour = int.parse(match.group(4)!);
+      final minute = int.parse(match.group(5)!);
+      final second = int.parse(match.group(6)!);
+      final millis = match.group(7) != null ? int.parse(match.group(7)!) : 0;
+      return DateTime(year, month, day, hour, minute, second, millis);
+    }
+    if (file.createdTime != null) {
+      final istUtc = file.createdTime!.toUtc().add(const Duration(hours: 5, minutes: 30));
+      return DateTime(istUtc.year, istUtc.month, istUtc.day, istUtc.hour, istUtc.minute, istUtc.second, istUtc.millisecond);
+    }
+    return DateTime.fromMillisecondsSinceEpoch(0);
+  }
+
+  /// Compact IST format for photo grid tile (e.g. "24 Mar, 03:45 PM")
+  static String formatPhotoGridTimestamp(drive.File file) {
+    final dt = parsePhotoTimestamp(file);
+    if (dt.millisecondsSinceEpoch == 0) return '';
+    return DateFormat('d MMM, hh:mm a').format(dt);
+  }
+
+  /// Detailed IST format for full-screen viewer (e.g. "24 Mar 2026, 03:45:12 PM IST")
+  static String formatPhotoFullTimestamp(drive.File file) {
+    final dt = parsePhotoTimestamp(file);
+    if (dt.millisecondsSinceEpoch == 0) return '';
+    return '${DateFormat('d MMM yyyy, hh:mm:ss a').format(dt)} IST';
+  }
+
   @override
   State<PatientPhotosScreen> createState() => _PatientPhotosScreenState();
 }
@@ -92,6 +127,15 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
         client: client,
         folderId: _currentPatient.driveFolderId!,
       );
+
+      // Deterministic descending sort by IST timestamp (newest first)
+      photos.sort((a, b) {
+        final timeA = PatientPhotosScreen.parsePhotoTimestamp(a);
+        final timeB = PatientPhotosScreen.parsePhotoTimestamp(b);
+        final cmp = timeB.compareTo(timeA);
+        if (cmp != 0) return cmp;
+        return (b.name ?? '').compareTo(a.name ?? '');
+      });
 
       if (mounted) {
         setState(() {
@@ -590,9 +634,7 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
       itemBuilder: (context, index) {
         final photo = _photos[index];
         final fileId = photo.id;
-        final dateStr = photo.createdTime != null
-            ? DateFormat('MMM d, HH:mm').format(photo.createdTime!)
-            : '';
+        final dateStr = PatientPhotosScreen.formatPhotoGridTimestamp(photo);
 
         return InkWell(
           onTap: () => _openFullScreenViewer(index),
@@ -610,24 +652,18 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
                         builder: (ctx, snapshot) {
                           if (snapshot.connectionState == ConnectionState.waiting &&
                               !_thumbnailCache.containsKey(fileId)) {
-                            return Container(
-                              color: Colors.grey.shade200,
-                              child: const Center(
-                                child: SizedBox(
-                                  width: 20,
-                                  height: 20,
-                                  child: CircularProgressIndicator(strokeWidth: 2),
-                                ),
-                              ),
-                            );
+                            return const _ShimmerSkeletonTile();
                           }
                           final bytes = snapshot.data ?? _thumbnailCache[fileId];
                           if (bytes != null) {
                             return Image.memory(bytes, fit: BoxFit.cover);
                           }
+                          final isDark = Theme.of(context).brightness == Brightness.dark;
                           return Container(
-                            color: Colors.grey.shade300,
-                            child: const Icon(Icons.image, color: Colors.grey),
+                            color: isDark ? Colors.grey.shade900 : Colors.grey.shade300,
+                            child: const Center(
+                              child: Icon(Icons.broken_image_outlined, size: 28, color: Colors.grey),
+                            ),
                           );
                         },
                       ),
@@ -707,9 +743,7 @@ class _FullScreenPatientPhotoGalleryState extends State<_FullScreenPatientPhotoG
   @override
   Widget build(BuildContext context) {
     final currentPhoto = widget.photos[_currentIndex];
-    final dateStr = currentPhoto.createdTime != null
-        ? DateFormat('yyyy-MM-dd HH:mm:ss').format(currentPhoto.createdTime!)
-        : '';
+    final dateStr = PatientPhotosScreen.formatPhotoFullTimestamp(currentPhoto);
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -801,6 +835,58 @@ class _FullScreenPatientPhotoGalleryState extends State<_FullScreenPatientPhotoG
           );
         },
       ),
+    );
+  }
+}
+
+class _ShimmerSkeletonTile extends StatefulWidget {
+  const _ShimmerSkeletonTile();
+
+  @override
+  State<_ShimmerSkeletonTile> createState() => _ShimmerSkeletonTileState();
+}
+
+class _ShimmerSkeletonTileState extends State<_ShimmerSkeletonTile>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _controller;
+  late Animation<double> _animation;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1200),
+    )..repeat(reverse: true);
+    _animation = CurvedAnimation(parent: _controller, curve: Curves.easeInOut);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final baseColor = isDark ? Colors.grey.shade800 : Colors.grey.shade300;
+    final highlightColor = isDark ? Colors.grey.shade700 : Colors.grey.shade100;
+
+    return AnimatedBuilder(
+      animation: _animation,
+      builder: (context, child) {
+        return Container(
+          color: Color.lerp(baseColor, highlightColor, _animation.value),
+          child: Center(
+            child: Icon(
+              Icons.image_outlined,
+              size: 28,
+              color: isDark ? Colors.white24 : Colors.black12,
+            ),
+          ),
+        );
+      },
     );
   }
 }

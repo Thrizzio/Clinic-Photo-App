@@ -4,6 +4,7 @@ import 'package:clinic_photos/models/capture_session.dart';
 import 'package:clinic_photos/models/clinic_config.dart';
 import 'package:clinic_photos/models/patient.dart';
 import 'package:clinic_photos/models/upload_item.dart';
+import 'package:clinic_photos/screens/patient_photos_screen.dart';
 import 'package:clinic_photos/services/config_service.dart';
 import 'package:clinic_photos/services/database.dart';
 import 'package:clinic_photos/services/drive.dart';
@@ -454,6 +455,60 @@ void main() {
       // Local record must STILL exist
       final allUploads = await database.getAllUploads();
       expect(allUploads.where((u) => u.id == uploadItem.id).length, 1);
+    });
+  });
+
+  group('V4 Phase 6: Viewer Chronology, IST Timestamp & Progressive Thumbnails Tests', () {
+    test('6.1 parsePhotoTimestamp parses canonical V4 filename timestamp in IST', () {
+      final file = drive.File()..name = '20261024_153045_123_1.jpg';
+      final dt = PatientPhotosScreen.parsePhotoTimestamp(file);
+      expect(dt, DateTime(2026, 10, 24, 15, 30, 45, 123));
+    });
+
+    test('6.2 parsePhotoTimestamp parses legacy filename timestamp', () {
+      final file = drive.File()..name = '1000001_20260320_091530_1.jpg';
+      final dt = PatientPhotosScreen.parsePhotoTimestamp(file);
+      expect(dt, DateTime(2026, 3, 20, 9, 15, 30));
+    });
+
+    test('6.3 parsePhotoTimestamp fallbacks to createdTime in IST (+05:30)', () {
+      final utcTime = DateTime.utc(2026, 5, 10, 6, 0, 0); // 06:00 UTC = 11:30 IST
+      final file = drive.File()
+        ..name = 'unnamed_photo.jpg'
+        ..createdTime = utcTime;
+      final dt = PatientPhotosScreen.parsePhotoTimestamp(file);
+      expect(dt, DateTime(2026, 5, 10, 11, 30, 0));
+    });
+
+    test('6.4 Deterministic descending sort orders newest photos first', () {
+      final photos = [
+        drive.File()..name = '20260101_100000_000_1.jpg',
+        drive.File()..name = '20261231_235959_999_1.jpg',
+        drive.File()..name = '20260615_120000_000_1.jpg',
+      ];
+
+      photos.sort((a, b) {
+        final timeA = PatientPhotosScreen.parsePhotoTimestamp(a);
+        final timeB = PatientPhotosScreen.parsePhotoTimestamp(b);
+        final cmp = timeB.compareTo(timeA);
+        if (cmp != 0) return cmp;
+        return (b.name ?? '').compareTo(a.name ?? '');
+      });
+
+      expect(photos[0].name, '20261231_235959_999_1.jpg');
+      expect(photos[1].name, '20260615_120000_000_1.jpg');
+      expect(photos[2].name, '20260101_100000_000_1.jpg');
+    });
+
+    test('6.5 Format helpers display authoritative IST string', () {
+      final file = drive.File()..name = '20261024_153045_123_1.jpg';
+      final gridStr = PatientPhotosScreen.formatPhotoGridTimestamp(file);
+      final fullStr = PatientPhotosScreen.formatPhotoFullTimestamp(file);
+
+      expect(gridStr.contains('24 Oct'), isTrue);
+      expect(gridStr.contains('03:30 PM'), isTrue);
+      expect(fullStr.contains('24 Oct 2026'), isTrue);
+      expect(fullStr.contains('03:30:45 PM IST'), isTrue);
     });
   });
 }
