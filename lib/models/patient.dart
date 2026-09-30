@@ -14,26 +14,98 @@ enum FolderStatus {
   }
 }
 
+enum PatientSource {
+  clinicSheet,
+  doctorCreated,
+  merged;
+
+  static PatientSource fromString(String value) {
+    return switch (value.toLowerCase()) {
+      'doctor_created' || 'doctorcreated' => PatientSource.doctorCreated,
+      'merged' => PatientSource.merged,
+      _ => PatientSource.clinicSheet,
+    };
+  }
+
+  String get dbValue => switch (this) {
+        PatientSource.clinicSheet => 'clinic_sheet',
+        PatientSource.doctorCreated => 'doctor_created',
+        PatientSource.merged => 'merged',
+      };
+}
+
 class Patient {
+  /// Unique local UUID primary key.
   final String id;
-  final String name;
-  final String? phoneNumber;
-  final String? phoneNumberNormalized;
+
+  final String _name;
+  final String _normalizedName;
+  final String? _phoneDisplay;
+  final String? _normalizedPhone;
+
+  /// Optional clinic spreadsheet Patient ID (e.g. '1000001'), retained strictly for legacy/import compatibility.
+  final String? legacyPatientId;
+
+  /// Source of the record: clinic_sheet, doctor_created, or merged.
+  final PatientSource source;
+
+  /// Google Drive folder ID for storing patient clinical photos.
   final String? driveFolderId;
+
+  /// Status of the patient's Google Drive folder.
   final FolderStatus folderStatus;
+
+  /// Record creation timestamp.
+  final DateTime? createdAt;
+
+  /// Record last update timestamp.
   final DateTime? updatedAt;
 
   const Patient({
     required this.id,
-    required this.name,
-    this.phoneNumber,
-    this.phoneNumberNormalized,
+    String? name,
+    String? displayName,
+    String normalizedName = '',
+    String? phoneNumber,
+    String? phoneDisplay,
+    String? phoneNumberNormalized,
+    String? normalizedPhone,
+    this.legacyPatientId,
+    this.source = PatientSource.clinicSheet,
     this.driveFolderId,
     this.folderStatus = FolderStatus.available,
+    this.createdAt,
     this.updatedAt,
-  });
+  })  : _name = displayName ?? name ?? '',
+        // ignore: prefer_initializing_formals
+        _normalizedName = normalizedName,
+        _phoneDisplay = phoneDisplay ?? phoneNumber,
+        _normalizedPhone = normalizedPhone ?? phoneNumberNormalized;
 
-  /// Alias for id matching V3 specification.
+  /// Raw or stored name value (empty if unpopulated).
+  String get name => _name;
+
+  /// Clinical display name with original casing (e.g. 'Anil Jain').
+  String get displayName => hasValidName ? _name.trim() : 'Name unavailable';
+
+  /// Trimmed, lowercased, whitespace-collapsed name for indexing and matching.
+  String get normalizedName => _normalizedName.isNotEmpty
+      ? _normalizedName
+      : normalizeName(hasValidName ? _name.trim() : '');
+
+  /// Display phone number formatted as entered or imported (e.g. '+91 94223 01214').
+  String? get phoneDisplay => cleanPhone(_phoneDisplay);
+
+  /// Clean 10-digit phone string for indexing and matching (e.g. '9422301214').
+  String? get normalizedPhone => _normalizedPhone ?? normalizePhone(_phoneDisplay);
+
+  /// Backward-compatible alias for phoneDisplay.
+  String? get phoneNumber => phoneDisplay;
+
+  /// Backward-compatible alias for normalizedPhone.
+  String? get phoneNumberNormalized => normalizedPhone;
+
+  /// Backward-compatible alias for id.
   String get patientId => id;
 
   /// True if photos can be captured and uploaded for this patient.
@@ -44,26 +116,25 @@ class Patient {
 
   /// Whether a genuine clinical name is recorded for this patient.
   bool get hasValidName {
-    final trimmed = name.trim();
+    final trimmed = _name.trim();
     return trimmed.isNotEmpty &&
+        trimmed != 'Name unavailable' &&
         trimmed != 'Patient $id' &&
+        (legacyPatientId == null || trimmed != 'Patient $legacyPatientId') &&
         trimmed != 'Patient';
   }
 
-  /// Returns the patient's name if available, or falls back to 'Name unavailable'
-  /// if the name is empty or is a synthetic placeholder like `Patient <id>`.
-  String get displayName {
-    if (hasValidName) {
-      return name.trim();
-    }
-    return 'Name unavailable';
+  /// Normalizes a name string: trims, lowercases, collapses multi-spaces.
+  static String normalizeName(String raw) {
+    return raw
+        .trim()
+        .toLowerCase()
+        .replaceAll(RegExp(r'\s+'), ' ');
   }
 
-  /// Normalizes a phone number for search indexing.
-  /// Strips formatting characters (spaces, dashes, parens, plus, dots).
-  /// Strips common national/international prefixes (+91, leading 0) so
-  /// formatted variants like '+91 98765 43210', '+919876543210', and '9876543210' match identically.
-  /// Rejects fake/placeholder strings like 'unknown', 'none', '-', '0000000000'.
+  /// Normalizes a phone number for indexing and exact business deduplication.
+  /// Handles Indian prefixes (+91, 91, leading 0), scientific notation (9.422E9), decimal floats.
+  /// Returns null for empty, placeholder, or invalid inputs.
   static String? normalizePhone(String? raw) {
     if (raw == null) return null;
     var trimmed = raw.trim();
@@ -106,6 +177,9 @@ class Patient {
       digits = digits.substring(1);
     }
 
+    if (digits.length == 10) {
+      return digits;
+    }
     return digits.isNotEmpty ? digits : null;
   }
 
@@ -127,7 +201,18 @@ class Patient {
     return trimmed;
   }
 
-  /// Merges an existing cached Patient with an incoming Patient from a new visit row.
+  /// Exact business identity check: requires identical normalized names AND matching, non-null normalized phones.
+  /// Incomplete records (missing phone) never match.
+  bool matchesBusinessIdentity(String otherNormName, String? otherNormPhone) {
+    if (normalizedName != otherNormName) return false;
+    if (normalizedPhone == null || otherNormPhone == null) return false;
+    if (normalizedPhone!.isEmpty || otherNormPhone.isEmpty) return false;
+    return normalizedPhone == otherNormPhone;
+  }
+
+  /// Merges an existing cached Patient with an incoming Patient.
+  /// Hard Invariant: If doctor-created patient matches an incoming Sheet patient,
+  /// retains existing UUID, Drive folder, and sets legacyPatientId with source = merged.
   static Patient merge(Patient existing, Patient incoming) {
     FolderStatus mergedStatus = incoming.folderStatus;
     String? mergedFolderId = incoming.driveFolderId;
@@ -138,11 +223,13 @@ class Patient {
       mergedFolderId = null;
     } else if (existing.folderStatus == FolderStatus.available &&
         incoming.folderStatus == FolderStatus.available) {
-      if (existing.driveFolderId != incoming.driveFolderId) {
+      if (existing.driveFolderId != incoming.driveFolderId &&
+          existing.driveFolderId != null &&
+          incoming.driveFolderId != null) {
         mergedStatus = FolderStatus.conflict;
         mergedFolderId = null;
       } else {
-        mergedFolderId = existing.driveFolderId;
+        mergedFolderId = existing.driveFolderId ?? incoming.driveFolderId;
         mergedStatus = FolderStatus.available;
       }
     } else if (existing.folderStatus == FolderStatus.available &&
@@ -154,28 +241,43 @@ class Patient {
       mergedStatus = FolderStatus.available;
       mergedFolderId = incoming.driveFolderId;
     } else {
-      mergedStatus = FolderStatus.missing;
-      mergedFolderId = null;
+      mergedStatus = existing.driveFolderId != null ? existing.folderStatus : incoming.folderStatus;
+      mergedFolderId = existing.driveFolderId ?? incoming.driveFolderId;
     }
 
     // Preserve valid clinical name: incoming name overwrites only if genuine.
     final mergedName = incoming.hasValidName
-        ? incoming.name.trim()
-        : (existing.hasValidName ? existing.name.trim() : (incoming.name.trim().isNotEmpty ? incoming.name.trim() : existing.name.trim()));
+        ? incoming.displayName.trim()
+        : (existing.hasValidName ? existing.displayName.trim() : (incoming.name.trim().isNotEmpty ? incoming.name.trim() : existing.name.trim()));
 
     // Preserve valid phone number: incoming non-empty/valid phone overwrites; otherwise retain existing.
-    final incomingPhoneClean = cleanPhone(incoming.phoneNumber);
-    final existingPhoneClean = cleanPhone(existing.phoneNumber);
+    final incomingPhoneClean = cleanPhone(incoming.phoneDisplay);
+    final existingPhoneClean = cleanPhone(existing.phoneDisplay);
     final mergedPhone = incomingPhoneClean ?? existingPhoneClean;
-    final mergedNormPhone = normalizePhone(mergedPhone);
+
+    // Source determination: if either was doctorCreated or already merged, result is merged.
+    PatientSource mergedSource = existing.source;
+    if ((existing.source == PatientSource.doctorCreated && incoming.source == PatientSource.clinicSheet) ||
+        (existing.source == PatientSource.clinicSheet && incoming.source == PatientSource.doctorCreated)) {
+      mergedSource = PatientSource.merged;
+    } else if (incoming.source == PatientSource.merged) {
+      mergedSource = PatientSource.merged;
+    }
+
+    final mergedLegacyId = incoming.legacyPatientId ?? existing.legacyPatientId;
 
     return Patient(
-      id: incoming.id,
+      id: existing.id, // Always retain existing local UUID
       name: mergedName,
-      phoneNumber: mergedPhone,
-      phoneNumberNormalized: mergedNormPhone,
+      displayName: mergedName,
+      normalizedName: normalizeName(mergedName),
+      phoneDisplay: mergedPhone,
+      normalizedPhone: normalizePhone(mergedPhone),
+      legacyPatientId: mergedLegacyId,
+      source: mergedSource,
       driveFolderId: mergedFolderId,
       folderStatus: mergedStatus,
+      createdAt: existing.createdAt,
       updatedAt: DateTime.now(),
     );
   }
@@ -187,6 +289,7 @@ class Patient {
     required String nameCol,
     required String folderCol,
     String? phoneCol,
+    String? generatedId,
   }) {
     final rawId = rowMap[idCol]?.toString().trim() ?? '';
     final rawName = rowMap[nameCol]?.toString().trim() ?? '';
@@ -200,81 +303,106 @@ class Patient {
     final cleanPhoneNumber = cleanPhone(rawPhone);
     final normPhone = normalizePhone(cleanPhoneNumber);
 
-    if (rawFolder.isEmpty) {
-      return Patient(
-        id: rawId,
-        name: rawName,
-        phoneNumber: cleanPhoneNumber,
-        phoneNumberNormalized: normPhone,
-        driveFolderId: null,
-        folderStatus: FolderStatus.missing,
-        updatedAt: DateTime.now(),
-      );
-    }
-
     return Patient(
-      id: rawId,
+      id: generatedId ?? rawId,
       name: rawName,
-      phoneNumber: cleanPhoneNumber,
-      phoneNumberNormalized: normPhone,
-      driveFolderId: rawFolder,
-      folderStatus: FolderStatus.available,
+      displayName: rawName,
+      normalizedName: normalizeName(rawName),
+      phoneDisplay: cleanPhoneNumber,
+      normalizedPhone: normPhone,
+      legacyPatientId: rawId,
+      source: PatientSource.clinicSheet,
+      driveFolderId: rawFolder.isNotEmpty ? rawFolder : null,
+      folderStatus: rawFolder.isNotEmpty ? FolderStatus.available : FolderStatus.missing,
+      createdAt: DateTime.now(),
       updatedAt: DateTime.now(),
     );
   }
 
   /// Convert to SQLite map
   Map<String, dynamic> toMap() {
-    final cleanP = cleanPhone(phoneNumber);
-    final normP = phoneNumberNormalized ?? normalizePhone(cleanP);
+    final cleanP = cleanPhone(phoneDisplay);
+    final normP = normalizedPhone ?? normalizePhone(cleanP);
+    final createdIso = (createdAt ?? DateTime.now()).toIso8601String();
+    final updatedIso = (updatedAt ?? DateTime.now()).toIso8601String();
     return {
       'id': id,
-      'name': name,
-      'phone_number': cleanP,
-      'phone_number_normalized': normP,
+      'display_name': displayName,
+      'normalized_name': normalizedName,
+      'phone_display': cleanP,
+      'normalized_phone': normP,
+      'legacy_patient_id': legacyPatientId,
+      'source': source.dbValue,
       'drive_folder_id': driveFolderId,
       'folder_status': folderStatus.name,
-      'updated_at': (updatedAt ?? DateTime.now()).toIso8601String(),
+      'created_at': createdIso,
+      'updated_at': updatedIso,
+      // Legacy backward-compatibility columns
+      'name': _name,
+      'phone_number': cleanP,
+      'phone_number_normalized': normP,
     };
   }
 
   /// Create from SQLite map
   factory Patient.fromMap(Map<String, dynamic> map) {
-    final rawPhone = map['phone_number'] as String?;
-    final cleanP = cleanPhone(rawPhone);
-    final normP = (map['phone_number_normalized'] as String?) ?? normalizePhone(cleanP);
+    final rawName = (map['name'] ?? map['display_name'] ?? '') as String;
+    final rawDisplayName = (map['display_name'] ?? map['name'] ?? '') as String;
+    final rawNormName = (map['normalized_name'] as String?) ?? normalizeName(rawDisplayName);
+    final rawPhoneDisplay = (map['phone_display'] ?? map['phone_number']) as String?;
+    final cleanP = cleanPhone(rawPhoneDisplay);
+    final normP = (map['normalized_phone'] ?? map['phone_number_normalized']) as String? ?? normalizePhone(cleanP);
+    final rawSource = (map['source'] as String?) ?? 'clinic_sheet';
+    final legacyId = (map['legacy_patient_id'] as String?) ??
+        ((map['id'] != null && !map['id'].toString().contains('-')) ? map['id'].toString() : null);
 
     return Patient(
-      id: ((map['patient_id'] ?? map['id']) as String?) ?? '',
-      name: (map['name'] as String?) ?? '',
-      phoneNumber: cleanP,
-      phoneNumberNormalized: normP,
+      id: ((map['id'] ?? map['patient_id']) as String?) ?? '',
+      name: rawName,
+      displayName: rawDisplayName,
+      normalizedName: rawNormName,
+      phoneDisplay: cleanP,
+      normalizedPhone: normP,
+      legacyPatientId: legacyId,
+      source: PatientSource.fromString(rawSource),
       driveFolderId: map['drive_folder_id'] as String?,
-      folderStatus: FolderStatus.fromString(
-        map['folder_status'] as String? ?? 'available',
-      ),
-      updatedAt: map['updated_at'] != null
-          ? DateTime.tryParse(map['updated_at'] as String)
-          : null,
+      folderStatus: FolderStatus.fromString(map['folder_status'] as String? ?? 'available'),
+      createdAt: map['created_at'] != null ? DateTime.tryParse(map['created_at'] as String) : null,
+      updatedAt: map['updated_at'] != null ? DateTime.tryParse(map['updated_at'] as String) : null,
     );
   }
 
   Patient copyWith({
     String? id,
     String? name,
-    String? phoneNumber,
-    String? phoneNumberNormalized,
+    String? displayName,
+    String? normalizedName,
+    String? phoneDisplay,
+    String? normalizedPhone,
+    String? legacyPatientId,
+    PatientSource? source,
     String? driveFolderId,
     FolderStatus? folderStatus,
+    DateTime? createdAt,
     DateTime? updatedAt,
+    // Legacy parameter aliases
+    String? phoneNumber,
+    String? phoneNumberNormalized,
   }) {
+    final effectiveName = name ?? displayName ?? _name;
+    final effectivePhoneDisplay = phoneDisplay ?? phoneNumber ?? _phoneDisplay;
     return Patient(
       id: id ?? this.id,
-      name: name ?? this.name,
-      phoneNumber: phoneNumber ?? this.phoneNumber,
-      phoneNumberNormalized: phoneNumberNormalized ?? this.phoneNumberNormalized,
+      name: effectiveName,
+      displayName: displayName ?? effectiveName,
+      normalizedName: normalizedName ?? normalizeName(effectiveName),
+      phoneDisplay: effectivePhoneDisplay,
+      normalizedPhone: normalizedPhone ?? normalizePhone(effectivePhoneDisplay),
+      legacyPatientId: legacyPatientId ?? this.legacyPatientId,
+      source: source ?? this.source,
       driveFolderId: driveFolderId ?? this.driveFolderId,
       folderStatus: folderStatus ?? this.folderStatus,
+      createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
     );
   }
@@ -285,20 +413,20 @@ class Patient {
       other is Patient &&
           runtimeType == other.runtimeType &&
           id == other.id &&
-          name == other.name &&
-          phoneNumber == other.phoneNumber &&
+          _name == other._name &&
+          normalizedPhone == other.normalizedPhone &&
           driveFolderId == other.driveFolderId &&
           folderStatus == other.folderStatus;
 
   @override
   int get hashCode =>
       id.hashCode ^
-      name.hashCode ^
-      (phoneNumber?.hashCode ?? 0) ^
+      _name.hashCode ^
+      (normalizedPhone?.hashCode ?? 0) ^
       (driveFolderId?.hashCode ?? 0) ^
       folderStatus.hashCode;
 
   @override
   String toString() =>
-      'Patient(id: $id, name: $name, phone: $phoneNumber, driveFolderId: $driveFolderId, status: ${folderStatus.name})';
+      'Patient(id: $id, name: $displayName, phone: $phoneDisplay, legacyId: $legacyPatientId, source: ${source.dbValue}, driveFolderId: $driveFolderId, status: ${folderStatus.name})';
 }

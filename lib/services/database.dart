@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart';
+import 'package:uuid/uuid.dart';
 import '../models/capture_session.dart';
 import '../models/patient.dart';
 import '../models/upload_item.dart';
@@ -26,13 +27,16 @@ abstract class AppDatabase {
   /// Replaces the entire patients cache with fresh records.
   Future<void> replacePatients(List<Patient> patients);
 
-  /// Upserts a batch of patients (used during incremental sync).
+  /// Upserts a batch of patients (used during incremental sync and deduplication).
   Future<void> upsertPatients(List<Patient> patients);
 
-  /// Retrieves a single patient by ID.
+  /// Retrieves a single patient by ID (UUID or legacy patient ID).
   Future<Patient?> getPatient(String id);
 
-  /// Retrieves all cached patients sorted by ID.
+  /// Retrieves a patient by exact business identity (normalized name + normalized phone).
+  Future<Patient?> getPatientByBusinessIdentity(String normalizedName, String? normalizedPhone);
+
+  /// Retrieves all cached patients sorted by name.
   Future<List<Patient>> getPatients();
 
   /// Search patients with optional filter mode (All, Name, Phone, Patient ID).
@@ -67,8 +71,7 @@ abstract class AppDatabase {
   /// Updates a patient's cached record.
   Future<void> updatePatient(Patient patient);
 
-  /// Atomically assigns an unassigned session and all its photos to a patient,
-  /// transitioning all photos to waiting status for upload.
+  /// Atomically assigns an unassigned session and all its photos to a patient.
   Future<void> assignSessionToPatient({
     required String sessionId,
     required String patientId,
@@ -138,7 +141,7 @@ abstract class AppDatabase {
 /// SQLite-backed production database implementation for Android.
 class SqliteAppDatabase implements AppDatabase {
   static const String _dbName = 'clinic_photos.db';
-  static const int _dbVersion = 6;
+  static const int _dbVersion = 7;
 
   final Database db;
 
@@ -159,12 +162,19 @@ class SqliteAppDatabase implements AppDatabase {
           await db.execute('''
             CREATE TABLE patients (
               id TEXT PRIMARY KEY,
-              name TEXT NOT NULL,
-              phone_number TEXT,
-              phone_number_normalized TEXT,
+              display_name TEXT NOT NULL,
+              normalized_name TEXT NOT NULL,
+              phone_display TEXT,
+              normalized_phone TEXT,
+              legacy_patient_id TEXT,
+              source TEXT NOT NULL,
               drive_folder_id TEXT,
               folder_status TEXT NOT NULL,
-              updated_at TEXT
+              created_at TEXT NOT NULL,
+              updated_at TEXT,
+              name TEXT,
+              phone_number TEXT,
+              phone_number_normalized TEXT
             )
           ''');
 
@@ -172,13 +182,20 @@ class SqliteAppDatabase implements AppDatabase {
             'CREATE INDEX IF NOT EXISTS idx_patients_status ON patients(folder_status)',
           );
           await db.execute(
-            'CREATE INDEX IF NOT EXISTS idx_patients_search ON patients(id, name, phone_number_normalized)',
+            'CREATE INDEX IF NOT EXISTS idx_patients_business_id ON patients(normalized_name, normalized_phone)',
+          );
+          await db.execute(
+            'CREATE INDEX IF NOT EXISTS idx_patients_legacy_id ON patients(legacy_patient_id)',
+          );
+          await db.execute(
+            'CREATE INDEX IF NOT EXISTS idx_patients_search ON patients(normalized_name, normalized_phone)',
           );
 
           await db.execute('''
             CREATE TABLE capture_sessions (
               id TEXT PRIMARY KEY,
               patient_id TEXT,
+              drive_folder_id TEXT,
               created_at TEXT NOT NULL,
               status TEXT NOT NULL
             )
@@ -190,6 +207,7 @@ class SqliteAppDatabase implements AppDatabase {
               session_id TEXT,
               patient_id TEXT,
               drive_folder_id TEXT,
+              drive_parent_folder_id TEXT,
               local_path TEXT NOT NULL,
               file_name TEXT NOT NULL,
               status TEXT NOT NULL,
@@ -219,50 +237,19 @@ class SqliteAppDatabase implements AppDatabase {
                 status TEXT NOT NULL
               )
             ''');
-
-            try {
-              await db.execute(
-                "ALTER TABLE patients ADD COLUMN folder_status TEXT NOT NULL DEFAULT 'available'",
-              );
-            } catch (_) {}
           }
 
-          if (oldVersion < 3) {
-            await _ensureUploadsTableSchema(db);
-          }
-
-          if (oldVersion < 4) {
-            try {
-              await db.execute("ALTER TABLE patients ADD COLUMN updated_at TEXT");
-            } catch (_) {}
-            try {
-              await db.execute("ALTER TABLE uploads ADD COLUMN captured_at TEXT");
-            } catch (_) {}
-            try {
-              await db.execute("ALTER TABLE uploads ADD COLUMN sequence_number INTEGER NOT NULL DEFAULT 1");
-            } catch (_) {}
-            try {
-              await db.execute("CREATE INDEX IF NOT EXISTS idx_uploads_patient_id ON uploads(patient_id)");
-              await db.execute("CREATE INDEX IF NOT EXISTS idx_uploads_session_id ON uploads(session_id)");
-            } catch (_) {}
-          }
-
-          if (oldVersion < 5) {
-            await _ensurePatientsTableSchema(db);
-          }
-
-          if (oldVersion < 6) {
-            await _ensurePatientsTableSchema(db);
+          if (oldVersion < 7) {
+            await _migrateToV7(db);
           }
         },
         onOpen: (db) async {
-          // Ensure schema compatibility on existing databases (nullable patient_id / drive_folder_id)
-          await _ensurePatientsTableSchema(db);
+          // Ensure schema compatibility on existing databases
+          await _migrateToV7(db);
           await _ensureUploadsTableSchema(db);
 
           // Crash recovery: Any upload that was interrupted in 'uploading'
           // status is reset to 'waiting' so processing will resume cleanly.
-          // Note: 'unassigned' photos are untouched by crash recovery.
           await db.update(
             'uploads',
             {'status': UploadStatus.waiting.name},
@@ -277,7 +264,7 @@ class SqliteAppDatabase implements AppDatabase {
   }
 
   /// Migrates patients table if drive_folder_id has a NOT NULL constraint,
-  /// or if folder_status, updated_at, phone_number, or phone_number_normalized are missing.
+  /// or if folder_status, updated_at, phone_number, or phone_number_normalized are missing (v5 -> v6).
   static Future<void> _ensurePatientsTableSchema(Database db) async {
     final tableInfo = await db.rawQuery("PRAGMA table_info(patients)");
     if (tableInfo.isEmpty) return;
@@ -341,12 +328,152 @@ class SqliteAppDatabase implements AppDatabase {
     }
   }
 
-  /// Visible for unit testing schema migration.
+  /// Visible for unit testing legacy schema migration.
   @visibleForTesting
   static Future<void> ensurePatientsTableSchemaForTesting(Database db) =>
       _ensurePatientsTableSchema(db);
 
-  /// Migrates uploads table if patient_id has a NOT NULL constraint or session_id is missing.
+  /// Migrates older database versions to Schema v7:
+  /// - Introduces local UUIDs as primary key while copying numeric IDs to legacy_patient_id
+  /// - Normalizes names and phones
+  /// - Adds source column ('clinic_sheet' | 'doctor_created' | 'merged')
+  /// - Maps uploads.patient_id and capture_sessions.patient_id to new UUIDs
+  /// - Adds drive_folder_id to capture_sessions and drive_parent_folder_id to uploads
+  static Future<void> _migrateToV7(Database db) async {
+    final tableInfo = await db.rawQuery("PRAGMA table_info(patients)");
+    if (tableInfo.isEmpty) return;
+
+    final hasDisplayName = tableInfo.any((c) => c['name'] == 'display_name');
+    final hasSource = tableInfo.any((c) => c['name'] == 'source');
+    final hasLegacyId = tableInfo.any((c) => c['name'] == 'legacy_patient_id');
+
+    if (!hasDisplayName || !hasSource || !hasLegacyId) {
+      await db.transaction((txn) async {
+        final oldPatients = await txn.query('patients');
+        final Map<String, String> oldIdToNewUuid = {};
+        const uuidGen = Uuid();
+
+        await txn.execute('ALTER TABLE patients RENAME TO _patients_old_v6');
+        await txn.execute('''
+          CREATE TABLE patients (
+            id TEXT PRIMARY KEY,
+            display_name TEXT NOT NULL,
+            normalized_name TEXT NOT NULL,
+            phone_display TEXT,
+            normalized_phone TEXT,
+            legacy_patient_id TEXT,
+            source TEXT NOT NULL,
+            drive_folder_id TEXT,
+            folder_status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT,
+            name TEXT,
+            phone_number TEXT,
+            phone_number_normalized TEXT
+          )
+        ''');
+
+        for (final row in oldPatients) {
+          final oldId = row['id']?.toString() ?? '';
+          final oldName = (row['name'] ?? row['display_name'] ?? '').toString();
+          final oldPhone = (row['phone_display'] ?? row['phone_number'])?.toString();
+          final cleanP = Patient.cleanPhone(oldPhone);
+          final normP = Patient.normalizePhone(cleanP);
+          final normName = Patient.normalizeName(oldName);
+          final driveFolderId = row['drive_folder_id']?.toString();
+          final folderStatus = row['folder_status']?.toString() ?? 'available';
+          final updatedAt = row['updated_at']?.toString();
+          final createdAt = row['created_at']?.toString() ?? (updatedAt ?? DateTime.now().toIso8601String());
+
+          final isUuid = oldId.contains('-');
+          final newId = isUuid ? oldId : uuidGen.v4();
+          final legacyId = isUuid ? (row['legacy_patient_id']?.toString()) : oldId;
+
+          if (!isUuid && oldId.isNotEmpty) {
+            oldIdToNewUuid[oldId] = newId;
+          }
+
+          await txn.insert('patients', {
+            'id': newId,
+            'display_name': oldName.isNotEmpty ? oldName : 'Name unavailable',
+            'normalized_name': normName,
+            'phone_display': cleanP,
+            'normalized_phone': normP,
+            'legacy_patient_id': legacyId,
+            'source': 'clinic_sheet',
+            'drive_folder_id': driveFolderId,
+            'folder_status': folderStatus,
+            'created_at': createdAt,
+            'updated_at': updatedAt,
+            'name': oldName,
+            'phone_number': cleanP,
+            'phone_number_normalized': normP,
+          });
+        }
+
+        await txn.execute('DROP TABLE _patients_old_v6');
+
+        await txn.execute(
+          'CREATE INDEX IF NOT EXISTS idx_patients_status ON patients(folder_status)',
+        );
+        await txn.execute(
+          'CREATE INDEX IF NOT EXISTS idx_patients_business_id ON patients(normalized_name, normalized_phone)',
+        );
+        await txn.execute(
+          'CREATE INDEX IF NOT EXISTS idx_patients_legacy_id ON patients(legacy_patient_id)',
+        );
+        await txn.execute(
+          'CREATE INDEX IF NOT EXISTS idx_patients_search ON patients(normalized_name, normalized_phone)',
+        );
+
+        // Ensure capture_sessions table exists and has drive_folder_id
+        final sessionsInfo = await txn.rawQuery("PRAGMA table_info(capture_sessions)");
+        if (sessionsInfo.isNotEmpty) {
+          final hasSessionDriveFolder = sessionsInfo.any((c) => c['name'] == 'drive_folder_id');
+          if (!hasSessionDriveFolder) {
+            try {
+              await txn.execute('ALTER TABLE capture_sessions ADD COLUMN drive_folder_id TEXT');
+            } catch (_) {}
+          }
+          for (final entry in oldIdToNewUuid.entries) {
+            await txn.update(
+              'capture_sessions',
+              {'patient_id': entry.value},
+              where: 'patient_id = ?',
+              whereArgs: [entry.key],
+            );
+          }
+        }
+
+        // Ensure uploads table updates patient_id and has drive_parent_folder_id
+        final uploadsInfo = await txn.rawQuery("PRAGMA table_info(uploads)");
+        if (uploadsInfo.isNotEmpty) {
+          final hasDriveParentFolder = uploadsInfo.any((c) => c['name'] == 'drive_parent_folder_id');
+          if (!hasDriveParentFolder) {
+            try {
+              await txn.execute('ALTER TABLE uploads ADD COLUMN drive_parent_folder_id TEXT');
+              await txn.execute('UPDATE uploads SET drive_parent_folder_id = drive_folder_id');
+            } catch (_) {}
+          }
+          for (final entry in oldIdToNewUuid.entries) {
+            await txn.update(
+              'uploads',
+              {'patient_id': entry.value},
+              where: 'patient_id = ?',
+              whereArgs: [entry.key],
+            );
+          }
+        }
+      });
+    }
+  }
+
+  /// Visible for unit testing V7 schema migration.
+  @visibleForTesting
+  static Future<void> migrateToV7ForTesting(Database db) =>
+      _migrateToV7(db);
+
+  /// Migrates uploads table if columns are missing or malformed.
   static Future<void> _ensureUploadsTableSchema(Database db) async {
     final tableInfo = await db.rawQuery("PRAGMA table_info(uploads)");
     if (tableInfo.isEmpty) return;
@@ -358,9 +485,10 @@ class SqliteAppDatabase implements AppDatabase {
     final hasSessionId = tableInfo.any((c) => c['name'] == 'session_id');
     final hasCapturedAt = tableInfo.any((c) => c['name'] == 'captured_at');
     final hasSeq = tableInfo.any((c) => c['name'] == 'sequence_number');
+    final hasParentFolder = tableInfo.any((c) => c['name'] == 'drive_parent_folder_id');
 
     final isPatientIdNotNull = patientIdCol['notnull'] == 1;
-    final needsMigration = isPatientIdNotNull || !hasSessionId || !hasCapturedAt || !hasSeq;
+    final needsMigration = isPatientIdNotNull || !hasSessionId || !hasCapturedAt || !hasSeq || !hasParentFolder;
 
     if (needsMigration) {
       await db.transaction((txn) async {
@@ -371,6 +499,7 @@ class SqliteAppDatabase implements AppDatabase {
             session_id TEXT,
             patient_id TEXT,
             drive_folder_id TEXT,
+            drive_parent_folder_id TEXT,
             local_path TEXT NOT NULL,
             file_name TEXT NOT NULL,
             status TEXT NOT NULL,
@@ -387,14 +516,16 @@ class SqliteAppDatabase implements AppDatabase {
         final oldHasSessionId = oldColumns.any((c) => c['name'] == 'session_id');
         final oldHasCapturedAt = oldColumns.any((c) => c['name'] == 'captured_at');
         final oldHasSeq = oldColumns.any((c) => c['name'] == 'sequence_number');
+        final oldHasParent = oldColumns.any((c) => c['name'] == 'drive_parent_folder_id');
 
         final selectSessionId = oldHasSessionId ? "session_id" : "NULL";
         final selectCapturedAt = oldHasCapturedAt ? "captured_at" : "created_at";
         final selectSeq = oldHasSeq ? "sequence_number" : "1";
+        final selectParent = oldHasParent ? "drive_parent_folder_id" : "drive_folder_id";
 
         await txn.execute('''
-          INSERT INTO uploads (id, session_id, patient_id, drive_folder_id, local_path, file_name, status, retry_count, last_error, drive_file_id, created_at, captured_at, sequence_number)
-          SELECT id, $selectSessionId, patient_id, drive_folder_id, local_path, file_name, status, retry_count, last_error, drive_file_id, created_at, $selectCapturedAt, $selectSeq
+          INSERT INTO uploads (id, session_id, patient_id, drive_folder_id, drive_parent_folder_id, local_path, file_name, status, retry_count, last_error, drive_file_id, created_at, captured_at, sequence_number)
+          SELECT id, $selectSessionId, patient_id, drive_folder_id, $selectParent, local_path, file_name, status, retry_count, last_error, drive_file_id, created_at, $selectCapturedAt, $selectSeq
           FROM _uploads_old
         ''');
 
@@ -427,12 +558,37 @@ class SqliteAppDatabase implements AppDatabase {
   Future<void> upsertPatients(List<Patient> patients) async {
     await db.transaction((txn) async {
       for (final incoming in patients) {
-        final existingRows = await txn.query(
+        // 1. Check exact UUID match
+        List<Map<String, dynamic>> existingRows = await txn.query(
           'patients',
           where: 'id = ?',
           whereArgs: [incoming.id],
           limit: 1,
         );
+
+        // 2. Check exact business identity match: (normalized_name, normalized_phone)
+        if (existingRows.isEmpty &&
+            incoming.normalizedPhone != null &&
+            incoming.normalizedPhone!.isNotEmpty) {
+          existingRows = await txn.query(
+            'patients',
+            where: 'normalized_name = ? AND normalized_phone = ?',
+            whereArgs: [incoming.normalizedName, incoming.normalizedPhone],
+            limit: 1,
+          );
+        }
+
+        // 3. Check legacy_patient_id match if incoming has one
+        if (existingRows.isEmpty &&
+            incoming.legacyPatientId != null &&
+            incoming.legacyPatientId!.isNotEmpty) {
+          existingRows = await txn.query(
+            'patients',
+            where: 'legacy_patient_id = ?',
+            whereArgs: [incoming.legacyPatientId],
+            limit: 1,
+          );
+        }
 
         if (existingRows.isEmpty) {
           await txn.insert(
@@ -447,7 +603,7 @@ class SqliteAppDatabase implements AppDatabase {
             'patients',
             merged.toMap(),
             where: 'id = ?',
-            whereArgs: [incoming.id],
+            whereArgs: [existing.id],
           );
         }
       }
@@ -460,6 +616,33 @@ class SqliteAppDatabase implements AppDatabase {
       'patients',
       where: 'id = ?',
       whereArgs: [id],
+      limit: 1,
+    );
+    if (rows.isNotEmpty) {
+      return Patient.fromMap(rows.first);
+    }
+
+    // Fallback for lookup by legacy spreadsheet ID
+    final legacyRows = await db.query(
+      'patients',
+      where: 'legacy_patient_id = ?',
+      whereArgs: [id],
+      limit: 1,
+    );
+    if (legacyRows.isNotEmpty) {
+      return Patient.fromMap(legacyRows.first);
+    }
+
+    return null;
+  }
+
+  @override
+  Future<Patient?> getPatientByBusinessIdentity(String normalizedName, String? normalizedPhone) async {
+    if (normalizedPhone == null || normalizedPhone.isEmpty) return null;
+    final rows = await db.query(
+      'patients',
+      where: 'normalized_name = ? AND normalized_phone = ?',
+      whereArgs: [normalizedName, normalizedPhone],
       limit: 1,
     );
     if (rows.isEmpty) return null;
@@ -490,29 +673,31 @@ class SqliteAppDatabase implements AppDatabase {
 
     switch (mode) {
       case SearchFilterMode.name:
-        whereClause = 'LOWER(name) LIKE ?';
-        whereArgs = ['%$lower%'];
+        whereClause = 'normalized_name LIKE ? OR LOWER(display_name) LIKE ?';
+        whereArgs = ['%$lower%', '%$lower%'];
         break;
       case SearchFilterMode.patientId:
-        whereClause = 'LOWER(id) LIKE ?';
-        whereArgs = ['%$lower%'];
+        whereClause = 'LOWER(id) LIKE ? OR legacy_patient_id LIKE ?';
+        whereArgs = ['%$lower%', '%$lower%'];
         break;
       case SearchFilterMode.phone:
-        if (normPhone != null && normPhone.isNotEmpty) {
-          whereClause = '(phone_number_normalized IS NOT NULL AND phone_number_normalized LIKE ?) OR (phone_number IS NOT NULL AND LOWER(phone_number) LIKE ?)';
-          whereArgs = ['%$normPhone%', '%$lower%'];
+        if (normPhone != null) {
+          whereClause = 'normalized_phone LIKE ? OR phone_display LIKE ?';
+          whereArgs = ['%$normPhone%', '%$trimmed%'];
         } else {
-          whereClause = 'phone_number IS NOT NULL AND LOWER(phone_number) LIKE ?';
-          whereArgs = ['%$lower%'];
+          whereClause = 'phone_display LIKE ?';
+          whereArgs = ['%$trimmed%'];
         }
         break;
       case SearchFilterMode.all:
-        if (normPhone != null && normPhone.isNotEmpty) {
-          whereClause = 'LOWER(id) LIKE ? OR LOWER(name) LIKE ? OR (phone_number_normalized IS NOT NULL AND phone_number_normalized LIKE ?) OR (phone_number IS NOT NULL AND LOWER(phone_number) LIKE ?)';
-          whereArgs = ['%$lower%', '%$lower%', '%$normPhone%', '%$lower%'];
+        if (normPhone != null) {
+          whereClause =
+              'normalized_name LIKE ? OR LOWER(display_name) LIKE ? OR normalized_phone LIKE ? OR phone_display LIKE ? OR legacy_patient_id LIKE ? OR LOWER(id) LIKE ?';
+          whereArgs = ['%$lower%', '%$lower%', '%$normPhone%', '%$trimmed%', '%$lower%', '%$lower%'];
         } else {
-          whereClause = 'LOWER(id) LIKE ? OR LOWER(name) LIKE ? OR (phone_number IS NOT NULL AND LOWER(phone_number) LIKE ?)';
-          whereArgs = ['%$lower%', '%$lower%', '%$lower%'];
+          whereClause =
+              'normalized_name LIKE ? OR LOWER(display_name) LIKE ? OR phone_display LIKE ? OR legacy_patient_id LIKE ? OR LOWER(id) LIKE ?';
+          whereArgs = ['%$lower%', '%$lower%', '%$trimmed%', '%$lower%', '%$lower%'];
         }
         break;
     }
@@ -542,24 +727,29 @@ class SqliteAppDatabase implements AppDatabase {
       limit: 1,
     );
     if (rows.isEmpty) return null;
+
+    final session = CaptureSession.fromMap(rows.first);
     final count = Sqflite.firstIntValue(await db.rawQuery(
       'SELECT COUNT(*) FROM uploads WHERE session_id = ?',
       [id],
     ));
-    return CaptureSession.fromMap(rows.first, photoCount: count ?? 0);
+
+    return session.copyWith(photoCount: count ?? 0);
   }
 
   @override
   Future<List<CaptureSession>> getUnassignedSessions() async {
     final rows = await db.rawQuery('''
-      SELECT s.*, COUNT(u.id) as photo_count
+      SELECT s.id, s.patient_id, s.drive_folder_id, s.created_at, s.status,
+             COUNT(u.id) as photo_count
       FROM capture_sessions s
       LEFT JOIN uploads u ON s.id = u.session_id
       WHERE s.status = 'unassigned'
       GROUP BY s.id
       ORDER BY s.created_at DESC
     ''');
-    return rows.map(CaptureSession.fromMap).toList();
+
+    return rows.map((r) => CaptureSession.fromMap(r)).toList();
   }
 
   @override
@@ -635,6 +825,7 @@ class SqliteAppDatabase implements AppDatabase {
             {
               'patient_id': patientId,
               'drive_folder_id': driveFolderId,
+              'drive_parent_folder_id': driveFolderId,
               'file_name': entry.value.fileName,
               'local_path': entry.value.localPath,
               'status': UploadStatus.waiting.name,
@@ -649,6 +840,7 @@ class SqliteAppDatabase implements AppDatabase {
           {
             'patient_id': patientId,
             'drive_folder_id': driveFolderId,
+            'drive_parent_folder_id': driveFolderId,
             'status': UploadStatus.waiting.name,
           },
           where: 'session_id = ?',
@@ -796,18 +988,62 @@ class InMemoryAppDatabase implements AppDatabase {
   @override
   Future<void> upsertPatients(List<Patient> patients) async {
     for (final incoming in patients) {
-      final existing = _patients[incoming.id];
+      Patient? existing = _patients[incoming.id];
+
+      // Match by exact business identity
+      if (existing == null &&
+          incoming.normalizedPhone != null &&
+          incoming.normalizedPhone!.isNotEmpty) {
+        for (final p in _patients.values) {
+          if (p.matchesBusinessIdentity(incoming.normalizedName, incoming.normalizedPhone)) {
+            existing = p;
+            break;
+          }
+        }
+      }
+
+      // Match by legacy_patient_id
+      if (existing == null &&
+          incoming.legacyPatientId != null &&
+          incoming.legacyPatientId!.isNotEmpty) {
+        for (final p in _patients.values) {
+          if (p.legacyPatientId == incoming.legacyPatientId) {
+            existing = p;
+            break;
+          }
+        }
+      }
+
       if (existing == null) {
         _patients[incoming.id] = incoming;
       } else {
-        _patients[incoming.id] = Patient.merge(existing, incoming);
+        _patients[existing.id] = Patient.merge(existing, incoming);
       }
     }
   }
 
   @override
   Future<Patient?> getPatient(String id) async {
-    return _patients[id];
+    if (_patients.containsKey(id)) {
+      return _patients[id];
+    }
+    for (final p in _patients.values) {
+      if (p.legacyPatientId == id) {
+        return p;
+      }
+    }
+    return null;
+  }
+
+  @override
+  Future<Patient?> getPatientByBusinessIdentity(String normalizedName, String? normalizedPhone) async {
+    if (normalizedPhone == null || normalizedPhone.isEmpty) return null;
+    for (final patient in _patients.values) {
+      if (patient.matchesBusinessIdentity(normalizedName, normalizedPhone)) {
+        return patient;
+      }
+    }
+    return null;
   }
 
   @override
@@ -830,10 +1066,12 @@ class InMemoryAppDatabase implements AppDatabase {
     final normPhone = Patient.normalizePhone(trimmed);
 
     final matches = _patients.values.where((p) {
-      final matchesId = p.id.toLowerCase().contains(lower);
-      final matchesName = p.name.toLowerCase().contains(lower);
-      final matchesPhone = (p.phoneNumber != null && p.phoneNumber!.toLowerCase().contains(lower)) ||
-          (normPhone != null && p.phoneNumberNormalized != null && p.phoneNumberNormalized!.contains(normPhone));
+      final matchesId = p.id.toLowerCase().contains(lower) ||
+          (p.legacyPatientId != null && p.legacyPatientId!.toLowerCase().contains(lower));
+      final matchesName = p.displayName.toLowerCase().contains(lower) ||
+          p.normalizedName.contains(lower);
+      final matchesPhone = (p.phoneDisplay != null && p.phoneDisplay!.toLowerCase().contains(lower)) ||
+          (normPhone != null && p.normalizedPhone != null && p.normalizedPhone!.contains(normPhone));
 
       return switch (mode) {
         SearchFilterMode.all => matchesId || matchesName || matchesPhone,
@@ -922,6 +1160,7 @@ class InMemoryAppDatabase implements AppDatabase {
         _uploads[entry.key] = entry.value.copyWith(
           patientId: patientId,
           driveFolderId: driveFolderId,
+          driveParentFolderId: driveFolderId,
           fileName: rename?.fileName,
           localPath: rename?.localPath,
           status: UploadStatus.waiting,

@@ -1,6 +1,7 @@
 class CaptureSession {
   final String id;
   final String? patientId;
+  final String? driveFolderId;
   final DateTime createdAt;
   final String status; // 'unassigned', 'assigned', 'completed'
   final int photoCount;
@@ -8,6 +9,7 @@ class CaptureSession {
   const CaptureSession({
     required this.id,
     this.patientId,
+    this.driveFolderId,
     required this.createdAt,
     this.status = 'unassigned',
     this.photoCount = 0,
@@ -19,6 +21,7 @@ class CaptureSession {
     return {
       'id': id,
       'patient_id': patientId,
+      'drive_folder_id': driveFolderId,
       'created_at': createdAt.toIso8601String(),
       'status': status,
     };
@@ -28,6 +31,7 @@ class CaptureSession {
     return CaptureSession(
       id: map['id'] as String,
       patientId: map['patient_id'] as String?,
+      driveFolderId: map['drive_folder_id'] as String?,
       createdAt: DateTime.parse(map['created_at'] as String),
       status: map['status'] as String? ?? 'unassigned',
       photoCount: (map['photo_count'] as num?)?.toInt() ?? photoCount,
@@ -37,6 +41,7 @@ class CaptureSession {
   CaptureSession copyWith({
     String? id,
     String? patientId,
+    String? driveFolderId,
     DateTime? createdAt,
     String? status,
     int? photoCount,
@@ -44,6 +49,7 @@ class CaptureSession {
     return CaptureSession(
       id: id ?? this.id,
       patientId: patientId ?? this.patientId,
+      driveFolderId: driveFolderId ?? this.driveFolderId,
       createdAt: createdAt ?? this.createdAt,
       status: status ?? this.status,
       photoCount: photoCount ?? this.photoCount,
@@ -57,6 +63,7 @@ class CaptureSession {
           runtimeType == other.runtimeType &&
           id == other.id &&
           patientId == other.patientId &&
+          driveFolderId == other.driveFolderId &&
           createdAt == other.createdAt &&
           status == other.status &&
           photoCount == other.photoCount;
@@ -65,11 +72,12 @@ class CaptureSession {
   int get hashCode =>
       id.hashCode ^
       patientId.hashCode ^
+      (driveFolderId?.hashCode ?? 0) ^
       createdAt.hashCode ^
       status.hashCode ^
       photoCount.hashCode;
 
   @override
   String toString() =>
-      'CaptureSession(id: $id, patient: $patientId, status: $status, photos: $photoCount)';
+      'CaptureSession(id: $id, patient: $patientId, driveFolder: $driveFolderId, status: $status, photos: $photoCount)';
 }

@@ -33,7 +33,8 @@ class UploadItem {
     required this.id,
     this.sessionId,
     this.patientId,
-    this.driveFolderId,
+    String? driveFolderId,
+    String? driveParentFolderId,
     required this.localPath,
     required this.fileName,
     this.status = UploadStatus.waiting,
@@ -43,13 +44,17 @@ class UploadItem {
     required this.createdAt,
     DateTime? capturedAt,
     this.sequenceNumber = 1,
-  }) : capturedAt = capturedAt ?? createdAt;
+  })  : driveFolderId = driveFolderId ?? driveParentFolderId,
+        capturedAt = capturedAt ?? createdAt;
+
+  String? get driveParentFolderId => driveFolderId;
 
   UploadItem copyWith({
     String? id,
     String? sessionId,
     String? patientId,
     String? driveFolderId,
+    String? driveParentFolderId,
     String? localPath,
     String? fileName,
     UploadStatus? status,
@@ -66,7 +71,7 @@ class UploadItem {
       id: id ?? this.id,
       sessionId: sessionId ?? this.sessionId,
       patientId: patientId ?? this.patientId,
-      driveFolderId: driveFolderId ?? this.driveFolderId,
+      driveFolderId: driveFolderId ?? driveParentFolderId ?? this.driveFolderId,
       localPath: localPath ?? this.localPath,
       fileName: fileName ?? this.fileName,
       status: status ?? this.status,
@@ -85,6 +90,7 @@ class UploadItem {
       'session_id': sessionId,
       'patient_id': patientId,
       'drive_folder_id': driveFolderId,
+      'drive_parent_folder_id': driveFolderId,
       'local_path': localPath,
       'file_name': fileName,
       'status': status.name,
@@ -103,7 +109,7 @@ class UploadItem {
       id: map['id'] as String,
       sessionId: map['session_id'] as String?,
       patientId: map['patient_id'] as String?,
-      driveFolderId: map['drive_folder_id'] as String?,
+      driveFolderId: (map['drive_folder_id'] ?? map['drive_parent_folder_id']) as String?,
       localPath: map['local_path'] as String,
       fileName: map['file_name'] as String,
       status: UploadStatus.fromString(map['status'] as String),
