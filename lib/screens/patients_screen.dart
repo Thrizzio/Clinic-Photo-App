@@ -14,6 +14,7 @@ import 'camera_screen.dart';
 import 'patient_photos_screen.dart';
 import 'settings_screen.dart';
 import 'unassigned_photos_screen.dart';
+import '../widgets/new_patient_dialog.dart';
 
 class PatientsScreen extends StatefulWidget {
   final GoogleAuthService authService;
@@ -448,6 +449,14 @@ class _PatientsScreenState extends State<PatientsScreen> {
     });
   }
 
+  Future<void> _openNewPatientDialog() async {
+    final patient = await NewPatientDialog.show(context, database: widget.database);
+    if (patient != null && mounted) {
+      await _loadCachedPatients();
+      _handleTakePhotosForPatient(patient);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -457,9 +466,18 @@ class _PatientsScreenState extends State<PatientsScreen> {
         title: const Text('Select Patient', style: TextStyle(fontWeight: FontWeight.bold)),
         actions: [
           IconButton(
-            icon: const Icon(Icons.photo_library_outlined),
-            tooltip: 'Unassigned Sessions',
+            icon: Badge(
+              isLabelVisible: _unassignedSessionsCount > 0,
+              label: Text('$_unassignedSessionsCount'),
+              child: const Icon(Icons.inbox_outlined),
+            ),
+            tooltip: 'Unassigned Inbox',
             onPressed: _openUnassignedPhotos,
+          ),
+          IconButton(
+            icon: const Icon(Icons.add_a_photo_outlined),
+            tooltip: 'Quick Unassigned Capture',
+            onPressed: _startUnassignedSession,
           ),
           IconButton(
             icon: const Icon(Icons.settings_outlined),
@@ -469,9 +487,9 @@ class _PatientsScreenState extends State<PatientsScreen> {
         ],
       ),
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: _startUnassignedSession,
-        icon: const Icon(Icons.add_a_photo),
-        label: const Text('+ New / Unassigned'),
+        onPressed: _openNewPatientDialog,
+        icon: const Icon(Icons.person_add),
+        label: const Text('New Patient'),
       ),
       body: SafeArea(
         child: Column(
@@ -598,7 +616,7 @@ class _PatientsScreenState extends State<PatientsScreen> {
                 ),
                 child: ListTile(
                   dense: true,
-                  leading: Icon(Icons.photo_library, color: Colors.amber.shade900),
+                  leading: Icon(Icons.inbox_outlined, color: Colors.amber.shade900),
                   title: Text(
                     'Unassigned Photos ($_unassignedSessionsCount ${_unassignedSessionsCount == 1 ? "session" : "sessions"})',
                     style: TextStyle(

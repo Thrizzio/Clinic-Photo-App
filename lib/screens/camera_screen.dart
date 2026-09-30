@@ -226,8 +226,12 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
   }
 
   Widget _buildHeader() {
-    final title = _isUnassigned ? 'New / Unassigned Patient' : widget.patient!.name;
-    final subtitle = _isUnassigned ? 'Unassigned Photo Session' : 'ID: ${widget.patient!.id}';
+    final title = _isUnassigned ? 'Unassigned Session' : widget.patient!.displayName;
+    final subtitle = _isUnassigned
+        ? 'Unassigned Photo Session'
+        : (widget.patient!.phoneDisplay != null && widget.patient!.phoneDisplay!.isNotEmpty
+            ? widget.patient!.phoneDisplay!
+            : 'Clinical Photos');
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),

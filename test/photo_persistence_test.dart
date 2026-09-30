@@ -58,7 +58,7 @@ void main() {
       expect(item.patientId, 'P001');
       expect(item.driveFolderId, 'folder_drive_p001');
       expect(item.status, UploadStatus.waiting);
-      expect(item.fileName, startsWith('P001_'));
+      expect(item.fileName, matches(r'^\d{8}_\d{6}_\d{3}_\d{3}\.jpg$'));
       expect(item.fileName, endsWith('.jpg'));
 
       // 4. Verify record in database

@@ -94,6 +94,18 @@ class UploadQueueService extends ChangeNotifier {
         (await getApplicationDocumentsDirectory()).path;
   }
 
+  /// Formats deterministic photo filename in authoritative Indian Standard Time (UTC+05:30):
+  /// `YYYYMMDD_HHMMSS_SSS_<sequence>.jpg`
+  static String formatPhotoFileName(DateTime timestamp, int sequenceNumber) {
+    final ist = timestamp.isUtc
+        ? timestamp.add(const Duration(hours: 5, minutes: 30))
+        : timestamp.toUtc().add(const Duration(hours: 5, minutes: 30));
+    final dateStr = DateFormat('yyyyMMdd_HHmmss').format(ist);
+    final msStr = ist.millisecond.toString().padLeft(3, '0');
+    final seqStr = sequenceNumber.toString().padLeft(3, '0');
+    return '${dateStr}_${msStr}_$seqStr.jpg';
+  }
+
   /// Workflow A: Immediately moves captured photo to private app directory,
   /// enqueues upload record in SQLite, and wakes the upload worker in the background.
   Future<UploadItem> enqueuePhoto({
@@ -110,17 +122,8 @@ class UploadQueueService extends ChangeNotifier {
     }
 
     final now = capturedAt ?? DateTime.now();
-    final seq = sequenceNumber;
-    final String fileName;
-    if (seq != null) {
-      final dateStr = DateFormat('yyyyMMdd_HHmmss').format(now);
-      final seqStr = seq.toString().padLeft(3, '0');
-      fileName = '${patient.id}_${dateStr}_$seqStr.jpg';
-    } else {
-      final shortUuid = _uuid.v4().substring(0, 4);
-      final dateStr = DateFormat('yyyy-MM-dd_HH-mm-ss').format(now);
-      fileName = '${patient.id}_${dateStr}_$shortUuid.jpg';
-    }
+    final seq = sequenceNumber ?? 1;
+    final fileName = formatPhotoFileName(now, seq);
 
     final basePath = await _getBasePath();
     final Directory queueDir;
@@ -197,17 +200,8 @@ class UploadQueueService extends ChangeNotifier {
     int? sequenceNumber,
   }) async {
     final now = capturedAt ?? DateTime.now();
-    final seq = sequenceNumber;
-    final String fileName;
-    if (seq != null) {
-      final dateStr = DateFormat('yyyyMMdd_HHmmss').format(now);
-      final seqStr = seq.toString().padLeft(3, '0');
-      fileName = 'unassigned_${dateStr}_$seqStr.jpg';
-    } else {
-      final shortUuid = _uuid.v4().substring(0, 4);
-      final dateStr = DateFormat('yyyy-MM-dd_HH-mm-ss').format(now);
-      fileName = 'unassigned_${dateStr}_$shortUuid.jpg';
-    }
+    final seq = sequenceNumber ?? 1;
+    final fileName = formatPhotoFileName(now, seq);
 
     final basePath = await _getBasePath();
     final sessionDir = Directory(
@@ -340,11 +334,9 @@ class UploadQueueService extends ChangeNotifier {
     for (var i = 0; i < uploads.length; i++) {
       final item = uploads[i];
       final originalFile = File(item.localPath);
-      final capturedAt = item.capturedAt;
-      final seq = item.sequenceNumber;
-      final dateStr = DateFormat('yyyyMMdd_HHmmss').format(capturedAt);
-      final seqStr = seq.toString().padLeft(3, '0');
-      final newFileName = '${patient.id}_${dateStr}_$seqStr.jpg';
+      final newFileName = item.fileName.startsWith('unassigned_')
+          ? item.fileName.substring('unassigned_'.length)
+          : item.fileName;
       final newLocalPath = p.join(patientSessionDir.path, newFileName);
 
       if (originalFile.existsSync()) {

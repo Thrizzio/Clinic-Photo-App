@@ -67,16 +67,19 @@ void main() {
       );
 
       expect(photo1.sequenceNumber, 1);
-      expect(photo1.fileName, 'P010_20261024_143022_001.jpg');
+      expect(photo1.fileName, UploadQueueService.formatPhotoFileName(capturedAt, 1));
+      expect(photo1.fileName.endsWith('_001.jpg'), isTrue);
 
       expect(photo2.sequenceNumber, 2);
-      expect(photo2.fileName, 'P010_20261024_143022_002.jpg');
+      expect(photo2.fileName, UploadQueueService.formatPhotoFileName(capturedAt, 2));
+      expect(photo2.fileName.endsWith('_002.jpg'), isTrue);
 
       expect(photo3.sequenceNumber, 3);
-      expect(photo3.fileName, 'P010_20261024_143022_003.jpg');
+      expect(photo3.fileName, UploadQueueService.formatPhotoFileName(capturedAt, 3));
+      expect(photo3.fileName.endsWith('_003.jpg'), isTrue);
     });
 
-    test('2. Assigned photo name format: <Patient ID>_<yyyyMMdd_HHmmss>_<seq>.jpg', () async {
+    test('2. Assigned photo name format: <yyyyMMdd_HHmmss_SSS>_<seq>.jpg without patient ID prefix', () async {
       const patient = Patient(
         id: 'P999',
         name: 'Format Patient',
@@ -93,10 +96,12 @@ void main() {
         sequenceNumber: 5,
       );
 
-      expect(item.fileName, 'P999_20260512_090508_005.jpg');
+      expect(item.fileName, UploadQueueService.formatPhotoFileName(timestamp, 5));
+      expect(item.fileName.contains('P999'), isFalse);
+      expect(item.fileName.endsWith('_005.jpg'), isTrue);
     });
 
-    test('3. Unassigned photo name format: unassigned_<yyyyMMdd_HHmmss>_<seq>.jpg', () async {
+    test('3. Unassigned photo name format: <yyyyMMdd_HHmmss_SSS>_<seq>.jpg', () async {
       final session = await queueService.createUnassignedSession();
       final dummy = File(p.join(tempRootDir.path, 'dummy_unassigned.jpg'))..writeAsStringSync('test');
       final timestamp = DateTime(2026, 7, 4, 18, 22, 45);
@@ -108,11 +113,12 @@ void main() {
         sequenceNumber: 1,
       );
 
-      expect(item.fileName, 'unassigned_20260704_182245_001.jpg');
+      expect(item.fileName, UploadQueueService.formatPhotoFileName(timestamp, 1));
+      expect(item.fileName.endsWith('_001.jpg'), isTrue);
       expect(item.sequenceNumber, 1);
     });
 
-    test('4. Renaming on assignment: preserves capture timestamp and sequence number with new patient ID', () async {
+    test('4. Assignment preserves capture timestamp and sequence number without patient ID prefix', () async {
       final session = await queueService.createUnassignedSession();
       final dummy = File(p.join(tempRootDir.path, 'dummy_to_assign.jpg'))..writeAsStringSync('patient_image_content');
       final capturedTime = DateTime(2026, 8, 15, 11, 45, 30);
@@ -124,7 +130,8 @@ void main() {
         sequenceNumber: 7,
       );
 
-      expect(item.fileName, 'unassigned_20260815_114530_007.jpg');
+      final expectedFileName = UploadQueueService.formatPhotoFileName(capturedTime, 7);
+      expect(item.fileName, expectedFileName);
       expect(File(item.localPath).existsSync(), isTrue);
 
       const targetPatient = Patient(
@@ -142,14 +149,14 @@ void main() {
       expect(uploads.length, 1);
       final assignedItem = uploads.first;
 
-      // Expect fileName to be renamed with target patient ID while preserving timestamp and sequence number
-      final expectedFileName = 'P777_20260815_114530_007.jpg';
+      // Expect fileName to remain preserved without adding patient ID prefix
       expect(assignedItem.fileName, expectedFileName);
+      expect(assignedItem.fileName.contains('P777'), isFalse);
       expect(assignedItem.patientId, 'P777');
       expect(assignedItem.driveFolderId, 'folder_target_777');
       expect(assignedItem.sequenceNumber, 7);
 
-      // Verifies physical file was renamed on disk
+      // Verifies physical file was moved on disk into patient session directory
       final renamedFile = File(assignedItem.localPath);
       expect(renamedFile.existsSync(), isTrue);
       expect(p.basename(renamedFile.path), expectedFileName);
