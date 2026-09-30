@@ -38,11 +38,11 @@ void main() {
       expect(indices.folderColIndex, 2);
     });
 
-    test('throws MissingColumnException when Photos (Drive) is missing', () {
+    test('throws MissingColumnException when Photos (Drive) is missing and requireFolderColumn is true', () {
       final headers = ['Patient ID', 'Patient Name', 'Notes'];
 
       expect(
-        () => SheetsService.parseHeaderIndices(headers),
+        () => SheetsService.parseHeaderIndices(headers, requireFolderColumn: true),
         throwsA(
           isA<MissingColumnException>().having(
             (e) => e.missingColumn,
@@ -51,6 +51,14 @@ void main() {
           ),
         ),
       );
+    });
+
+    test('accepts missing Photos (Drive) column by default in V4 read-only import', () {
+      final headers = ['Patient ID', 'Patient Name', 'Notes'];
+      final indices = SheetsService.parseHeaderIndices(headers);
+      expect(indices.idColIndex, 0);
+      expect(indices.nameColIndex, 1);
+      expect(indices.folderColIndex, -1);
     });
 
     test('accepts Photos (Drive) as valid primary header', () {

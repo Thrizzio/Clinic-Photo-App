@@ -153,22 +153,7 @@ class PatientFolderService {
     );
     await database.updatePatient(availablePatient);
 
-    // 7. Write folder URL to blank Visits rows for that Patient ID
-    if (config.spreadsheetId.isNotEmpty && config.sheetTabName.isNotEmpty) {
-      final folderUrl = 'https://drive.google.com/drive/folders/$resolvedFolderId';
-      try {
-        await sheetsService.writePatientFolderUrl(
-          client: client,
-          spreadsheetId: config.spreadsheetId,
-          sheetName: config.sheetTabName,
-          patientId: patient.id,
-          folderUrl: folderUrl,
-        );
-      } catch (e) {
-        debugPrint('Warning: Could not write folder URL to Visits sheet: $e');
-        // Folder exists and is persisted locally, so app remains recoverable.
-      }
-    }
+    // 7. Note: V4 ceases writing folder URLs back to Google Sheets (Sheets is import-only).
 
     // 8. Mark available
     return PatientFolderResult(

@@ -225,10 +225,8 @@ void main() {
       expect(inDb?.driveFolderId, result.driveFolderId);
       expect(inDb?.folderStatus, FolderStatus.available);
 
-      // Folder URL written back to Google Sheets
-      expect(mockSheets.writtenUrls.length, 1);
-      expect(mockSheets.writtenUrls.first, contains(result.driveFolderId));
-      expect(mockSheets.writtenPatientIds.first, '1000005');
+      // V4: Never write folder URL back to Google Sheets (Sheets is strictly read-only)
+      expect(mockSheets.writtenUrls.isEmpty, isTrue);
     });
 
     test('4. Existing folder is reused without creating a duplicate', () async {

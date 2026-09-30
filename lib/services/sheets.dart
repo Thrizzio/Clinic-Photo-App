@@ -269,6 +269,7 @@ class SheetsService {
   static HeaderIndices parseHeaderIndices(
     List<dynamic> rawHeaderRow, {
     int headerRowIndex = 0,
+    bool requireFolderColumn = false,
   }) {
     final columnMap = <String, int>{};
     for (int i = 0; i < rawHeaderRow.length; i++) {
@@ -292,7 +293,7 @@ class SheetsService {
     if (nameColIndex == -1) {
       throw MissingColumnException(AppConfig.patientNameHeader);
     }
-    if (folderColIndex == -1) {
+    if (requireFolderColumn && folderColIndex == -1) {
       throw MissingColumnException(AppConfig.photosDriveHeader);
     }
 
@@ -309,12 +310,15 @@ class SheetsService {
   /// Discovers the header row dynamically from a list of rows.
   ///
   /// Searches for the row that contains all required columns (Patient ID, Patient Name,
-  /// Photos (Drive) / Drive Folder ID). If found, returns the [HeaderIndices] with the
+  /// and optionally Photos (Drive) / Drive Folder ID). If found, returns the [HeaderIndices] with the
   /// discovered row index and column positions.
   ///
   /// If no row contains all required headers, evaluates the best candidate row and throws
   /// [MissingColumnException] indicating the missing column.
-  static HeaderIndices discoverHeaderIndices(List<List<dynamic>> rows) {
+  static HeaderIndices discoverHeaderIndices(
+    List<List<dynamic>> rows, {
+    bool requireFolderColumn = false,
+  }) {
     if (rows.isEmpty) {
       throw MissingColumnException(AppConfig.patientIdHeader);
     }
@@ -351,8 +355,9 @@ class SheetsService {
         bestCandidateIndex = r;
       }
 
-      // If all required headers are found in this row, we have discovered the header row!
-      if (matchCount == 3) {
+      // If required columns (and folder if required) are present, this is our header row
+      final hasRequired = idIdx != -1 && nameIdx != -1 && (!requireFolderColumn || folderIdx != -1);
+      if (hasRequired) {
         final phoneIdx = _findPhoneColIndex(columnMap);
         final indices = HeaderIndices(
           idColIndex: idIdx,
@@ -374,12 +379,13 @@ class SheetsService {
       }
     }
 
-    // No row contained all 3 required headers.
+    // No row contained all required headers.
     // Call parseHeaderIndices on the best candidate row to throw the
-    // exact missing column exception (Patient ID, Patient Name, or Photos (Drive)).
+    // exact missing column exception (Patient ID, Patient Name, etc.).
     return parseHeaderIndices(
       rows[bestCandidateIndex],
       headerRowIndex: bestCandidateIndex,
+      requireFolderColumn: requireFolderColumn,
     );
   }
 
@@ -412,7 +418,7 @@ class SheetsService {
       final name = headerIndices.nameColIndex < row.length
           ? row[headerIndices.nameColIndex]?.toString().trim() ?? ''
           : '';
-      final rawFolder = headerIndices.folderColIndex < row.length
+      final rawFolder = (headerIndices.folderColIndex != -1 && headerIndices.folderColIndex < row.length)
           ? row[headerIndices.folderColIndex]?.toString().trim() ?? ''
           : '';
       final rawPhone = (headerIndices.phoneColIndex != null && headerIndices.phoneColIndex! < row.length)
@@ -465,34 +471,25 @@ class SheetsService {
       final resolvedName = entry.name.trim();
       final normPhone = Patient.normalizePhone(entry.phoneNumber);
 
-      if (entry.folderIds.isEmpty) {
-        result[entry.id] = Patient(
-          id: entry.id,
-          name: resolvedName,
-          phoneNumber: entry.phoneNumber,
-          phoneNumberNormalized: normPhone,
-          driveFolderId: null,
-          folderStatus: FolderStatus.missing,
-        );
-      } else if (entry.folderIds.length == 1) {
-        result[entry.id] = Patient(
-          id: entry.id,
-          name: resolvedName,
-          phoneNumber: entry.phoneNumber,
-          phoneNumberNormalized: normPhone,
-          driveFolderId: entry.folderIds.first,
-          folderStatus: FolderStatus.available,
-        );
-      } else {
-        result[entry.id] = Patient(
-          id: entry.id,
-          name: resolvedName,
-          phoneNumber: entry.phoneNumber,
-          phoneNumberNormalized: normPhone,
-          driveFolderId: null,
-          folderStatus: FolderStatus.conflict,
-        );
-      }
+      final folderId = entry.folderIds.length == 1 ? entry.folderIds.first : null;
+      final folderStatus = entry.folderIds.isEmpty
+          ? FolderStatus.missing
+          : (entry.folderIds.length == 1 ? FolderStatus.available : FolderStatus.conflict);
+
+      result[entry.id] = Patient(
+        id: entry.id,
+        name: resolvedName,
+        displayName: resolvedName,
+        normalizedName: Patient.normalizeName(resolvedName),
+        phoneDisplay: entry.phoneNumber,
+        normalizedPhone: normPhone,
+        legacyPatientId: entry.id,
+        source: PatientSource.clinicSheet,
+        driveFolderId: folderId,
+        folderStatus: folderStatus,
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      );
     }
 
     return result;
@@ -806,12 +803,19 @@ class SheetsService {
 
         patientsMap[cleanId] = Patient(
           id: existing.id,
+          legacyPatientId: existing.legacyPatientId ?? cleanId,
           name: updatedName,
+          displayName: updatedName,
+          normalizedName: Patient.normalizeName(updatedName),
           phoneNumber: updatedPhone,
+          phoneDisplay: updatedPhone,
           phoneNumberNormalized: updatedNormPhone,
+          normalizedPhone: updatedNormPhone,
           driveFolderId: existing.driveFolderId,
           folderStatus: existing.folderStatus,
+          createdAt: existing.createdAt,
           updatedAt: existing.updatedAt,
+          source: existing.source ?? PatientSource.clinicSheet,
         );
       }
     }

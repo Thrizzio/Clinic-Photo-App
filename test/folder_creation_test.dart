@@ -190,8 +190,8 @@ void main() {
       expect(mockDrive.createFolderCalls, 1);
       expect(result.patient.folderStatus, FolderStatus.available);
 
-      // Verifies URL written back to sheet
-      expect(mockSheets.lastWrittenUrl, 'https://drive.google.com/drive/folders/${result.driveFolderId}');
+      // V4: Never write folder URL back to Google Sheets (Sheets is read-only)
+      expect(mockSheets.lastWrittenUrl, isNull);
 
       // Verifies saved locally in SQLite
       final inDb = await database.getPatient('P003');
