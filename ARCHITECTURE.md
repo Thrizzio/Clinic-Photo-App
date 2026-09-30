@@ -1,73 +1,71 @@
 # Architecture
 
 ## Status
-Version 3 (V3) — Flutter Android single-doctor clinical photo capture app with direct Google OAuth, Sheets API, Drive API, Visits deduplication, app-owned idempotent patient Drive folder creation, Google Sheets link writeback, sequence-numbered photo naming, unassigned capture sessions, photo deletion review, patient photo viewer, and persistent SQLite upload queue.
+Version 4 (V4) — Flutter Android single-doctor clinical photo capture app. V4 shifts from "Google Sheet Patient-ID → Drive folder" coupling to "Local Patient Identity (Name + Phone) → Drive Photo Management" architecture. Features local UUID primary keys, `(normalized_name, normalized_phone)` business identity, read-only Google Sheets import stream, in-app doctor patient creation, Drive-first cloud unassigned sessions, zero-bandwidth server-side Drive moves, progressive thumbnail loading, authoritative IST chronology, and Material 3 dark theme.
 
 ## Modules
 - `lib/config.dart`: Developer constants (Google OAuth scopes, headers: `Patient ID`, `Patient Name`, `Photos (Drive)`, `Drive Folder ID`). No clinic secrets or sheet IDs.
 - `lib/models/`:
-  - `patient.dart`: Canonical domain model (`id`, `name`, `phoneNumber`, `phoneNumberNormalized`, `driveFolderId`, `folderStatus: available | missing | creating | conflict`, `isUploadable`, `hasValidName`, `displayName`, `Patient.merge`, `updatedAt`).
-  - `capture_session.dart`: Unassigned/assigned photo capture session (`id`, `patientId`, `createdAt`, `status`, `photoCount`).
+  - `patient.dart`: Canonical domain model (`id` [UUID], `displayName`, `normalizedName`, `phoneDisplay`, `normalizedPhone`, `legacyPatientId`, `source: clinicSheet | doctorCreated | merged`, `driveFolderId`, `folderStatus: available | missing | creating | conflict`, `isUploadable`, `matchesBusinessIdentity`).
+  - `capture_session.dart`: Unassigned/assigned photo capture session (`id`, `patientId`, `createdAt`, `status`, `photoCount`, `driveFolderId`).
   - `upload_item.dart`: Persistent queue item (`id`, `sessionId`, `patientId`, `driveFolderId`, `localPath`, `fileName`, `status`, `retryCount`, `lastError`, `driveFileId`, `createdAt`, `capturedAt`, `sequenceNumber`).
   - `clinic_config.dart`: In-app clinic settings (`spreadsheetId`, `spreadsheetUrl`, `sheetTabName`, `parentDriveFolderId`, `hasCompletedSetup`, `lastPatientSync`, `lastSyncedRow`, `lastFullSync`).
 - `lib/services/`:
   - `google_auth.dart`: Google Sign-In 7.x wrapper & authenticated HTTP client (`extension_google_sign_in_as_googleapis_auth`).
   - `config_service.dart`: SharedPreferences persistence for clinic configuration, `parentDriveFolderId`, `lastSyncedRow`, and `lastFullSync`.
-  - `sheets.dart`: Google Sheets API v4 metadata discovery (tabs), dynamic header row & column discovery (`discoverHeaderIndices` with phone alias discovery), header normalization, Drive folder URL parsing (`extractDriveFolderId`), Visits deduplication (`resolvePatientsFromVisits`), incremental sync (`fetchIncrementalPatients`), full reconciliation (`validateAndFetchPatients`), and blank row folder URL writeback (`writePatientFolderUrl`).
-  - `drive.dart`: Google Drive API v3 photo uploader, folder search (`findFoldersByName`), folder creator (`createFolder`), and patient photo listing (`listPatientPhotos`).
-  - `patient_folder_service.dart`: Orchestrator for idempotent 9-step `getOrCreatePatientFolder(patient)`.
-  - `database.dart`: Local SQLite database (v6 schema with phone search indexes) supporting multi-mode local search (`SearchFilterMode: all, name, phone, patientId`) across indexed `patients`, `capture_sessions`, and `uploads` tables. Crash recovery resets `uploading` to `waiting` (leaving `unassigned` untouched).
-  - `upload_queue.dart`: Asynchronous upload loop, gentle bounded retries, connectivity change listener, unassigned capture sessions, session assignment with deterministic photo renaming, and instant camera return.
+  - `sheets.dart`: Google Sheets API v4 metadata discovery (tabs), dynamic header row & column discovery (`discoverHeaderIndices` with phone alias discovery), header normalization, Drive folder URL parsing, relational workbook multi-tab parsing (`Visits` → `Patients` → `Appointments`), and read-only import stream (no writeback to Sheet).
+  - `drive.dart`: Google Drive API v3 photo uploader, folder search with strict parent verification (`findFoldersByName`), canonical folder creator (`createFolder`), server-side mover (`moveFile`), safe deletion (`deleteFile`), unassigned root/session creator (`getOrCreateUnassignedRootFolder`, `getOrCreateUnassignedSessionFolder`), and photo listing (`listPatientPhotos`).
+  - `patient_folder_service.dart`: Orchestrator for idempotent patient Drive folder resolution targeting `<Patient Name> - <Phone Number>` (or `<Patient Name>`) and legacy `<Legacy Patient ID> - <Patient Name>` reuse with parent validation.
+  - `database.dart`: Local SQLite database (v7 schema) supporting local UUID primary keys, `idx_patients_business_id` index, multi-mode local search (`SearchFilterMode: all, name, phone, patientId`), deterministic application-level deduplication, unassigned capture sessions, and persistent upload queue. Crash recovery resets `uploading` to `waiting`.
+  - `upload_queue.dart`: Asynchronous upload loop, gentle bounded retries, connectivity change listener, unassigned capture sessions, session assignment, instant camera return, and authoritative IST filename generation (`YYYYMMDD_HHMMSS_SSS_<sequence>.jpg`).
 - `lib/screens/`:
   - `welcome_screen.dart`: Welcome and Google account sign-in.
   - `clinic_setup_screen.dart`: Multi-step setup wizard (URL input, tab picker, header validation, parent Drive folder setup).
-  - `patients_screen.dart`: Search-first patient selector, `+ New / Unassigned Patient` action, `Unassigned Photos (N)` banner, background incremental sync, and minimal upload status indicator.
-  - `camera_screen.dart`: Rapid clinical photo capture supporting both Existing Patient Mode (Workflow A) and Unassigned Session Mode (Workflow B) with sequence numbering and non-blocking shutter.
-  - `unassigned_photos_screen.dart`: Lists unassigned capture sessions with timestamps, photo counts, and quick actions (`[View Photos]`, `[Assign]`).
+  - `patients_screen.dart`: Search-first patient selector, `+ New Patient` FAB, clinical inbox badge (`Icons.inbox_outlined`), real-time upload queue progress indicators, and dark theme support.
+  - `camera_screen.dart`: Rapid clinical photo capture with sequence numbering, zero Patient ID display, and non-blocking shutter.
+  - `unassigned_photos_screen.dart`: Clinical inbox listing unassigned capture sessions with timestamps, photo counts, and quick actions (`[View Photos]`, `[Assign]`).
   - `session_detail_screen.dart`: Inspection screen showing local photo thumbnails, multi-select deletion mode, and `[Assign to Patient]` bottom bar.
-  - `patient_photos_screen.dart`: Chronological gallery viewer of photos stored in a patient's Drive folder with full-screen pinch-to-zoom.
+  - `patient_photos_screen.dart`: Chronological gallery viewer with progressive thumbnail loading, shimmering skeleton placeholders, authoritative IST timestamp formatting, server-side `Move to Unassigned`, and safe `Delete Photo`.
   - `settings_screen.dart`: Database info, parent Drive folder info, `Sync Now (Full Reconciliation)`, last synced row count, safe reconfiguration, and sign-out.
 - `lib/widgets/`:
-  - `patient_tile.dart`: Clean, clinical patient list item with status badges for `missing` or `conflict` Drive folders.
-  - `unassigned_session_tile.dart`: Session card with formatted timestamp, thumbnail counts, and action buttons.
+  - `new_patient_dialog.dart`: In-app patient creation modal with required Name, required 10-digit Indian Phone validation, and local SQLite deduplication alert with `Open Patient` button.
+  - `patient_tile.dart`: Clean, clinical patient list item with status badges (`NEW` for doctor-created UUIDs, legacy ID for imported sheet rows) and dark theme contrast.
+  - `unassigned_session_tile.dart`: Session card with clinical inbox icon, formatted timestamp, photo count badge, and action buttons.
   - `patient_assignment_sheet.dart`: Searchable modal bottom sheet to select and validate patient for session assignment.
   - `photo_thumbnail.dart`: Grid thumbnail widget for Google Drive photos with loading and fallback.
   - `selection_thumbnail.dart`: Thumbnail widget with checkmark selection badge for session photo deletion mode.
-  - `upload_status.dart`: Minimal status indicator pill ("↑ 2 uploading", "✓ All photos uploaded", "! 1 failed [Retry]").
+  - `upload_status.dart`: Minimal status indicator pill.
 
 ## Data & Control Flow
-1. **Google OAuth**: Doctor authorizes once. Credentials securely managed by Google Identity Services on Android with scopes for Google Sheets and Google Drive.
-2. **Visits Sheet as Source of Truth & Relational Name/Phone Resolution**:
-   - Primary operational visit log source is the clinic's `Visits` table.
-   - Multiple rows with the same `Patient ID` are deduplicated into one local `Patient` record in SQLite.
-   - Clinical photo Drive folder URLs are stored and written back strictly to the `Photos (Drive)` column in `Visits`.
-   - Name & phone resolution follows the workbook's relational model:
-     - `Visits` (Patient ID, Photos (Drive)) -> `Patients` (Patient ID -> Appointment ID, direct Name, direct Phone) -> `Appointments` (Appointment ID -> Patient Name, Phone Number).
-     - Directly populated clinical data is preserved and never overwritten by subsequent blank visit rows.
-     - Phone numbers are cleaned, stored in canonical display format, and indexed in normalized digit form (`phoneNumberNormalized`) for instant local SQLite search across All, Name, Phone, and Patient ID.
-   - Drive folder URLs are extracted via `extractDriveFolderId()`.
-   - Repeated identical folders -> `FolderStatus.available` (`isUploadable = true`).
-   - Blank rows + 1 valid folder -> `FolderStatus.available` (`isUploadable = true`).
-   - Different non-empty folders -> `FolderStatus.conflict` (`isUploadable = false`, blocked from capture; never guess).
-   - Blank folders across all visits -> `FolderStatus.missing` (lazily created by app when photographed or assigned).
-3. **App-Owned Patient Drive Folders (No Apps Script)**:
-   - When an unassigned session is assigned or an existing patient with `missing` folder is photographed, the app searches the configured parent Drive folder for `<Patient ID> - <Patient Name>`.
-   - 1 match -> reused; 0 matches -> created; >1 matches -> `conflict`.
-   - The resolved folder ID is persisted in SQLite, and the full URL is written back to blank `Visits` rows for that `Patient ID` in Google Sheets.
-4. **Incremental Sync & Full Reconciliation**:
-   - App startup loads cached SQLite patients immediately (<50ms).
-   - Background sync reads newly appended rows (`Visits!A{lastSyncedRow + 1}:ZZ`), resolves directory and appointment companion records, merging updates via `Patient.merge`.
-   - Settings offers `Sync Now (Full Reconciliation)` to re-read all rows from row 1.
-5. **Workflow A (Existing Patient Capture)**:
-   - Doctor searches and selects patient -> `CameraScreen` opens -> Shutter press saves image to `photo_queue/patients/<Patient ID>/<Patient ID>_<timestamp>_<sequence>.jpg` -> SQLite inserts record (`waiting`) -> Background loop uploads to patient's Drive folder.
-6. **Workflow B (Unassigned Photo Sessions & Assignment)**:
-   - Doctor taps `+ New / Unassigned Patient` -> `CaptureSession` created in SQLite -> Camera opens immediately.
-   - Photos saved in `photo_queue/unassigned/<session_id>/unassigned_<timestamp>_<sequence>.jpg` with `UploadStatus.unassigned`.
-   - Sessions have no expiration; survive restarts, battery dying, or days passing.
-   - Doctor inspects thumbnails in `SessionDetailScreen`, can multi-select and delete unwanted photos.
-   - Upon assignment to patient, photos are atomically renamed and moved to `photo_queue/patients/<patientId>/<sessionId>/<patientId>_<timestamp>_<sequence>.jpg`, and database records transition to `waiting` status.
-7. **Confirmed Drive Upload Clean-up**:
-   - When Drive API confirms file creation, SQLite record and local file are deleted.
-   - For session items, once all photos in the session are confirmed, the session row and its private storage directory are deleted.
-8. **Patient Photo Gallery**:
-   - Doctor views chronological photos stored in patient's Google Drive folder directly within the app.
+1. **Business Identity & Local Patient Creation**:
+   - Primary key is an internal local UUID.
+   - Authoritative business identity is `(normalized_name, normalized_phone)`.
+   - Doctor creates patient directly in-app (`+ New Patient`): Name (required) and 10-digit phone (required).
+   - If an existing patient matches `(normalized_name, normalized_phone)`, dialog alerts the doctor and provides an instant `Open Patient` shortcut.
+2. **Hard Invariant: Doctor-Created Patient Later Added to Google Sheets**:
+   - When an incoming Google Sheet row matches an existing doctor-created patient by `(normalized_name, normalized_phone)`:
+     - The existing local UUID is strictly retained.
+     - `legacy_patient_id` is attached (e.g. `1000048`).
+     - `source` transitions to `'merged'`.
+     - The existing Drive folder ID and all captured photos remain 100% untouched. Never creates a duplicate patient or duplicate Drive folder.
+3. **Google Sheets as Read-Only Stream**:
+   - Google Sheets serves purely as an external import stream.
+   - The app does not write Drive folder URLs back to the `Photos (Drive)` column in `Visits`.
+4. **Drive Folder Naming & Strict Parent Verification**:
+   - Canonical folder name: `<Patient Name> - <Phone Number>` (or `<Patient Name>` for legacy records without a phone).
+   - Folders named `<Legacy Patient ID> - <Patient Name>` under the clinic parent are recognized and reused.
+   - Strict parent check: candidate folders must have `parents.contains(parentFolderId)`, preventing rogue matching outside the clinic parent folder.
+5. **First-Class Cloud Unassigned State & Zero-Bandwidth Move**:
+   - Unassigned photos upload immediately to `Configured Parent / Unassigned Photos / session_YYYYMMDD_HHMMSS`.
+   - When the doctor assigns an unassigned session to a patient, the app executes a Google Drive server-side file move (`files.update` with `addParents` and `removeParents`), moving photos instantly in ~200ms with zero cellular bandwidth re-upload.
+6. **Viewer Actions: Move to Unassigned & Safe Deletion**:
+   - Photo viewer supports server-side `Move to Unassigned`, detaching photos from a patient and placing them in an unassigned session folder on Drive.
+   - Safe photo deletion: Google Drive deletion completes and confirms before any local queue/database records are removed. If Drive deletion fails, local records remain intact.
+7. **Deterministic IST Chronology & Filenames**:
+   - Photo filenames: `YYYYMMDD_HHMMSS_SSS_<sequence>.jpg` authoritatively formatted in Indian Standard Time (`UTC+05:30`), completely removing Patient ID from filenames and UI.
+   - Photos sort descending (newest first).
+   - Timestamps format in IST (`d MMM yyyy, hh:mm a`).
+8. **UI & Theme Architecture**:
+   - Material 3 theme with complete light and dark mode support (`ThemeMode.system`).
+   - Clinical inbox icon (`Icons.inbox_outlined`) universally used for unassigned workflows.
+   - Progressive thumbnail loading with shimmering skeleton placeholders.

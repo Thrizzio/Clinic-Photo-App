@@ -166,7 +166,7 @@ class UploadQueueService extends ChangeNotifier {
       retryCount: 0,
       createdAt: now,
       capturedAt: now,
-      sequenceNumber: seq ?? 1,
+      sequenceNumber: seq,
     );
 
     await database.insertUpload(item);
@@ -239,7 +239,7 @@ class UploadQueueService extends ChangeNotifier {
       retryCount: 0,
       createdAt: now,
       capturedAt: now,
-      sequenceNumber: seq ?? 1,
+      sequenceNumber: seq,
     );
 
     await database.insertUpload(item);

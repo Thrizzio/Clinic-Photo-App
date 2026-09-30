@@ -815,7 +815,7 @@ class SheetsService {
           folderStatus: existing.folderStatus,
           createdAt: existing.createdAt,
           updatedAt: existing.updatedAt,
-          source: existing.source ?? PatientSource.clinicSheet,
+          source: existing.source,
         );
       }
     }

@@ -600,7 +600,6 @@ void main() {
     testWidgets('7.4 UnassignedPhotosScreen empty state displays clinical inbox icon', (tester) async {
       final database = InMemoryAppDatabase();
       final authService = GoogleAuthService();
-      final sheetsService = SheetsService();
       final driveService = DriveService();
       final queueService = UploadQueueService(
         database: database,
