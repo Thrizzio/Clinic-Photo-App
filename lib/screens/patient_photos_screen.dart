@@ -2,6 +2,8 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:googleapis/drive/v3.dart' as drive;
 import 'package:intl/intl.dart';
+import 'package:uuid/uuid.dart';
+import '../models/capture_session.dart';
 import '../models/patient.dart';
 import '../services/drive.dart';
 import '../services/google_auth.dart';
@@ -194,6 +196,229 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
     }
   }
 
+  Future<void> _handleMoveToUnassigned(drive.File photo) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Move to Unassigned?'),
+        content: Text(
+          'Move this photo to Unassigned Sessions?\n\n'
+          'It will be detached from ${_currentPatient.displayName} and can later be assigned to any patient.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton.icon(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            icon: const Icon(Icons.inbox_outlined),
+            label: const Text('Move to Unassigned'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(
+        child: Card(
+          child: Padding(
+            padding: EdgeInsets.all(24.0),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(height: 16),
+                Text('Moving photo on Google Drive...'),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+
+    try {
+      final client = await widget.authService.getAuthenticatedClient();
+      if (client == null) throw StateError('Not signed in to Google account');
+
+      final parentFolderId = widget.folderService?.configService.loadConfig().parentDriveFolderId ?? '';
+      if (parentFolderId.isEmpty) throw StateError('Parent Drive folder not configured');
+
+      final unassignedRootId = await widget.driveService.getOrCreateUnassignedRootFolder(
+        client: client,
+        parentFolderId: parentFolderId,
+      );
+
+      final sessionTs = DateFormat('yyyyMMdd_HHmmss').format(DateTime.now());
+      final sessionFolderId = await widget.driveService.getOrCreateUnassignedSessionFolder(
+        client: client,
+        unassignedRootId: unassignedRootId,
+        sessionFolderTimestamp: sessionTs,
+      );
+
+      await widget.driveService.moveFile(
+        client: client,
+        fileId: photo.id!,
+        sourceFolderId: _currentPatient.driveFolderId!,
+        targetFolderId: sessionFolderId,
+      );
+
+      final sessionId = const Uuid().v4();
+      final session = CaptureSession(
+        id: sessionId,
+        patientId: null,
+        createdAt: DateTime.now(),
+        status: 'unassigned',
+        photoCount: 1,
+        driveFolderId: sessionFolderId,
+      );
+      await widget.queueService.database.insertSession(session);
+
+      if (mounted) {
+        Navigator.of(context).pop(); // dismiss loading
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Photo moved to Unassigned Sessions')),
+        );
+        _loadPhotos();
+      }
+    } catch (e) {
+      if (mounted) {
+        Navigator.of(context).pop(); // dismiss loading
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to move photo: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _handleDeletePhoto(drive.File photo) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete Photo?'),
+        content: const Text(
+          'Permanently delete this photo from Google Drive?\n\n'
+          'This action cannot be undone.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Delete Permanently'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(
+        child: Card(
+          child: Padding(
+            padding: EdgeInsets.all(24.0),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(height: 16),
+                Text('Deleting photo from Google Drive...'),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+
+    try {
+      final client = await widget.authService.getAuthenticatedClient();
+      if (client == null) throw StateError('Not signed in to Google account');
+
+      await widget.driveService.deleteFile(
+        client: client,
+        fileId: photo.id!,
+      );
+
+      final uploads = await widget.queueService.database.getAllUploads();
+      for (final u in uploads) {
+        if (u.driveFileId == photo.id || u.fileName == photo.name) {
+          await widget.queueService.database.deleteUpload(u.id);
+        }
+      }
+
+      if (mounted) {
+        Navigator.of(context).pop(); // dismiss loading
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Photo deleted successfully')),
+        );
+        setState(() {
+          _photos.removeWhere((p) => p.id == photo.id);
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        Navigator.of(context).pop(); // dismiss loading
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to delete photo: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  void _showPhotoOptionsSheet(drive.File photo) {
+    showModalBottomSheet(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.fullscreen),
+              title: const Text('View Full Screen'),
+              onTap: () {
+                Navigator.of(ctx).pop();
+                final idx = _photos.indexOf(photo);
+                if (idx != -1) _openFullScreenViewer(idx);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.inbox_outlined),
+              title: const Text('Move to Unassigned'),
+              onTap: () {
+                Navigator.of(ctx).pop();
+                _handleMoveToUnassigned(photo);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.delete_outline, color: Colors.red),
+              title: const Text('Delete Photo', style: TextStyle(color: Colors.red)),
+              onTap: () {
+                Navigator.of(ctx).pop();
+                _handleDeletePhoto(photo);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   void _openFullScreenViewer(int initialIndex) {
     Navigator.of(context).push(
       MaterialPageRoute(
@@ -202,6 +427,14 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
           initialIndex: initialIndex,
           patient: _currentPatient,
           fetchImageBytes: _fetchThumbnailBytes,
+          onMoveToUnassigned: (photo) async {
+            Navigator.of(context).pop();
+            await _handleMoveToUnassigned(photo);
+          },
+          onDeletePhoto: (photo) async {
+            Navigator.of(context).pop();
+            await _handleDeletePhoto(photo);
+          },
         ),
       ),
     );
@@ -216,9 +449,9 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(_currentPatient.name, style: const TextStyle(fontSize: 18)),
+            Text(_currentPatient.displayName, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             Text(
-              'ID: ${_currentPatient.id} • ${_photos.length} ${_photos.length == 1 ? 'photo' : 'photos'}',
+              '${_currentPatient.phoneDisplay ?? ''}${_currentPatient.phoneDisplay != null ? ' • ' : ''}${_photos.length} ${_photos.length == 1 ? 'photo' : 'photos'}',
               style: TextStyle(
                 fontSize: 12,
                 color: theme.colorScheme.onSurfaceVariant,
@@ -363,6 +596,7 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
 
         return InkWell(
           onTap: () => _openFullScreenViewer(index),
+          onLongPress: () => _showPhotoOptionsSheet(photo),
           borderRadius: BorderRadius.circular(8),
           child: Stack(
             fit: StackFit.expand,
@@ -437,12 +671,16 @@ class _FullScreenPatientPhotoGallery extends StatefulWidget {
   final int initialIndex;
   final Patient patient;
   final Future<Uint8List?> Function(String fileId) fetchImageBytes;
+  final Future<void> Function(drive.File photo)? onMoveToUnassigned;
+  final Future<void> Function(drive.File photo)? onDeletePhoto;
 
   const _FullScreenPatientPhotoGallery({
     required this.photos,
     required this.initialIndex,
     required this.patient,
     required this.fetchImageBytes,
+    this.onMoveToUnassigned,
+    this.onDeletePhoto,
   });
 
   @override
@@ -494,6 +732,18 @@ class _FullScreenPatientPhotoGalleryState extends State<_FullScreenPatientPhotoG
           ],
         ),
         actions: [
+          if (widget.onMoveToUnassigned != null)
+            IconButton(
+              icon: const Icon(Icons.inbox_outlined),
+              tooltip: 'Move to Unassigned',
+              onPressed: () => widget.onMoveToUnassigned!(currentPhoto),
+            ),
+          if (widget.onDeletePhoto != null)
+            IconButton(
+              icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
+              tooltip: 'Delete Photo',
+              onPressed: () => widget.onDeletePhoto!(currentPhoto),
+            ),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
             child: Center(

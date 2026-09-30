@@ -175,7 +175,7 @@ void main() {
       ));
       await tester.pumpAndSettle();
 
-      expect(find.text('ID: P052 • 2 photos'), findsOneWidget);
+      expect(find.text('2 photos'), findsOneWidget);
       expect(find.byType(GridView), findsOneWidget);
     });
   });

@@ -1,7 +1,9 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sqflite/sqflite.dart';
+import 'package:clinic_photos/models/capture_session.dart';
 import 'package:clinic_photos/models/clinic_config.dart';
 import 'package:clinic_photos/models/patient.dart';
+import 'package:clinic_photos/models/upload_item.dart';
 import 'package:clinic_photos/services/config_service.dart';
 import 'package:clinic_photos/services/database.dart';
 import 'package:clinic_photos/services/drive.dart';
@@ -346,6 +348,114 @@ void main() {
       expect(mockDrive.createdFolders.contains('session_20260930_213000'), isTrue);
     });
   });
+
+  group('V4 Phase 5: Viewer Move-to-Unassigned & Deletion Tests', () {
+    late InMemoryAppDatabase database;
+    late MockV4DriveService mockDrive;
+    late FakeV4AuthClient fakeClient;
+    const parentFolderId = 'clinic_parent_folder_id';
+
+    setUp(() {
+      database = InMemoryAppDatabase();
+      mockDrive = MockV4DriveService();
+      fakeClient = FakeV4AuthClient();
+    });
+
+    test('5.1 Move photo to Unassigned calls Drive moveFile and creates unassigned session', () async {
+      final patient = Patient(
+        id: 'patient-uuid-1',
+        name: 'Anil Jain',
+        phoneNumber: '9822012345',
+        driveFolderId: 'patient_drive_folder_100',
+        folderStatus: FolderStatus.available,
+      );
+      await database.upsertPatients([patient]);
+
+      final unassignedRootId = await mockDrive.getOrCreateUnassignedRootFolder(
+        client: fakeClient,
+        parentFolderId: parentFolderId,
+      );
+      final sessionFolderId = await mockDrive.getOrCreateUnassignedSessionFolder(
+        client: fakeClient,
+        unassignedRootId: unassignedRootId,
+        sessionFolderTimestamp: '20260930_220000',
+      );
+
+      // Perform server-side move
+      await mockDrive.moveFile(
+        client: fakeClient,
+        fileId: 'photo_drive_id_1',
+        sourceFolderId: patient.driveFolderId!,
+        targetFolderId: sessionFolderId,
+      );
+
+      expect(mockDrive.movedFiles.contains('photo_drive_id_1:patient_drive_folder_100->$sessionFolderId'), isTrue);
+
+      // Create unassigned session
+      final session = CaptureSession(
+        id: 'session-uuid-1',
+        patientId: null,
+        createdAt: DateTime.now(),
+        status: 'unassigned',
+        photoCount: 1,
+        driveFolderId: sessionFolderId,
+      );
+      await database.insertSession(session);
+
+      final unassignedSessions = await database.getUnassignedSessions();
+      expect(unassignedSessions.length, 1);
+      expect(unassignedSessions.first.driveFolderId, sessionFolderId);
+    });
+
+    test('5.2 Safe photo deletion: deletes on Drive then cleans up local queue', () async {
+      final uploadItem = UploadItem(
+        id: 'upload-item-1',
+        patientId: 'patient-uuid-1',
+        localPath: '/mock/path/photo1.jpg',
+        fileName: '20260930_220000_001_1.jpg',
+        createdAt: DateTime.now(),
+        status: UploadStatus.waiting,
+        driveFileId: 'photo_drive_id_42',
+      );
+      await database.insertUpload(uploadItem);
+
+      // High-stakes rule: Drive deletion succeeds FIRST
+      await mockDrive.deleteFile(client: fakeClient, fileId: 'photo_drive_id_42');
+      expect(mockDrive.deletedFiles.contains('photo_drive_id_42'), isTrue);
+
+      // Then delete local DB record
+      await database.deleteUpload(uploadItem.id);
+      final allUploads = await database.getAllUploads();
+      expect(allUploads.where((u) => u.id == uploadItem.id), isEmpty);
+    });
+
+    test('5.3 Deletion safety: if Drive deletion fails, local upload record is NEVER deleted', () async {
+      final uploadItem = UploadItem(
+        id: 'upload-item-2',
+        patientId: 'patient-uuid-1',
+        localPath: '/mock/path/photo2.jpg',
+        fileName: '20260930_220000_002_1.jpg',
+        createdAt: DateTime.now(),
+        status: UploadStatus.waiting,
+        driveFileId: 'photo_drive_id_99',
+      );
+      await database.insertUpload(uploadItem);
+
+      mockDrive.failDelete = true;
+      var failed = false;
+      try {
+        await mockDrive.deleteFile(client: fakeClient, fileId: 'photo_drive_id_99');
+        await database.deleteUpload(uploadItem.id);
+      } catch (_) {
+        failed = true;
+      }
+
+      expect(failed, isTrue);
+      // Local record must STILL exist
+      final allUploads = await database.getAllUploads();
+      expect(allUploads.where((u) => u.id == uploadItem.id).length, 1);
+    });
+  });
 }
 
 class FakeV7MigrationDatabase extends Fake implements Database {
@@ -478,5 +588,28 @@ class MockV4DriveService extends DriveService {
       ..parents = [parentFolderId];
     parentFolders.putIfAbsent(parentFolderId, () => []).add(newFile);
     return folderId;
+  }
+
+  final List<String> movedFiles = [];
+  final List<String> deletedFiles = [];
+  bool failDelete = false;
+
+  @override
+  Future<void> moveFile({
+    required AuthClient client,
+    required String fileId,
+    required String sourceFolderId,
+    required String targetFolderId,
+  }) async {
+    movedFiles.add('$fileId:$sourceFolderId->$targetFolderId');
+  }
+
+  @override
+  Future<void> deleteFile({
+    required AuthClient client,
+    required String fileId,
+  }) async {
+    if (failDelete) throw StateError('Drive deletion error');
+    deletedFiles.add(fileId);
   }
 }
