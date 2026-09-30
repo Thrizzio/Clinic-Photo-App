@@ -49,6 +49,7 @@ class DriveService {
   }
 
   /// Searches for non-trashed folders with the exact given name inside the specified parent folder.
+  /// Strictly verifies that returned folders are located within [parentFolderId].
   Future<List<drive.File>> findFoldersByName({
     required AuthClient client,
     required String parentFolderId,
@@ -61,10 +62,16 @@ class DriveService {
 
     final fileList = await driveApi.files.list(
       q: query,
-      $fields: 'files(id, name)',
+      $fields: 'files(id, name, parents)',
     );
 
-    return fileList.files ?? <drive.File>[];
+    final rawFiles = fileList.files ?? <drive.File>[];
+    return rawFiles.where((f) {
+      if (f.parents != null && f.parents!.isNotEmpty) {
+        return f.parents!.contains(parentFolderId);
+      }
+      return true;
+    }).toList();
   }
 
   /// Creates a new Google Drive folder with [folderName] inside [parentFolderId].
@@ -81,7 +88,7 @@ class DriveService {
 
     final created = await driveApi.files.create(
       folderMetadata,
-      $fields: 'id, name',
+      $fields: 'id, name, parents',
     );
 
     final id = created.id;
@@ -94,6 +101,76 @@ class DriveService {
 
     debugPrint('Created Drive folder "$folderName" under parent $parentFolderId: $id');
     return id;
+  }
+
+  /// Moves a file between folders on Drive server-side without re-downloading or re-uploading.
+  Future<void> moveFile({
+    required AuthClient client,
+    required String fileId,
+    required String sourceFolderId,
+    required String targetFolderId,
+  }) async {
+    final driveApi = drive.DriveApi(client);
+    await driveApi.files.update(
+      drive.File(),
+      fileId,
+      addParents: targetFolderId,
+      removeParents: sourceFolderId,
+    );
+    debugPrint('Moved Drive file $fileId from $sourceFolderId to $targetFolderId');
+  }
+
+  /// Deletes a file permanently from Google Drive.
+  Future<void> deleteFile({
+    required AuthClient client,
+    required String fileId,
+  }) async {
+    final driveApi = drive.DriveApi(client);
+    await driveApi.files.delete(fileId);
+    debugPrint('Deleted Drive file $fileId');
+  }
+
+  /// Gets or creates the "Unassigned Photos" root folder under [parentFolderId].
+  Future<String> getOrCreateUnassignedRootFolder({
+    required AuthClient client,
+    required String parentFolderId,
+  }) async {
+    const rootName = 'Unassigned Photos';
+    final existing = await findFoldersByName(
+      client: client,
+      parentFolderId: parentFolderId,
+      folderName: rootName,
+    );
+    if (existing.isNotEmpty) {
+      return existing.first.id!;
+    }
+    return await createFolder(
+      client: client,
+      parentFolderId: parentFolderId,
+      folderName: rootName,
+    );
+  }
+
+  /// Gets or creates a session folder `session_YYYYMMDD_HHMMSS` under [unassignedRootId].
+  Future<String> getOrCreateUnassignedSessionFolder({
+    required AuthClient client,
+    required String unassignedRootId,
+    required String sessionFolderTimestamp,
+  }) async {
+    final sessionFolderName = 'session_$sessionFolderTimestamp';
+    final existing = await findFoldersByName(
+      client: client,
+      parentFolderId: unassignedRootId,
+      folderName: sessionFolderName,
+    );
+    if (existing.isNotEmpty) {
+      return existing.first.id!;
+    }
+    return await createFolder(
+      client: client,
+      parentFolderId: unassignedRootId,
+      folderName: sessionFolderName,
+    );
   }
 
   /// Lists image files stored in a patient's Drive folder.

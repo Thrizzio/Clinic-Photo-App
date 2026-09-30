@@ -103,18 +103,36 @@ class PatientFolderService {
       );
     }
 
-    final folderSuffix = patient.hasValidName
-        ? patient.name.trim()
-        : (patient.name.trim().isNotEmpty ? patient.name.trim() : patient.id);
-    final expectedFolderName = '${patient.id} - $folderSuffix';
-    debugPrint('Resolving patient folder for "$expectedFolderName" under parent: $parentFolderId');
+    // Canonical folder naming: `<Patient Name> - <Phone>` or `<Patient Name>` if phone missing
+    final phone = patient.phoneDisplay?.trim() ?? '';
+    final canonicalName = phone.isNotEmpty
+        ? '${patient.displayName} - $phone'
+        : patient.displayName;
 
-    // 3. Search the configured parent for exact expected name
-    final matches = await driveService.findFoldersByName(
+    debugPrint('Resolving patient folder: target canonical name "$canonicalName" under parent: $parentFolderId');
+
+    // 3. Search the configured parent for exact canonical name
+    var matches = await driveService.findFoldersByName(
       client: client,
       parentFolderId: parentFolderId,
-      folderName: expectedFolderName,
+      folderName: canonicalName,
     );
+
+    // 3b. Legacy folder compatibility: If not found and patient has legacy ID, check `<LegacyId> - <Patient Name>`
+    final legacyId = patient.legacyPatientId ??
+        (patient.source != PatientSource.doctorCreated ? patient.id : null);
+    if (matches.isEmpty && legacyId != null && legacyId.isNotEmpty) {
+      final legacyName = '$legacyId - ${patient.displayName}';
+      final legacyMatches = await driveService.findFoldersByName(
+        client: client,
+        parentFolderId: parentFolderId,
+        folderName: legacyName,
+      );
+      if (legacyMatches.isNotEmpty) {
+        debugPrint('Found matching legacy Drive folder "$legacyName" under configured parent.');
+        matches = legacyMatches;
+      }
+    }
 
     String resolvedFolderId;
     bool createdNew = false;
@@ -128,21 +146,21 @@ class PatientFolderService {
       );
       await database.updatePatient(conflictPatient);
       throw ConflictFolderException(
-        'Multiple Drive folders (${matches.length}) found with name "$expectedFolderName" under parent. Please resolve in Google Drive.',
+        'Multiple Drive folders (${matches.length}) found matching patient under parent. Please resolve in Google Drive.',
       );
     } else if (matches.length == 1) {
-      // 4. One match -> reuse
+      // 4. One match -> reuse verified folder
       resolvedFolderId = matches.first.id!;
-      debugPrint('Found existing matching Drive folder for $expectedFolderName: $resolvedFolderId');
+      debugPrint('Reusing existing matching Drive folder for ${patient.displayName}: $resolvedFolderId');
     } else {
-      // 5. Zero matches -> create
+      // 5. Zero matches -> create canonical folder
       resolvedFolderId = await driveService.createFolder(
         client: client,
         parentFolderId: parentFolderId,
-        folderName: expectedFolderName,
+        folderName: canonicalName,
       );
       createdNew = true;
-      debugPrint('Created new Drive folder for $expectedFolderName: $resolvedFolderId');
+      debugPrint('Created new Drive folder "$canonicalName" under parent $parentFolderId: $resolvedFolderId');
     }
 
     // 6. Persist folder ID locally

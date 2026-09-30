@@ -1,7 +1,17 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sqflite/sqflite.dart';
+import 'package:clinic_photos/models/clinic_config.dart';
 import 'package:clinic_photos/models/patient.dart';
+import 'package:clinic_photos/services/config_service.dart';
 import 'package:clinic_photos/services/database.dart';
+import 'package:clinic_photos/services/drive.dart';
+import 'package:clinic_photos/services/google_auth.dart';
+import 'package:clinic_photos/services/patient_folder_service.dart';
+import 'package:clinic_photos/services/sheets.dart';
+import 'package:googleapis/drive/v3.dart' as drive;
+import 'package:googleapis_auth/googleapis_auth.dart';
+import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   group('V4 Phase 1: Patient Model & Business Identity Tests', () {
@@ -197,6 +207,145 @@ void main() {
       await db.close();
     });
   });
+
+  group('V4 Phase 3: Drive Folder Identity & Unassigned Root Tests', () {
+    late ConfigService configService;
+    late InMemoryAppDatabase database;
+    late MockV4DriveService mockDrive;
+    late SheetsService mockSheets;
+    late GoogleAuthService authService;
+    late PatientFolderService folderService;
+    late FakeV4AuthClient fakeClient;
+
+    const parentFolderId = 'clinic_parent_folder_id';
+
+    setUp(() async {
+      SharedPreferences.setMockInitialValues({});
+      configService = await ConfigService.init();
+      await configService.saveConfig(const ClinicConfig(
+        spreadsheetId: 'sheet_clinic_test',
+        spreadsheetUrl: 'https://docs.google.com/spreadsheets/d/sheet_clinic_test/edit',
+        sheetTabName: 'Visits',
+        parentDriveFolderId: parentFolderId,
+        hasCompletedSetup: true,
+      ));
+
+      database = InMemoryAppDatabase();
+      mockDrive = MockV4DriveService();
+      mockSheets = SheetsService();
+      authService = GoogleAuthService();
+      fakeClient = FakeV4AuthClient();
+
+      folderService = PatientFolderService(
+        driveService: mockDrive,
+        sheetsService: mockSheets,
+        database: database,
+        configService: configService,
+        authService: authService,
+      );
+    });
+
+    test('3.1 Target folder naming: <Name> - <Phone> when phone exists', () async {
+      final patient = Patient(
+        id: 'doc-patient-1',
+        name: 'Abhijit Gaikwad',
+        phoneNumber: '9373264424',
+        source: PatientSource.doctorCreated,
+      );
+      await database.upsertPatients([patient]);
+
+      final result = await folderService.getOrCreatePatientFolder(patient, clientOverride: fakeClient);
+
+      expect(result.createdNew, isTrue);
+      expect(mockDrive.createdFolders.last, 'Abhijit Gaikwad - 9373264424');
+      expect(result.patient.driveFolderId, isNotEmpty);
+      expect(result.patient.folderStatus, FolderStatus.available);
+    });
+
+    test('3.2 Target folder naming: <Name> when phone is missing (legacy sheet patient)', () async {
+      final patient = Patient(
+        id: 'legacy-sheet-1',
+        name: 'Anil Jain',
+        source: PatientSource.clinicSheet,
+      );
+      await database.upsertPatients([patient]);
+
+      final result = await folderService.getOrCreatePatientFolder(patient, clientOverride: fakeClient);
+
+      expect(result.createdNew, isTrue);
+      expect(mockDrive.createdFolders.last, 'Anil Jain');
+      expect(result.patient.driveFolderId, isNotEmpty);
+      expect(result.patient.folderStatus, FolderStatus.available);
+    });
+
+    test('3.3 Legacy folder compatibility: searches and reuses <LegacyId> - <Name> inside parent', () async {
+      final patient = Patient(
+        id: 'sheet-uuid-999',
+        name: 'Anil Jain',
+        legacyPatientId: '1000001',
+        phoneNumber: '9822012345',
+        source: PatientSource.clinicSheet,
+      );
+      await database.upsertPatients([patient]);
+
+      // Pre-seed legacy folder in configured parent
+      mockDrive.parentFolders[parentFolderId] = [
+        drive.File()
+          ..id = 'legacy_anil_drive_id'
+          ..name = '1000001 - Anil Jain'
+          ..parents = [parentFolderId],
+      ];
+
+      final result = await folderService.getOrCreatePatientFolder(patient, clientOverride: fakeClient);
+
+      // Reused legacy folder without creating new folder
+      expect(result.createdNew, isFalse);
+      expect(result.driveFolderId, 'legacy_anil_drive_id');
+      expect(mockDrive.createFolderCalls, 0);
+    });
+
+    test('3.4 Cautionary parent verification: ignores folder outside configured clinic parent', () async {
+      final patient = Patient(
+        id: 'p-uuid-verify',
+        name: 'Shilpa Kalbhor',
+        phoneNumber: '9822099999',
+        source: PatientSource.doctorCreated,
+      );
+      await database.upsertPatients([patient]);
+
+      // Seed same-named folder under a DIFFERENT parent in Drive
+      mockDrive.parentFolders['other_foreign_folder_root'] = [
+        drive.File()
+          ..id = 'foreign_folder_id'
+          ..name = 'Shilpa Kalbhor - 9822099999'
+          ..parents = ['other_foreign_folder_root'],
+      ];
+
+      final result = await folderService.getOrCreatePatientFolder(patient, clientOverride: fakeClient);
+
+      // Foreign folder was ignored; newly created folder is inside parentFolderId
+      expect(result.createdNew, isTrue);
+      expect(result.driveFolderId, isNot('foreign_folder_id'));
+      expect(mockDrive.parentFolders[parentFolderId]?.first.name, 'Shilpa Kalbhor - 9822099999');
+    });
+
+    test('3.5 Unassigned root and session subfolder creation under configured clinic parent', () async {
+      final unassignedRootId = await mockDrive.getOrCreateUnassignedRootFolder(
+        client: fakeClient,
+        parentFolderId: parentFolderId,
+      );
+      expect(unassignedRootId, isNotEmpty);
+      expect(mockDrive.createdFolders.contains('Unassigned Photos'), isTrue);
+
+      final sessionFolderId = await mockDrive.getOrCreateUnassignedSessionFolder(
+        client: fakeClient,
+        unassignedRootId: unassignedRootId,
+        sessionFolderTimestamp: '20260930_213000',
+      );
+      expect(sessionFolderId, isNotEmpty);
+      expect(mockDrive.createdFolders.contains('session_20260930_213000'), isTrue);
+    });
+  });
 }
 
 class FakeV7MigrationDatabase extends Fake implements Database {
@@ -276,5 +425,58 @@ class FakeV7MigrationTransaction extends Fake implements Transaction {
   Future<int> update(String table, Map<String, Object?> values,
       {String? where, List<Object?>? whereArgs, ConflictAlgorithm? conflictAlgorithm}) async {
     return 1;
+  }
+}
+
+class FakeV4AuthClient extends http.BaseClient implements AuthClient {
+  @override
+  AccessCredentials get credentials => AccessCredentials(
+        AccessToken('Bearer', 'fake_token', DateTime.now().toUtc().add(const Duration(hours: 1))),
+        'fake_refresh_token',
+        ['https://www.googleapis.com/auth/drive'],
+      );
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    return http.StreamedResponse(const Stream.empty(), 200);
+  }
+}
+
+class MockV4DriveService extends DriveService {
+  final Map<String, List<drive.File>> parentFolders = {};
+  final List<String> createdFolders = [];
+  int createFolderCalls = 0;
+
+  @override
+  Future<List<drive.File>> findFoldersByName({
+    required AuthClient client,
+    required String parentFolderId,
+    required String folderName,
+  }) async {
+    final list = parentFolders[parentFolderId] ?? [];
+    return list.where((f) {
+      if (f.name != folderName) return false;
+      if (f.parents != null && f.parents!.isNotEmpty) {
+        return f.parents!.contains(parentFolderId);
+      }
+      return true;
+    }).toList();
+  }
+
+  @override
+  Future<String> createFolder({
+    required AuthClient client,
+    required String parentFolderId,
+    required String folderName,
+  }) async {
+    createFolderCalls++;
+    createdFolders.add(folderName);
+    final folderId = 'folder_${folderName.replaceAll(" ", "_")}_$createFolderCalls';
+    final newFile = drive.File()
+      ..id = folderId
+      ..name = folderName
+      ..parents = [parentFolderId];
+    parentFolders.putIfAbsent(parentFolderId, () => []).add(newFile);
+    return folderId;
   }
 }
