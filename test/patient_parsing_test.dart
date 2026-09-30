@@ -115,5 +115,40 @@ void main() {
         isNull,
       );
     });
+
+    test('parses clinic real-world patient row (1000001 -> Anil Jain) with displayName and hasValidName', () {
+      final rowMap = {
+        AppConfig.patientIdHeader: '1000001',
+        AppConfig.patientNameHeader: 'Anil Jain',
+        AppConfig.photosDriveHeader: '',
+      };
+
+      final patient = Patient.fromRow(
+        rowMap: rowMap,
+        idCol: AppConfig.patientIdHeader,
+        nameCol: AppConfig.patientNameHeader,
+        folderCol: AppConfig.photosDriveHeader,
+      );
+
+      expect(patient, isNotNull);
+      expect(patient!.id, '1000001');
+      expect(patient.name, 'Anil Jain');
+      expect(patient.displayName, 'Anil Jain');
+      expect(patient.hasValidName, isTrue);
+    });
+
+    test('Patient.displayName falls back to Name unavailable if name is empty or synthetic placeholder', () {
+      const emptyPatient = Patient(id: '1000002', name: '');
+      expect(emptyPatient.displayName, 'Name unavailable');
+      expect(emptyPatient.hasValidName, isFalse);
+
+      const placeholderPatient = Patient(id: '1000003', name: 'Patient 1000003');
+      expect(placeholderPatient.displayName, 'Name unavailable');
+      expect(placeholderPatient.hasValidName, isFalse);
+
+      const validPatient = Patient(id: '1000003', name: 'Pragati Waghaji');
+      expect(validPatient.displayName, 'Pragati Waghaji');
+      expect(validPatient.hasValidName, isTrue);
+    });
   });
 }

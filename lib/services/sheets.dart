@@ -1,8 +1,22 @@
 import 'package:flutter/foundation.dart';
 import 'package:googleapis/sheets/v4.dart' as sheets;
+import 'package:googleapis/drive/v3.dart' as drive;
 import 'package:googleapis_auth/googleapis_auth.dart';
 import '../config.dart';
 import '../models/patient.dart';
+import 'drive.dart';
+
+class AppointmentRecord {
+  final String appointmentId;
+  final String? patientName;
+  final String? phoneNumber;
+
+  const AppointmentRecord({
+    required this.appointmentId,
+    this.patientName,
+    this.phoneNumber,
+  });
+}
 
 class MissingColumnException implements Exception {
   final String missingColumn;
@@ -16,6 +30,7 @@ class HeaderIndices {
   final int idColIndex;
   final int nameColIndex;
   final int folderColIndex;
+  final int? phoneColIndex;
   final int headerRowIndex;
   final Map<String, int> columnMap;
 
@@ -23,6 +38,7 @@ class HeaderIndices {
     required this.idColIndex,
     required this.nameColIndex,
     required this.folderColIndex,
+    this.phoneColIndex,
     this.headerRowIndex = 0,
     this.columnMap = const {},
   });
@@ -58,6 +74,7 @@ class IncrementalSyncResult {
 class _PatientGroupData {
   final String id;
   String name = '';
+  String? phoneNumber;
   final Set<String> folderIds = {};
 
   _PatientGroupData({required this.id});
@@ -106,6 +123,147 @@ class SheetsService {
     return header.trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
   }
 
+  static const List<String> phoneHeaderAliases = [
+    'phone',
+    'phone number',
+    'phone no',
+    'phone no.',
+    'phone_number',
+    'mobile',
+    'mobile number',
+    'mobile no',
+    'mobile no.',
+    'mobile_number',
+    'contact',
+    'contact number',
+    'contact no',
+    'contact no.',
+    'contact_number',
+    'cell',
+    'cell number',
+    'cell no',
+    'cell no.',
+    'telephone',
+    'whatsapp',
+    'whatsapp number',
+  ];
+
+  static const List<String> appointmentHeaderAliases = [
+    'appointment id',
+    'appointment',
+    'appt id',
+    'appt',
+    'appointment_id',
+    'booking id',
+  ];
+
+  static bool isPhoneHeader(String normalized) {
+    for (final alias in phoneHeaderAliases) {
+      if (normalized == normalizeHeader(alias)) return true;
+    }
+    return false;
+  }
+
+  static bool isAppointmentHeader(String normalized) {
+    for (final alias in appointmentHeaderAliases) {
+      if (normalized == normalizeHeader(alias)) return true;
+    }
+    return false;
+  }
+
+  static bool isAppointmentsTab(String title) {
+    final norm = title.trim().toLowerCase();
+    return norm == 'appointments' ||
+        norm == 'appointment schedule' ||
+        norm == 'schedule' ||
+        norm.contains('appointment');
+  }
+
+  static bool isPatientsTab(String title) {
+    final norm = title.trim().toLowerCase();
+    return norm == 'patients' ||
+        norm == 'patient tracker' ||
+        norm == 'patient directory' ||
+        norm == 'directory';
+  }
+
+  static int? _findPhoneColIndex(Map<String, int> columnMap) {
+    for (final alias in phoneHeaderAliases) {
+      final normalized = normalizeHeader(alias);
+      if (columnMap.containsKey(normalized)) {
+        return columnMap[normalized];
+      }
+    }
+    return null;
+  }
+
+  /// Parses rows from an "Appointments" schedule tab.
+  static Map<String, AppointmentRecord> parseAppointments(List<List<dynamic>> rows) {
+    if (rows.isEmpty) return const {};
+
+    int apptIdCol = -1;
+    int nameCol = -1;
+    int phoneCol = -1;
+    int dataStartIndex = 0;
+
+    for (int r = 0; r < rows.length; r++) {
+      final row = rows[r];
+      for (int c = 0; c < row.length; c++) {
+        final cell = normalizeHeader(row[c]?.toString() ?? '');
+        if (isAppointmentHeader(cell) && apptIdCol == -1) {
+          apptIdCol = c;
+        } else if ((cell == 'patient name' || cell == 'name') && nameCol == -1) {
+          nameCol = c;
+        } else if (isPhoneHeader(cell) && phoneCol == -1) {
+          phoneCol = c;
+        }
+      }
+      if (apptIdCol != -1 && (nameCol != -1 || phoneCol != -1)) {
+        dataStartIndex = r + 1;
+        break;
+      }
+    }
+
+    if (apptIdCol == -1) return const {};
+
+    final result = <String, AppointmentRecord>{};
+    for (int r = dataStartIndex; r < rows.length; r++) {
+      final row = rows[r];
+      if (row.isEmpty || apptIdCol >= row.length) continue;
+
+      final rawApptId = row[apptIdCol]?.toString().trim() ?? '';
+      if (rawApptId.isEmpty) continue;
+
+      String cleanApptId = rawApptId;
+      if (RegExp(r'^\d+\.0$').hasMatch(cleanApptId)) {
+        cleanApptId = cleanApptId.substring(0, cleanApptId.length - 2);
+      }
+
+      final rawName = (nameCol != -1 && nameCol < row.length)
+          ? row[nameCol]?.toString().trim()
+          : null;
+      final rawPhone = (phoneCol != -1 && phoneCol < row.length)
+          ? row[phoneCol]?.toString()
+          : null;
+
+      final cleanName = (rawName != null &&
+              rawName.isNotEmpty &&
+              rawName != 'None' &&
+              rawName != 'Patient')
+          ? rawName
+          : null;
+      final cleanPhone = Patient.cleanPhone(rawPhone);
+
+      result[cleanApptId] = AppointmentRecord(
+        appointmentId: cleanApptId,
+        patientName: cleanName,
+        phoneNumber: cleanPhone,
+      );
+    }
+
+    return result;
+  }
+
   /// Parses a single header row into a [HeaderIndices] object.
   /// Throws [MissingColumnException] if Patient ID, Patient Name, or Photos (Drive) is missing.
   static HeaderIndices parseHeaderIndices(
@@ -126,6 +284,7 @@ class SheetsService {
     final folderColIndex = columnMap[normalizeHeader(AppConfig.photosDriveHeader)] ??
         columnMap[normalizeHeader(AppConfig.legacyDriveFolderIdHeader)] ??
         -1;
+    final phoneColIndex = _findPhoneColIndex(columnMap);
 
     if (idColIndex == -1) {
       throw MissingColumnException(AppConfig.patientIdHeader);
@@ -141,6 +300,7 @@ class SheetsService {
       idColIndex: idColIndex,
       nameColIndex: nameColIndex,
       folderColIndex: folderColIndex,
+      phoneColIndex: phoneColIndex,
       headerRowIndex: headerRowIndex,
       columnMap: columnMap,
     );
@@ -193,10 +353,12 @@ class SheetsService {
 
       // If all required headers are found in this row, we have discovered the header row!
       if (matchCount == 3) {
+        final phoneIdx = _findPhoneColIndex(columnMap);
         final indices = HeaderIndices(
           idColIndex: idIdx,
           nameColIndex: nameIdx,
           folderColIndex: folderIdx,
+          phoneColIndex: phoneIdx,
           headerRowIndex: r,
           columnMap: columnMap,
         );
@@ -205,6 +367,8 @@ class SheetsService {
         debugPrint('Patient ID column: $idIdx');
         debugPrint('Patient Name column: $nameIdx');
         debugPrint('Photos (Drive) column: $folderIdx');
+        debugPrint('Phone column: $phoneIdx');
+        debugPrint('ALL HEADERS: $columnMap');
 
         return indices;
       }
@@ -251,12 +415,41 @@ class SheetsService {
       final rawFolder = headerIndices.folderColIndex < row.length
           ? row[headerIndices.folderColIndex]?.toString().trim() ?? ''
           : '';
+      final rawPhone = (headerIndices.phoneColIndex != null && headerIndices.phoneColIndex! < row.length)
+          ? row[headerIndices.phoneColIndex!]?.toString()
+          : null;
 
       if (id.isEmpty) continue;
 
-      final entry = patientData.putIfAbsent(id, () => _PatientGroupData(id: id));
-      if (name.isNotEmpty) {
-        entry.name = name;
+      // Filter out header tokens if encountered in data rows (e.g. incremental chunks or duplicate headers)
+      final normalizedId = normalizeHeader(id);
+      if (normalizedId == 'patient id' ||
+          normalizedId == 'id' ||
+          normalizedId == 'patient' ||
+          normalizedId == 'total' ||
+          normalizedId == 'totals' ||
+          normalizedId == 'count' ||
+          normalizedId == 'summary') {
+        continue;
+      }
+
+      // Normalize numeric ID if formatted as float by Google Sheets (e.g. 1000001.0 -> 1000001)
+      String cleanId = id;
+      if (RegExp(r'^\d+\.0$').hasMatch(cleanId)) {
+        cleanId = cleanId.substring(0, cleanId.length - 2);
+      }
+
+      final entry = patientData.putIfAbsent(cleanId, () => _PatientGroupData(id: cleanId));
+      final cleanName = name.trim();
+      if (cleanName.isNotEmpty &&
+          cleanName != 'Patient $cleanId' &&
+          cleanName != 'Patient') {
+        entry.name = cleanName;
+      }
+
+      final cleanPhone = Patient.cleanPhone(rawPhone);
+      if (cleanPhone != null && cleanPhone.isNotEmpty) {
+        entry.phoneNumber = cleanPhone;
       }
 
       if (rawFolder.isNotEmpty) {
@@ -269,12 +462,15 @@ class SheetsService {
 
     final result = <String, Patient>{};
     for (final entry in patientData.values) {
-      final resolvedName = entry.name.isNotEmpty ? entry.name : 'Patient ${entry.id}';
+      final resolvedName = entry.name.trim();
+      final normPhone = Patient.normalizePhone(entry.phoneNumber);
 
       if (entry.folderIds.isEmpty) {
         result[entry.id] = Patient(
           id: entry.id,
           name: resolvedName,
+          phoneNumber: entry.phoneNumber,
+          phoneNumberNormalized: normPhone,
           driveFolderId: null,
           folderStatus: FolderStatus.missing,
         );
@@ -282,6 +478,8 @@ class SheetsService {
         result[entry.id] = Patient(
           id: entry.id,
           name: resolvedName,
+          phoneNumber: entry.phoneNumber,
+          phoneNumberNormalized: normPhone,
           driveFolderId: entry.folderIds.first,
           folderStatus: FolderStatus.available,
         );
@@ -289,6 +487,8 @@ class SheetsService {
         result[entry.id] = Patient(
           id: entry.id,
           name: resolvedName,
+          phoneNumber: entry.phoneNumber,
+          phoneNumberNormalized: normPhone,
           driveFolderId: null,
           folderStatus: FolderStatus.conflict,
         );
@@ -351,8 +551,8 @@ class SheetsService {
       spreadsheetId,
       sheetName,
     );
-
     final rawRows = valueRange.values;
+
     if (rawRows == null || rawRows.isEmpty) {
       return const SheetParseResult(
         patients: [],
@@ -360,6 +560,7 @@ class SheetsService {
       );
     }
 
+    final tabs = await fetchSheetTabs(client: client, spreadsheetId: spreadsheetId);
     final rows = rawRows.cast<List<dynamic>>();
     final headerIndices = discoverHeaderIndices(rows);
     final patientsMap = resolvePatientsFromVisits(
@@ -367,11 +568,253 @@ class SheetsService {
       headerIndices: headerIndices,
     );
 
+    // 1. Fetch Appointments schedule if present in workbook
+    Map<String, AppointmentRecord> appointmentsMap = const {};
+    final apptTabName = tabs.firstWhere(
+      (t) =>
+          isAppointmentsTab(t) &&
+          t.trim().toLowerCase() != sheetName.trim().toLowerCase(),
+      orElse: () => '',
+    );
+    if (apptTabName.isNotEmpty) {
+      try {
+        final apptRange = await sheetsApi.spreadsheets.values.get(
+          spreadsheetId,
+          '$apptTabName!A1:Z500',
+        );
+        final aRows = apptRange.values;
+        if (aRows != null && aRows.isNotEmpty) {
+          appointmentsMap = parseAppointments(aRows.cast<List<dynamic>>());
+        }
+      } catch (e) {
+        debugPrint('Error fetching Appointments tab: $e');
+      }
+    }
+
+    // If appointmentsMap is empty, search Drive for companion clinic master sheet (e.g. Advanced Skin Clinic)
+    if (appointmentsMap.isEmpty) {
+      appointmentsMap = await _fetchAppointmentsFromCompanionDriveSheet(
+        client: client,
+        sheetsApi: sheetsApi,
+        targetSpreadsheetId: spreadsheetId,
+      );
+    }
+
+    // 2. Fetch Patients directory tab if present in workbook
+    final patientsTabName = tabs.firstWhere(
+      (t) =>
+          isPatientsTab(t) &&
+          t.trim().toLowerCase() != sheetName.trim().toLowerCase(),
+      orElse: () => '',
+    );
+    if (patientsTabName.isNotEmpty) {
+      try {
+        final patientsRange = await sheetsApi.spreadsheets.values.get(
+          spreadsheetId,
+          '$patientsTabName!A1:Z500',
+        );
+        final pRows = patientsRange.values;
+        if (pRows != null && pRows.isNotEmpty) {
+          enrichPatientsFromDirectory(
+            patientsMap,
+            pRows.cast<List<dynamic>>(),
+            appointmentsMap: appointmentsMap,
+          );
+        }
+      } catch (e) {
+        debugPrint('Error enriching from Patients tab: $e');
+      }
+    }
+
     return SheetParseResult(
       patients: patientsMap.values.toList(),
       totalRows: rows.length,
       headerIndices: headerIndices,
     );
+  }
+
+  /// Searches Google Drive for a companion master clinic workbook (e.g. "Advanced Skin Clinic")
+  /// containing the "Appointments" schedule, and parses appointments.
+  Future<Map<String, AppointmentRecord>> _fetchAppointmentsFromCompanionDriveSheet({
+    required AuthClient client,
+    required sheets.SheetsApi sheetsApi,
+    required String targetSpreadsheetId,
+  }) async {
+    try {
+      final driveService = DriveService();
+      final spreadsheets = await driveService.listSpreadsheets(client: client);
+      final masterFile = spreadsheets.firstWhere(
+        (f) {
+          final n = f.name?.toLowerCase() ?? '';
+          return f.id != targetSpreadsheetId &&
+              (n.contains('skin clinic') || n.contains('advanced'));
+        },
+        orElse: () => drive.File(),
+      );
+
+      final masterId = masterFile.id;
+      if (masterId == null || masterId.isEmpty) return const {};
+
+      final masterTabs = await fetchSheetTabs(client: client, spreadsheetId: masterId);
+      final masterApptTab = masterTabs.firstWhere(
+        (t) => isAppointmentsTab(t),
+        orElse: () => '',
+      );
+
+      if (masterApptTab.isEmpty) return const {};
+
+      final apptRange = await sheetsApi.spreadsheets.values.get(
+        masterId,
+        '$masterApptTab!A1:Z500',
+      );
+      final aRows = apptRange.values;
+      if (aRows == null || aRows.isEmpty) return const {};
+
+      final appts = parseAppointments(aRows.cast<List<dynamic>>());
+
+      // Attempt to self-heal target spreadsheet by copying the Appointments sheet tab
+      try {
+        final masterMeta = await sheetsApi.spreadsheets.get(
+          masterId,
+          $fields: 'sheets(properties(sheetId,title))',
+        );
+        final tabObj = masterMeta.sheets?.firstWhere(
+          (s) => s.properties?.title?.toLowerCase() == masterApptTab.toLowerCase(),
+          orElse: () => sheets.Sheet(),
+        );
+        final sheetId = tabObj?.properties?.sheetId;
+        if (sheetId != null) {
+          await sheetsApi.spreadsheets.sheets.copyTo(
+            sheets.CopySheetToAnotherSpreadsheetRequest(
+              destinationSpreadsheetId: targetSpreadsheetId,
+            ),
+            masterId,
+            sheetId,
+          );
+          debugPrint('Self-healed: copied $masterApptTab into $targetSpreadsheetId');
+        }
+      } catch (copyErr) {
+        debugPrint('Note: could not copy tab into target spreadsheet: $copyErr');
+      }
+
+      return appts;
+    } catch (e) {
+      debugPrint('Error searching Drive for companion Appointments tab: $e');
+      return const {};
+    }
+  }
+
+  /// Enriches patients resolved from visit logs with master patient details
+  /// (canonical names, phone numbers) from a clinic "Patients" directory tab,
+  /// resolving appointment-linked patients from [appointmentsMap].
+  static void enrichPatientsFromDirectory(
+    Map<String, Patient> patientsMap,
+    List<List<dynamic>> directoryRows, {
+    Map<String, AppointmentRecord>? appointmentsMap,
+  }) {
+    if (directoryRows.isEmpty) return;
+
+    int idCol = -1;
+    int apptIdCol = -1;
+    int nameCol = -1;
+    int phoneCol = -1;
+    int dataStartIndex = 0;
+
+    for (int r = 0; r < directoryRows.length; r++) {
+      final row = directoryRows[r];
+      for (int c = 0; c < row.length; c++) {
+        final cell = normalizeHeader(row[c]?.toString() ?? '');
+        if (isAppointmentHeader(cell) && apptIdCol == -1) {
+          apptIdCol = c;
+        } else if (cell == 'patient id' || (cell == 'id' && idCol == -1)) {
+          idCol = c;
+        } else if (cell == 'patient name' || (cell == 'name' && nameCol == -1)) {
+          nameCol = c;
+        } else if (isPhoneHeader(cell) && phoneCol == -1) {
+          phoneCol = c;
+        }
+      }
+      if (idCol != -1 && (nameCol != -1 || phoneCol != -1 || apptIdCol != -1)) {
+        dataStartIndex = r + 1;
+        break;
+      }
+    }
+
+    if (idCol == -1) return;
+
+    for (int r = dataStartIndex; r < directoryRows.length; r++) {
+      final row = directoryRows[r];
+      if (row.isEmpty || idCol >= row.length) continue;
+
+      final rawId = row[idCol]?.toString().trim() ?? '';
+      if (rawId.isEmpty) continue;
+
+      String cleanId = rawId;
+      if (RegExp(r'^\d+\.0$').hasMatch(cleanId)) {
+        cleanId = cleanId.substring(0, cleanId.length - 2);
+      }
+
+      final rawApptId = (apptIdCol != -1 && apptIdCol < row.length)
+          ? row[apptIdCol]?.toString().trim()
+          : null;
+      String? cleanApptId = rawApptId;
+      if (cleanApptId != null && RegExp(r'^\d+\.0$').hasMatch(cleanApptId)) {
+        cleanApptId = cleanApptId.substring(0, cleanApptId.length - 2);
+      }
+
+      final rawName = (nameCol != -1 && nameCol < row.length)
+          ? row[nameCol]?.toString().trim()
+          : null;
+      final rawPhone = (phoneCol != -1 && phoneCol < row.length)
+          ? row[phoneCol]?.toString()
+          : null;
+
+      String? cleanName = (rawName != null &&
+              rawName.isNotEmpty &&
+              rawName != 'Patient $cleanId' &&
+              rawName != 'Patient' &&
+              rawName != 'None' &&
+              rawName != 'null' &&
+              !rawName.startsWith('#'))
+          ? rawName
+          : null;
+
+      String? cleanPhoneNumber = Patient.cleanPhone(rawPhone);
+
+      // If name or phone is missing from Patients directory row, resolve from Appointments schedule
+      if (cleanApptId != null && cleanApptId.isNotEmpty && appointmentsMap != null) {
+        final appt = appointmentsMap[cleanApptId];
+        if (appt != null) {
+          if (cleanName == null || cleanName.isEmpty) {
+            cleanName = appt.patientName;
+          }
+          if (cleanPhoneNumber == null || cleanPhoneNumber.isEmpty) {
+            cleanPhoneNumber = appt.phoneNumber;
+          }
+        }
+      }
+
+      final normPhone = Patient.normalizePhone(cleanPhoneNumber);
+
+      final existing = patientsMap[cleanId];
+      if (existing != null) {
+        final updatedName = existing.hasValidName
+            ? existing.name
+            : (cleanName ?? existing.name);
+        final updatedPhone = existing.phoneNumber ?? cleanPhoneNumber;
+        final updatedNormPhone = existing.phoneNumberNormalized ?? normPhone;
+
+        patientsMap[cleanId] = Patient(
+          id: existing.id,
+          name: updatedName,
+          phoneNumber: updatedPhone,
+          phoneNumberNormalized: updatedNormPhone,
+          driveFolderId: existing.driveFolderId,
+          folderStatus: existing.folderStatus,
+          updatedAt: existing.updatedAt,
+        );
+      }
+    }
   }
 
   /// Incremental sync: fetches only rows appended after [lastSyncedRow].
@@ -442,6 +885,57 @@ class SheetsService {
         startRowIndex: 0,
       );
 
+      try {
+        final tabs = await fetchSheetTabs(client: client, spreadsheetId: spreadsheetId);
+        Map<String, AppointmentRecord> appointmentsMap = const {};
+        final apptTabName = tabs.firstWhere(
+          (t) =>
+              isAppointmentsTab(t) &&
+              t.trim().toLowerCase() != sheetName.trim().toLowerCase(),
+          orElse: () => '',
+        );
+        if (apptTabName.isNotEmpty) {
+          final apptRange = await sheetsApi.spreadsheets.values.get(
+            spreadsheetId,
+            '$apptTabName!A1:Z500',
+          );
+          final aRows = apptRange.values;
+          if (aRows != null && aRows.isNotEmpty) {
+            appointmentsMap = parseAppointments(aRows.cast<List<dynamic>>());
+          }
+        }
+        if (appointmentsMap.isEmpty) {
+          appointmentsMap = await _fetchAppointmentsFromCompanionDriveSheet(
+            client: client,
+            sheetsApi: sheetsApi,
+            targetSpreadsheetId: spreadsheetId,
+          );
+        }
+
+        final patientsTabName = tabs.firstWhere(
+          (t) =>
+              isPatientsTab(t) &&
+              t.trim().toLowerCase() != sheetName.trim().toLowerCase(),
+          orElse: () => '',
+        );
+        if (patientsTabName.isNotEmpty) {
+          final patientsRange = await sheetsApi.spreadsheets.values.get(
+            spreadsheetId,
+            '$patientsTabName!A1:Z500',
+          );
+          final pRows = patientsRange.values;
+          if (pRows != null && pRows.isNotEmpty) {
+            enrichPatientsFromDirectory(
+              resolvedMap,
+              pRows.cast<List<dynamic>>(),
+              appointmentsMap: appointmentsMap,
+            );
+          }
+        }
+      } catch (e) {
+        debugPrint('Error enriching incremental patients: $e');
+      }
+
       return IncrementalSyncResult(
         updatedPatients: resolvedMap.values.toList(),
         newRowsCount: newRows.length,
@@ -496,15 +990,23 @@ class SheetsService {
     final folderColLetter = columnIndexToA1Notation(headers.folderColIndex);
     final List<sheets.ValueRange> dataToUpdate = [];
 
+    final cleanTargetId = RegExp(r'^\d+\.0$').hasMatch(patientId.trim())
+        ? patientId.trim().substring(0, patientId.trim().length - 2)
+        : patientId.trim();
+
     for (int r = headers.headerRowIndex + 1; r < rows.length; r++) {
       final row = rows[r];
       if (row.isEmpty) continue;
 
-      final id = headers.idColIndex < row.length
+      final rawId = headers.idColIndex < row.length
           ? row[headers.idColIndex]?.toString().trim() ?? ''
           : '';
 
-      if (id != patientId) continue;
+      final cleanRowId = RegExp(r'^\d+\.0$').hasMatch(rawId)
+          ? rawId.substring(0, rawId.length - 2)
+          : rawId;
+
+      if (cleanRowId != cleanTargetId) continue;
 
       final currentFolder = headers.folderColIndex < row.length
           ? row[headers.folderColIndex]?.toString().trim() ?? ''

@@ -112,6 +112,67 @@ void main() {
       expect(patients['P002']!.folderStatus, FolderStatus.missing);
       expect(patients['P003']!.folderStatus, FolderStatus.conflict);
     });
+
+    test('ignores header rows and summary rows like Total or Count in data rows', () {
+      final rows = [
+        ['Patient ID', 'Patient Name', 'Photos (Drive)'],
+        ['1000001', 'Anil Jain', ''],
+        ['Patient ID', 'Patient Name', 'Photos (Drive)'], // Repeated header
+        ['1000002', 'Shilpa Kalbhor', ''],
+        ['Total', '', ''], // Summary row
+        ['Count', '75', ''], // Summary row
+      ];
+
+      final patients = SheetsService.resolvePatientsFromVisits(
+        rows: rows,
+        headerIndices: headerIndices,
+        startRowIndex: 0,
+      );
+
+      expect(patients.length, 2);
+      expect(patients.containsKey('1000001'), isTrue);
+      expect(patients['1000001']!.name, 'Anil Jain');
+      expect(patients.containsKey('1000002'), isTrue);
+      expect(patients['1000002']!.name, 'Shilpa Kalbhor');
+      expect(patients.containsKey('Patient ID'), isFalse);
+      expect(patients.containsKey('Total'), isFalse);
+      expect(patients.containsKey('Count'), isFalse);
+    });
+
+    test('normalizes float IDs from Google Sheets formatting (1000001.0 -> 1000001)', () {
+      final rows = [
+        ['Patient ID', 'Patient Name', 'Photos (Drive)'],
+        ['1000001.0', 'Anil Jain', ''],
+        ['1000001', 'Anil Jain', ''],
+      ];
+
+      final patients = SheetsService.resolvePatientsFromVisits(
+        rows: rows,
+        headerIndices: headerIndices,
+      );
+
+      expect(patients.length, 1);
+      expect(patients['1000001']!.name, 'Anil Jain');
+    });
+
+    test('preserves genuine patient name across visits even if follow-up row has blank name', () {
+      final rows = [
+        ['Patient ID', 'Patient Name', 'Photos (Drive)'],
+        ['1000001', 'Anil Jain', ''], // Visit 1: full details
+        ['1000001', '', ''], // Visit 2: follow-up visit row left name blank
+      ];
+
+      final patients = SheetsService.resolvePatientsFromVisits(
+        rows: rows,
+        headerIndices: headerIndices,
+      );
+
+      expect(patients.length, 1);
+      final p = patients['1000001']!;
+      expect(p.name, 'Anil Jain');
+      expect(p.displayName, 'Anil Jain');
+      expect(p.hasValidName, isTrue);
+    });
   });
 
   group('Patient.merge', () {
@@ -170,6 +231,60 @@ void main() {
       final merged = Patient.merge(existing, incoming);
       expect(merged.folderStatus, FolderStatus.conflict);
       expect(merged.driveFolderId, isNull);
+    });
+
+    test('preserves existing valid clinical name when incoming row has blank name', () {
+      const existing = Patient(
+        id: '1000001',
+        name: 'Anil Jain',
+        folderStatus: FolderStatus.missing,
+      );
+      const incoming = Patient(
+        id: '1000001',
+        name: '',
+        folderStatus: FolderStatus.missing,
+      );
+
+      final merged = Patient.merge(existing, incoming);
+      expect(merged.name, 'Anil Jain');
+      expect(merged.displayName, 'Anil Jain');
+      expect(merged.hasValidName, isTrue);
+    });
+
+    test('preserves existing valid clinical name when incoming row has synthetic placeholder Patient <id>', () {
+      const existing = Patient(
+        id: '1000001',
+        name: 'Anil Jain',
+        folderStatus: FolderStatus.missing,
+      );
+      const incoming = Patient(
+        id: '1000001',
+        name: 'Patient 1000001',
+        folderStatus: FolderStatus.missing,
+      );
+
+      final merged = Patient.merge(existing, incoming);
+      expect(merged.name, 'Anil Jain');
+      expect(merged.displayName, 'Anil Jain');
+      expect(merged.hasValidName, isTrue);
+    });
+
+    test('updates name when incoming row contains genuine clinical name and existing was empty', () {
+      const existing = Patient(
+        id: '1000003',
+        name: '',
+        folderStatus: FolderStatus.missing,
+      );
+      const incoming = Patient(
+        id: '1000003',
+        name: 'Pragati Waghaji',
+        folderStatus: FolderStatus.missing,
+      );
+
+      final merged = Patient.merge(existing, incoming);
+      expect(merged.name, 'Pragati Waghaji');
+      expect(merged.displayName, 'Pragati Waghaji');
+      expect(merged.hasValidName, isTrue);
     });
   });
 }

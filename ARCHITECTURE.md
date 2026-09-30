@@ -6,17 +6,17 @@ Version 3 (V3) — Flutter Android single-doctor clinical photo capture app with
 ## Modules
 - `lib/config.dart`: Developer constants (Google OAuth scopes, headers: `Patient ID`, `Patient Name`, `Photos (Drive)`, `Drive Folder ID`). No clinic secrets or sheet IDs.
 - `lib/models/`:
-  - `patient.dart`: Domain model (`id`, `name`, `driveFolderId`, `folderStatus: available | missing | creating | conflict`, `isUploadable`, `Patient.merge`, `updatedAt`).
+  - `patient.dart`: Canonical domain model (`id`, `name`, `phoneNumber`, `phoneNumberNormalized`, `driveFolderId`, `folderStatus: available | missing | creating | conflict`, `isUploadable`, `hasValidName`, `displayName`, `Patient.merge`, `updatedAt`).
   - `capture_session.dart`: Unassigned/assigned photo capture session (`id`, `patientId`, `createdAt`, `status`, `photoCount`).
   - `upload_item.dart`: Persistent queue item (`id`, `sessionId`, `patientId`, `driveFolderId`, `localPath`, `fileName`, `status`, `retryCount`, `lastError`, `driveFileId`, `createdAt`, `capturedAt`, `sequenceNumber`).
   - `clinic_config.dart`: In-app clinic settings (`spreadsheetId`, `spreadsheetUrl`, `sheetTabName`, `parentDriveFolderId`, `hasCompletedSetup`, `lastPatientSync`, `lastSyncedRow`, `lastFullSync`).
 - `lib/services/`:
   - `google_auth.dart`: Google Sign-In 7.x wrapper & authenticated HTTP client (`extension_google_sign_in_as_googleapis_auth`).
   - `config_service.dart`: SharedPreferences persistence for clinic configuration, `parentDriveFolderId`, `lastSyncedRow`, and `lastFullSync`.
-  - `sheets.dart`: Google Sheets API v4 metadata discovery (tabs), dynamic header row & column discovery (`discoverHeaderIndices`), header normalization, Drive folder URL parsing (`extractDriveFolderId`), Visits deduplication (`resolvePatientsFromVisits`), incremental sync (`fetchIncrementalPatients`), full reconciliation (`validateAndFetchPatients`), and blank row folder URL writeback (`writePatientFolderUrl`).
+  - `sheets.dart`: Google Sheets API v4 metadata discovery (tabs), dynamic header row & column discovery (`discoverHeaderIndices` with phone alias discovery), header normalization, Drive folder URL parsing (`extractDriveFolderId`), Visits deduplication (`resolvePatientsFromVisits`), incremental sync (`fetchIncrementalPatients`), full reconciliation (`validateAndFetchPatients`), and blank row folder URL writeback (`writePatientFolderUrl`).
   - `drive.dart`: Google Drive API v3 photo uploader, folder search (`findFoldersByName`), folder creator (`createFolder`), and patient photo listing (`listPatientPhotos`).
   - `patient_folder_service.dart`: Orchestrator for idempotent 9-step `getOrCreatePatientFolder(patient)`.
-  - `database.dart`: Local SQLite database (v4 schema) with indexed `patients`, `capture_sessions`, and `uploads` tables. Crash recovery resets `uploading` to `waiting` (leaving `unassigned` untouched).
+  - `database.dart`: Local SQLite database (v6 schema with phone search indexes) supporting multi-mode local search (`SearchFilterMode: all, name, phone, patientId`) across indexed `patients`, `capture_sessions`, and `uploads` tables. Crash recovery resets `uploading` to `waiting` (leaving `unassigned` untouched).
   - `upload_queue.dart`: Asynchronous upload loop, gentle bounded retries, connectivity change listener, unassigned capture sessions, session assignment with deterministic photo renaming, and instant camera return.
 - `lib/screens/`:
   - `welcome_screen.dart`: Welcome and Google account sign-in.
@@ -37,9 +37,14 @@ Version 3 (V3) — Flutter Android single-doctor clinical photo capture app with
 
 ## Data & Control Flow
 1. **Google OAuth**: Doctor authorizes once. Credentials securely managed by Google Identity Services on Android with scopes for Google Sheets and Google Drive.
-2. **Visits Sheet as Source of Truth**:
-   - Single patient data source is the clinic's `Visits` table.
+2. **Visits Sheet as Source of Truth & Relational Name/Phone Resolution**:
+   - Primary operational visit log source is the clinic's `Visits` table.
    - Multiple rows with the same `Patient ID` are deduplicated into one local `Patient` record in SQLite.
+   - Clinical photo Drive folder URLs are stored and written back strictly to the `Photos (Drive)` column in `Visits`.
+   - Name & phone resolution follows the workbook's relational model:
+     - `Visits` (Patient ID, Photos (Drive)) -> `Patients` (Patient ID -> Appointment ID, direct Name, direct Phone) -> `Appointments` (Appointment ID -> Patient Name, Phone Number).
+     - Directly populated clinical data is preserved and never overwritten by subsequent blank visit rows.
+     - Phone numbers are cleaned, stored in canonical display format, and indexed in normalized digit form (`phoneNumberNormalized`) for instant local SQLite search across All, Name, Phone, and Patient ID.
    - Drive folder URLs are extracted via `extractDriveFolderId()`.
    - Repeated identical folders -> `FolderStatus.available` (`isUploadable = true`).
    - Blank rows + 1 valid folder -> `FolderStatus.available` (`isUploadable = true`).
@@ -51,7 +56,7 @@ Version 3 (V3) — Flutter Android single-doctor clinical photo capture app with
    - The resolved folder ID is persisted in SQLite, and the full URL is written back to blank `Visits` rows for that `Patient ID` in Google Sheets.
 4. **Incremental Sync & Full Reconciliation**:
    - App startup loads cached SQLite patients immediately (<50ms).
-   - Background sync reads only newly appended rows (`Visits!A{lastSyncedRow + 1}:ZZ`), merging updates via `Patient.merge`.
+   - Background sync reads newly appended rows (`Visits!A{lastSyncedRow + 1}:ZZ`), resolves directory and appointment companion records, merging updates via `Patient.merge`.
    - Settings offers `Sync Now (Full Reconciliation)` to re-read all rows from row 1.
 5. **Workflow A (Existing Patient Capture)**:
    - Doctor searches and selects patient -> `CameraScreen` opens -> Shutter press saves image to `photo_queue/patients/<Patient ID>/<Patient ID>_<timestamp>_<sequence>.jpg` -> SQLite inserts record (`waiting`) -> Background loop uploads to patient's Drive folder.

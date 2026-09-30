@@ -82,3 +82,7 @@ coverage/
 # ===== Misc caches =====
 .cache/
 .eslintcache
+
+# ===== Scratch & local inspection scripts =====
+scratch/
+check_db.py
