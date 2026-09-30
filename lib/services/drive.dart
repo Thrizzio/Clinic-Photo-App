@@ -150,4 +150,22 @@ class DriveService {
       return false;
     }
   }
+
+  /// Lists all Google Spreadsheets accessible by the user's Google account.
+  Future<List<drive.File>> listSpreadsheets({
+    required AuthClient client,
+  }) async {
+    final driveApi = drive.DriveApi(client);
+    try {
+      final response = await driveApi.files.list(
+        q: "mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false",
+        $fields: 'files(id, name, webViewLink)',
+        pageSize: 50,
+      );
+      return response.files ?? [];
+    } catch (e) {
+      debugPrint('listSpreadsheets failed: $e');
+      return [];
+    }
+  }
 }

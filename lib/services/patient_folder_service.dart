@@ -103,7 +103,10 @@ class PatientFolderService {
       );
     }
 
-    final expectedFolderName = '${patient.id} - ${patient.name}';
+    final folderSuffix = patient.hasValidName
+        ? patient.name.trim()
+        : (patient.name.trim().isNotEmpty ? patient.name.trim() : patient.id);
+    final expectedFolderName = '${patient.id} - $folderSuffix';
     debugPrint('Resolving patient folder for "$expectedFolderName" under parent: $parentFolderId');
 
     // 3. Search the configured parent for exact expected name
