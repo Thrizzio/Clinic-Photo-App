@@ -328,14 +328,16 @@ void main() {
       expect(fakeDb.executedStatements.any((s) => s.contains('CREATE INDEX IF NOT EXISTS idx_patients_status')), isTrue);
     });
 
-    test('2. Migration is a NO-OP when drive_folder_id is already nullable', () async {
-      // Modern table schema where drive_folder_id has notnull == 0
+    test('2. Migration is a NO-OP when table has modern schema with nullable drive_folder_id and phone columns', () async {
+      // Modern table schema where drive_folder_id has notnull == 0 and phone columns exist
       final modernTableInfo = <Map<String, Object?>>[
         {'cid': 0, 'name': 'id', 'type': 'TEXT', 'notnull': 1, 'dflt_value': null, 'pk': 1},
         {'cid': 1, 'name': 'name', 'type': 'TEXT', 'notnull': 1, 'dflt_value': null, 'pk': 0},
-        {'cid': 2, 'name': 'drive_folder_id', 'type': 'TEXT', 'notnull': 0, 'dflt_value': null, 'pk': 0},
-        {'cid': 3, 'name': 'folder_status', 'type': 'TEXT', 'notnull': 1, 'dflt_value': null, 'pk': 0},
-        {'cid': 4, 'name': 'updated_at', 'type': 'TEXT', 'notnull': 0, 'dflt_value': null, 'pk': 0},
+        {'cid': 2, 'name': 'phone_number', 'type': 'TEXT', 'notnull': 0, 'dflt_value': null, 'pk': 0},
+        {'cid': 3, 'name': 'phone_number_normalized', 'type': 'TEXT', 'notnull': 0, 'dflt_value': null, 'pk': 0},
+        {'cid': 4, 'name': 'drive_folder_id', 'type': 'TEXT', 'notnull': 0, 'dflt_value': null, 'pk': 0},
+        {'cid': 5, 'name': 'folder_status', 'type': 'TEXT', 'notnull': 1, 'dflt_value': null, 'pk': 0},
+        {'cid': 6, 'name': 'updated_at', 'type': 'TEXT', 'notnull': 0, 'dflt_value': null, 'pk': 0},
       ];
 
       final fakeDb = FakeMigrationDatabase(modernTableInfo);
@@ -344,6 +346,26 @@ void main() {
 
       // Only PRAGMA was queried, no transaction or table rewrite occurred
       expect(fakeDb.executedStatements.any((s) => s.contains('ALTER TABLE patients RENAME')), isFalse);
+    });
+
+    test('3. Migration triggers when patients table is missing phone_number columns (v5 -> v6)', () async {
+      // V5 table info (missing phone_number and phone_number_normalized)
+      final v5TableInfo = <Map<String, Object?>>[
+        {'cid': 0, 'name': 'id', 'type': 'TEXT', 'notnull': 1, 'dflt_value': null, 'pk': 1},
+        {'cid': 1, 'name': 'name', 'type': 'TEXT', 'notnull': 1, 'dflt_value': null, 'pk': 0},
+        {'cid': 2, 'name': 'drive_folder_id', 'type': 'TEXT', 'notnull': 0, 'dflt_value': null, 'pk': 0},
+        {'cid': 3, 'name': 'folder_status', 'type': 'TEXT', 'notnull': 1, 'dflt_value': null, 'pk': 0},
+        {'cid': 4, 'name': 'updated_at', 'type': 'TEXT', 'notnull': 0, 'dflt_value': null, 'pk': 0},
+      ];
+
+      final fakeDb = FakeMigrationDatabase(v5TableInfo);
+
+      await SqliteAppDatabase.ensurePatientsTableSchemaForTesting(fakeDb);
+
+      expect(fakeDb.executedStatements.any((s) => s.contains('ALTER TABLE patients RENAME TO _patients_old')), isTrue);
+      expect(fakeDb.executedStatements.any((s) => s.contains('phone_number TEXT')), isTrue);
+      expect(fakeDb.executedStatements.any((s) => s.contains('phone_number_normalized TEXT')), isTrue);
+      expect(fakeDb.executedStatements.any((s) => s.contains('CREATE INDEX IF NOT EXISTS idx_patients_search')), isTrue);
     });
   });
 }

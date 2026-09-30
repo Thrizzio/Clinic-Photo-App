@@ -5,6 +5,20 @@ import '../models/capture_session.dart';
 import '../models/patient.dart';
 import '../models/upload_item.dart';
 
+enum SearchFilterMode {
+  all,
+  name,
+  phone,
+  patientId;
+
+  String get label => switch (this) {
+        SearchFilterMode.all => 'All',
+        SearchFilterMode.name => 'Name',
+        SearchFilterMode.phone => 'Phone',
+        SearchFilterMode.patientId => 'Patient ID',
+      };
+}
+
 /// Abstract contract for clinic data storage.
 abstract class AppDatabase {
   // --- Patients Cache Operations ---
@@ -21,8 +35,11 @@ abstract class AppDatabase {
   /// Retrieves all cached patients sorted by ID.
   Future<List<Patient>> getPatients();
 
-  /// Case-insensitive search by Patient ID or Name.
-  Future<List<Patient>> searchPatients(String query);
+  /// Search patients with optional filter mode (All, Name, Phone, Patient ID).
+  Future<List<Patient>> searchPatients(
+    String query, {
+    SearchFilterMode mode = SearchFilterMode.all,
+  });
 
   // --- Capture Sessions Operations ---
 
@@ -121,7 +138,7 @@ abstract class AppDatabase {
 /// SQLite-backed production database implementation for Android.
 class SqliteAppDatabase implements AppDatabase {
   static const String _dbName = 'clinic_photos.db';
-  static const int _dbVersion = 5;
+  static const int _dbVersion = 6;
 
   final Database db;
 
@@ -143,6 +160,8 @@ class SqliteAppDatabase implements AppDatabase {
             CREATE TABLE patients (
               id TEXT PRIMARY KEY,
               name TEXT NOT NULL,
+              phone_number TEXT,
+              phone_number_normalized TEXT,
               drive_folder_id TEXT,
               folder_status TEXT NOT NULL,
               updated_at TEXT
@@ -151,6 +170,9 @@ class SqliteAppDatabase implements AppDatabase {
 
           await db.execute(
             'CREATE INDEX IF NOT EXISTS idx_patients_status ON patients(folder_status)',
+          );
+          await db.execute(
+            'CREATE INDEX IF NOT EXISTS idx_patients_search ON patients(id, name, phone_number_normalized)',
           );
 
           await db.execute('''
@@ -228,6 +250,10 @@ class SqliteAppDatabase implements AppDatabase {
           if (oldVersion < 5) {
             await _ensurePatientsTableSchema(db);
           }
+
+          if (oldVersion < 6) {
+            await _ensurePatientsTableSchema(db);
+          }
         },
         onOpen: (db) async {
           // Ensure schema compatibility on existing databases (nullable patient_id / drive_folder_id)
@@ -250,8 +276,8 @@ class SqliteAppDatabase implements AppDatabase {
     return SqliteAppDatabase(database);
   }
 
-  /// Migrates patients table if drive_folder_id has a NOT NULL constraint
-  /// or if folder_status or updated_at are missing.
+  /// Migrates patients table if drive_folder_id has a NOT NULL constraint,
+  /// or if folder_status, updated_at, phone_number, or phone_number_normalized are missing.
   static Future<void> _ensurePatientsTableSchema(Database db) async {
     final tableInfo = await db.rawQuery("PRAGMA table_info(patients)");
     if (tableInfo.isEmpty) return;
@@ -262,9 +288,15 @@ class SqliteAppDatabase implements AppDatabase {
     );
     final hasFolderStatus = tableInfo.any((c) => c['name'] == 'folder_status');
     final hasUpdatedAt = tableInfo.any((c) => c['name'] == 'updated_at');
+    final hasPhone = tableInfo.any((c) => c['name'] == 'phone_number');
+    final hasNormPhone = tableInfo.any((c) => c['name'] == 'phone_number_normalized');
 
     final isFolderIdNotNull = folderIdCol['notnull'] == 1;
-    final needsMigration = isFolderIdNotNull || !hasFolderStatus || !hasUpdatedAt;
+    final needsMigration = isFolderIdNotNull ||
+        !hasFolderStatus ||
+        !hasUpdatedAt ||
+        !hasPhone ||
+        !hasNormPhone;
 
     if (needsMigration) {
       await db.transaction((txn) async {
@@ -273,6 +305,8 @@ class SqliteAppDatabase implements AppDatabase {
           CREATE TABLE patients (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
+            phone_number TEXT,
+            phone_number_normalized TEXT,
             drive_folder_id TEXT,
             folder_status TEXT NOT NULL,
             updated_at TEXT
@@ -282,19 +316,26 @@ class SqliteAppDatabase implements AppDatabase {
         final oldColumns = await txn.rawQuery("PRAGMA table_info(_patients_old)");
         final oldHasFolderStatus = oldColumns.any((c) => c['name'] == 'folder_status');
         final oldHasUpdatedAt = oldColumns.any((c) => c['name'] == 'updated_at');
+        final oldHasPhone = oldColumns.any((c) => c['name'] == 'phone_number');
+        final oldHasNormPhone = oldColumns.any((c) => c['name'] == 'phone_number_normalized');
 
         final selectStatus = oldHasFolderStatus ? "folder_status" : "'available'";
         final selectUpdatedAt = oldHasUpdatedAt ? "updated_at" : "NULL";
+        final selectPhone = oldHasPhone ? "phone_number" : "NULL";
+        final selectNormPhone = oldHasNormPhone ? "phone_number_normalized" : "NULL";
 
         await txn.execute('''
-          INSERT INTO patients (id, name, drive_folder_id, folder_status, updated_at)
-          SELECT id, name, drive_folder_id, $selectStatus, $selectUpdatedAt
+          INSERT INTO patients (id, name, phone_number, phone_number_normalized, drive_folder_id, folder_status, updated_at)
+          SELECT id, name, $selectPhone, $selectNormPhone, drive_folder_id, $selectStatus, $selectUpdatedAt
           FROM _patients_old
         ''');
 
         await txn.execute('DROP TABLE _patients_old');
         await txn.execute(
           'CREATE INDEX IF NOT EXISTS idx_patients_status ON patients(folder_status)',
+        );
+        await txn.execute(
+          'CREATE INDEX IF NOT EXISTS idx_patients_search ON patients(id, name, phone_number_normalized)',
         );
       });
     }
@@ -432,19 +473,54 @@ class SqliteAppDatabase implements AppDatabase {
   }
 
   @override
-  Future<List<Patient>> searchPatients(String query) async {
+  Future<List<Patient>> searchPatients(
+    String query, {
+    SearchFilterMode mode = SearchFilterMode.all,
+  }) async {
     final trimmed = query.trim();
     if (trimmed.isEmpty) {
       return getPatients();
     }
 
+    final lower = trimmed.toLowerCase();
+    final normPhone = Patient.normalizePhone(trimmed);
+
+    String whereClause;
+    List<Object?> whereArgs;
+
+    switch (mode) {
+      case SearchFilterMode.name:
+        whereClause = 'LOWER(name) LIKE ?';
+        whereArgs = ['%$lower%'];
+        break;
+      case SearchFilterMode.patientId:
+        whereClause = 'LOWER(id) LIKE ?';
+        whereArgs = ['%$lower%'];
+        break;
+      case SearchFilterMode.phone:
+        if (normPhone != null && normPhone.isNotEmpty) {
+          whereClause = '(phone_number_normalized IS NOT NULL AND phone_number_normalized LIKE ?) OR (phone_number IS NOT NULL AND LOWER(phone_number) LIKE ?)';
+          whereArgs = ['%$normPhone%', '%$lower%'];
+        } else {
+          whereClause = 'phone_number IS NOT NULL AND LOWER(phone_number) LIKE ?';
+          whereArgs = ['%$lower%'];
+        }
+        break;
+      case SearchFilterMode.all:
+        if (normPhone != null && normPhone.isNotEmpty) {
+          whereClause = 'LOWER(id) LIKE ? OR LOWER(name) LIKE ? OR (phone_number_normalized IS NOT NULL AND phone_number_normalized LIKE ?) OR (phone_number IS NOT NULL AND LOWER(phone_number) LIKE ?)';
+          whereArgs = ['%$lower%', '%$lower%', '%$normPhone%', '%$lower%'];
+        } else {
+          whereClause = 'LOWER(id) LIKE ? OR LOWER(name) LIKE ? OR (phone_number IS NOT NULL AND LOWER(phone_number) LIKE ?)';
+          whereArgs = ['%$lower%', '%$lower%', '%$lower%'];
+        }
+        break;
+    }
+
     final rows = await db.query(
       'patients',
-      where: 'LOWER(id) LIKE ? OR LOWER(name) LIKE ?',
-      whereArgs: [
-        '%${trimmed.toLowerCase()}%',
-        '%${trimmed.toLowerCase()}%',
-      ],
+      where: whereClause,
+      whereArgs: whereArgs,
       orderBy: 'id ASC',
     );
     return rows.map(Patient.fromMap).toList();
@@ -742,16 +818,31 @@ class InMemoryAppDatabase implements AppDatabase {
   }
 
   @override
-  Future<List<Patient>> searchPatients(String query) async {
+  Future<List<Patient>> searchPatients(
+    String query, {
+    SearchFilterMode mode = SearchFilterMode.all,
+  }) async {
     final trimmed = query.trim();
     if (trimmed.isEmpty) {
       return getPatients();
     }
     final lower = trimmed.toLowerCase();
+    final normPhone = Patient.normalizePhone(trimmed);
+
     final matches = _patients.values.where((p) {
-      return p.id.toLowerCase().contains(lower) ||
-          p.name.toLowerCase().contains(lower);
+      final matchesId = p.id.toLowerCase().contains(lower);
+      final matchesName = p.name.toLowerCase().contains(lower);
+      final matchesPhone = (p.phoneNumber != null && p.phoneNumber!.toLowerCase().contains(lower)) ||
+          (normPhone != null && p.phoneNumberNormalized != null && p.phoneNumberNormalized!.contains(normPhone));
+
+      return switch (mode) {
+        SearchFilterMode.all => matchesId || matchesName || matchesPhone,
+        SearchFilterMode.name => matchesName,
+        SearchFilterMode.phone => matchesPhone,
+        SearchFilterMode.patientId => matchesId,
+      };
     }).toList();
+
     matches.sort((a, b) => a.id.compareTo(b.id));
     return matches;
   }

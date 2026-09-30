@@ -22,7 +22,7 @@ class PatientTile extends StatelessWidget {
     return InkWell(
       onTap: onTap,
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
         decoration: BoxDecoration(
           border: Border(
             bottom: BorderSide(
@@ -32,9 +32,13 @@ class PatientTile extends StatelessWidget {
           ),
         ),
         child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
           children: [
+            // 1. Patient ID badge
             Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+              constraints: const BoxConstraints(minWidth: 64),
+              alignment: Alignment.center,
               decoration: BoxDecoration(
                 color: theme.colorScheme.primaryContainer,
                 borderRadius: BorderRadius.circular(6),
@@ -43,86 +47,128 @@ class PatientTile extends StatelessWidget {
                 patient.id,
                 style: TextStyle(
                   fontWeight: FontWeight.bold,
-                  fontSize: 14,
+                  fontSize: 13,
                   color: theme.colorScheme.onPrimaryContainer,
                   letterSpacing: 0.5,
                 ),
               ),
             ),
-            const SizedBox(width: 14),
+            const SizedBox(width: 12),
+
+            // 2. Constrained content area (Patient Name & Folder Status)
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Text(
-                    patient.name,
-                    style: const TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w500,
+                    patient.displayName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                      fontStyle: patient.hasValidName ? FontStyle.normal : FontStyle.italic,
+                      color: patient.hasValidName
+                          ? theme.colorScheme.onSurface
+                          : theme.colorScheme.onSurfaceVariant,
                     ),
                   ),
-                  if (patient.folderStatus == FolderStatus.missing)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 2),
-                      child: Row(
-                        children: [
-                          Icon(Icons.auto_awesome, size: 12, color: theme.colorScheme.primary),
-                          const SizedBox(width: 4),
-                          Text(
+                  if (patient.phoneNumber != null && patient.phoneNumber!.isNotEmpty) ...[
+                    const SizedBox(height: 1),
+                    Text(
+                      patient.phoneNumber!,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                  if (patient.folderStatus == FolderStatus.missing) ...[
+                    const SizedBox(height: 2),
+                    Row(
+                      children: [
+                        Icon(Icons.auto_awesome, size: 12, color: theme.colorScheme.primary),
+                        const SizedBox(width: 4),
+                        Expanded(
+                          child: Text(
                             'Folder auto-creates on photo capture',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
                             style: TextStyle(
-                              fontSize: 12,
+                              fontSize: 11,
                               color: theme.colorScheme.primary,
                               fontWeight: FontWeight.w500,
                             ),
                           ),
-                        ],
-                      ),
-                    )
-                  else if (patient.folderStatus == FolderStatus.conflict)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 2),
-                      child: Row(
-                        children: [
-                          Icon(Icons.warning_amber_rounded, size: 13, color: Colors.red.shade700),
-                          const SizedBox(width: 4),
-                          Text(
+                        ),
+                      ],
+                    ),
+                  ] else if (patient.folderStatus == FolderStatus.conflict) ...[
+                    const SizedBox(height: 2),
+                    Row(
+                      children: [
+                        Icon(Icons.warning_amber_rounded, size: 13, color: Colors.red.shade700),
+                        const SizedBox(width: 4),
+                        Expanded(
+                          child: Text(
                             'Conflicting Drive folders in Visits',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
                             style: TextStyle(
-                              fontSize: 12,
+                              fontSize: 11,
                               color: Colors.red.shade800,
                               fontWeight: FontWeight.w600,
                             ),
                           ),
-                        ],
-                      ),
+                        ),
+                      ],
                     ),
+                  ],
                 ],
               ),
             ),
-            if (onViewPhotos != null)
-              IconButton(
-                icon: const Icon(Icons.photo_library_outlined, size: 20),
-                tooltip: 'View Photos',
-                onPressed: onViewPhotos,
-              ),
-            if (onTakePhotos != null)
-              IconButton(
-                icon: const Icon(Icons.camera_alt_outlined, size: 20),
-                tooltip: 'Take Photos',
-                onPressed: onTakePhotos,
-              )
-            else
-              Icon(
-                patient.isUploadable ? Icons.chevron_right : Icons.info_outline,
-                color: patient.isUploadable
-                    ? theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.5)
-                    : (patient.folderStatus == FolderStatus.conflict
-                        ? Colors.red.shade400
-                        : Colors.amber.shade700),
-                size: 20,
-              ),
+            const SizedBox(width: 8),
+
+            // 3. Fixed-width action buttons area
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (onViewPhotos != null)
+                  IconButton(
+                    icon: const Icon(Icons.photo_library_outlined, size: 20),
+                    tooltip: 'View Photos',
+                    visualDensity: VisualDensity.compact,
+                    constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                    padding: const EdgeInsets.all(6),
+                    onPressed: onViewPhotos,
+                  ),
+                if (onTakePhotos != null)
+                  IconButton(
+                    icon: const Icon(Icons.camera_alt_outlined, size: 20),
+                    tooltip: 'Take Photos',
+                    visualDensity: VisualDensity.compact,
+                    constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                    padding: const EdgeInsets.all(6),
+                    onPressed: onTakePhotos,
+                  )
+                else
+                  Padding(
+                    padding: const EdgeInsets.all(6.0),
+                    child: Icon(
+                      patient.isUploadable ? Icons.chevron_right : Icons.info_outline,
+                      color: patient.isUploadable
+                          ? theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.5)
+                          : (patient.folderStatus == FolderStatus.conflict
+                              ? Colors.red.shade400
+                              : Colors.amber.shade700),
+                      size: 20,
+                    ),
+                  ),
+              ],
+            ),
           ],
         ),
       ),

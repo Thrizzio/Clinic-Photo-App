@@ -39,6 +39,7 @@ class PatientsScreen extends StatefulWidget {
 
 class _PatientsScreenState extends State<PatientsScreen> {
   final _searchController = TextEditingController();
+  SearchFilterMode _selectedSearchMode = SearchFilterMode.all;
   List<Patient> _patients = [];
   int _unassignedSessionsCount = 0;
   bool _isLoadingCache = true;
@@ -57,7 +58,7 @@ class _PatientsScreenState extends State<PatientsScreen> {
   void initState() {
     super.initState();
     _loadCachedPatients();
-    _syncSheetInBackground();
+    _syncSheetInBackground(forceFullSync: true);
   }
 
   @override
@@ -80,7 +81,10 @@ class _PatientsScreenState extends State<PatientsScreen> {
   }
 
   Future<void> _refreshAll() async {
-    final freshPatients = await widget.database.searchPatients(_searchController.text);
+    final freshPatients = await widget.database.searchPatients(
+      _searchController.text,
+      mode: _selectedSearchMode,
+    );
     final unassignedCount = await widget.database.getUnassignedSessionsCount();
     if (mounted) {
       setState(() {
@@ -91,8 +95,9 @@ class _PatientsScreenState extends State<PatientsScreen> {
   }
 
   /// Background sync with Google Sheet.
-  /// Uses incremental sync if lastSyncedRow > 1, or falls back to full sync.
-  Future<void> _syncSheetInBackground() async {
+  /// If [forceFullSync] is true, or if no full sync has occurred, or if incremental sync fails:
+  /// performs a complete reconciliation using validateAndFetchPatients + replacePatients.
+  Future<void> _syncSheetInBackground({bool forceFullSync = false}) async {
     final config = widget.configService.loadConfig();
     if (!config.hasCompletedSetup || config.spreadsheetId.isEmpty) return;
 
@@ -110,7 +115,7 @@ class _PatientsScreenState extends State<PatientsScreen> {
 
       final now = DateTime.now();
 
-      if (config.lastSyncedRow > 1) {
+      if (!forceFullSync && config.lastSyncedRow > 1) {
         // Incremental sync
         final incResult = await widget.sheetsService.fetchIncrementalPatients(
           client: client,
@@ -142,18 +147,28 @@ class _PatientsScreenState extends State<PatientsScreen> {
           );
         }
       } else {
-        // Full initial / fallback sync
+        // Full initial / manual refresh sync
         final fullResult = await widget.sheetsService.validateAndFetchPatients(
           client: client,
           spreadsheetId: config.spreadsheetId,
           sheetName: config.sheetTabName,
         );
+        debugPrint('FULL RECONCILIATION RESULT PATIENTS: ${fullResult.patients.length}');
+        for (final p in fullResult.patients.take(5)) {
+          debugPrint('FULL RESULT PATIENT: id=${p.id}, name="${p.name}", displayName="${p.displayName}"');
+        }
         await widget.database.replacePatients(fullResult.patients);
         await widget.configService.updateLastSync(
           now,
           lastSyncedRow: fullResult.totalRows,
           isFullSync: true,
         );
+      }
+
+      final dbPatients = await widget.database.getPatients();
+      debugPrint('DIRECT DB QUERY AFTER SYNC (total ${dbPatients.length}):');
+      for (final p in dbPatients.take(5)) {
+        debugPrint('DB PATIENT: id=${p.id}, name="${p.name}", displayName="${p.displayName}"');
       }
 
       await _refreshAll();
@@ -178,7 +193,10 @@ class _PatientsScreenState extends State<PatientsScreen> {
   }
 
   Future<void> _handleSearch(String query) async {
-    final filtered = await widget.database.searchPatients(query);
+    final filtered = await widget.database.searchPatients(
+      query,
+      mode: _selectedSearchMode,
+    );
     if (mounted) {
       setState(() {
         _patients = filtered;
@@ -321,10 +339,20 @@ class _PatientsScreenState extends State<PatientsScreen> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          patient.name,
-                          style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                          patient.displayName,
+                          style: TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                            fontStyle: patient.hasValidName ? FontStyle.normal : FontStyle.italic,
+                            color: patient.hasValidName ? null : Theme.of(ctx).colorScheme.onSurfaceVariant,
+                          ),
                         ),
-                        Text('ID: ${patient.id}'),
+                        Text(
+                          'ID: ${patient.id}${patient.phoneNumber != null && patient.phoneNumber!.isNotEmpty ? ' · ${patient.phoneNumber}' : ''}',
+                          style: TextStyle(
+                            color: Theme.of(ctx).colorScheme.onSurfaceVariant,
+                          ),
+                        ),
                       ],
                     ),
                   ),
@@ -450,12 +478,17 @@ class _PatientsScreenState extends State<PatientsScreen> {
           children: [
             // Search Input
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+              padding: const EdgeInsets.fromLTRB(16.0, 8.0, 16.0, 4.0),
               child: TextField(
                 controller: _searchController,
                 onChanged: _handleSearch,
                 decoration: InputDecoration(
-                  hintText: 'Search patient ID or name...',
+                  hintText: switch (_selectedSearchMode) {
+                    SearchFilterMode.all => 'Search patient ID, name, or phone...',
+                    SearchFilterMode.name => 'Search by patient name...',
+                    SearchFilterMode.phone => 'Search by phone number...',
+                    SearchFilterMode.patientId => 'Search by patient ID...',
+                  },
                   prefixIcon: const Icon(Icons.search),
                   suffixIcon: _searchController.text.isNotEmpty
                       ? IconButton(
@@ -473,6 +506,36 @@ class _PatientsScreenState extends State<PatientsScreen> {
                     borderRadius: BorderRadius.circular(12),
                     borderSide: BorderSide.none,
                   ),
+                ),
+              ),
+            ),
+
+            // Search Filter Mode Selector
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16.0, 0.0, 16.0, 6.0),
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: SearchFilterMode.values.map((mode) {
+                    final isSelected = _selectedSearchMode == mode;
+                    return Padding(
+                      padding: const EdgeInsets.only(right: 8.0),
+                      child: ChoiceChip(
+                        label: Text(mode.label, style: const TextStyle(fontSize: 12)),
+                        selected: isSelected,
+                        visualDensity: VisualDensity.compact,
+                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        onSelected: (selected) {
+                          if (selected) {
+                            setState(() {
+                              _selectedSearchMode = mode;
+                            });
+                            _handleSearch(_searchController.text);
+                          }
+                        },
+                      ),
+                    );
+                  }).toList(),
                 ),
               ),
             ),
@@ -510,7 +573,7 @@ class _PatientsScreenState extends State<PatientsScreen> {
                       ),
                     ),
                     InkWell(
-                      onTap: _syncSheetInBackground,
+                      onTap: () => _syncSheetInBackground(forceFullSync: true),
                       child: const Padding(
                         padding: EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                         child: Text(
@@ -563,7 +626,7 @@ class _PatientsScreenState extends State<PatientsScreen> {
                             padding: const EdgeInsets.all(32.0),
                             child: Text(
                               _searchController.text.isNotEmpty
-                                   ? 'No patients match "${_searchController.text}"'
+                                  ? 'No patients match "${_searchController.text}"'
                                   : 'No patients found in sheet.\nTap Refresh to sync.',
                               textAlign: TextAlign.center,
                               style: TextStyle(color: theme.colorScheme.onSurfaceVariant),
@@ -571,7 +634,7 @@ class _PatientsScreenState extends State<PatientsScreen> {
                           ),
                         )
                       : RefreshIndicator(
-                          onRefresh: _syncSheetInBackground,
+                          onRefresh: () => _syncSheetInBackground(forceFullSync: true),
                           child: ListView.builder(
                             itemCount: _patients.length,
                             itemBuilder: (context, index) {
