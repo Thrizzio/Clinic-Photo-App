@@ -81,6 +81,19 @@ class ClinicPhotosApp extends StatelessWidget {
           scrolledUnderElevation: 1,
         ),
       ),
+      darkTheme: ThemeData(
+        useMaterial3: true,
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFF006688),
+          brightness: Brightness.dark,
+        ),
+        appBarTheme: const AppBarTheme(
+          centerTitle: false,
+          elevation: 0,
+          scrolledUnderElevation: 1,
+        ),
+      ),
+      themeMode: ThemeMode.system,
       home: hasCompletedSetup
           ? PatientsScreen(
               authService: authService,

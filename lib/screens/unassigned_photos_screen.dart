@@ -90,7 +90,7 @@ class _UnassignedPhotosScreenState extends State<UnassignedPhotosScreen> {
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
                       Icon(
-                        Icons.check_circle_outline,
+                        Icons.inbox_outlined,
                         size: 56,
                         color: theme.colorScheme.primary,
                       ),

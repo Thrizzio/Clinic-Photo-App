@@ -37,7 +37,7 @@ class UnassignedSessionTile extends StatelessWidget {
             Row(
               children: [
                 Icon(
-                  Icons.photo_library_outlined,
+                  Icons.inbox_outlined,
                   size: 20,
                   color: theme.colorScheme.primary,
                 ),

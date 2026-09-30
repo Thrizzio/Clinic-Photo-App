@@ -1,16 +1,22 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sqflite/sqflite.dart';
+import 'package:clinic_photos/main.dart';
 import 'package:clinic_photos/models/capture_session.dart';
 import 'package:clinic_photos/models/clinic_config.dart';
 import 'package:clinic_photos/models/patient.dart';
 import 'package:clinic_photos/models/upload_item.dart';
 import 'package:clinic_photos/screens/patient_photos_screen.dart';
+import 'package:clinic_photos/screens/unassigned_photos_screen.dart';
 import 'package:clinic_photos/services/config_service.dart';
 import 'package:clinic_photos/services/database.dart';
 import 'package:clinic_photos/services/drive.dart';
 import 'package:clinic_photos/services/google_auth.dart';
 import 'package:clinic_photos/services/patient_folder_service.dart';
 import 'package:clinic_photos/services/sheets.dart';
+import 'package:clinic_photos/services/upload_queue.dart';
+import 'package:clinic_photos/widgets/patient_tile.dart';
+import 'package:clinic_photos/widgets/unassigned_session_tile.dart';
 import 'package:googleapis/drive/v3.dart' as drive;
 import 'package:googleapis_auth/googleapis_auth.dart';
 import 'package:http/http.dart' as http;
@@ -509,6 +515,111 @@ void main() {
       expect(gridStr.contains('03:30 PM'), isTrue);
       expect(fullStr.contains('24 Oct 2026'), isTrue);
       expect(fullStr.contains('03:30:45 PM IST'), isTrue);
+    });
+  });
+
+  group('V4 Phase 7: Dark Theme, Unassigned Icon & Progress UX Tests', () {
+    testWidgets('7.1 MaterialApp is configured with darkTheme and system themeMode', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final configService = await ConfigService.init();
+      final database = InMemoryAppDatabase();
+      final authService = GoogleAuthService();
+      final sheetsService = SheetsService();
+      final driveService = DriveService();
+      final queueService = UploadQueueService(
+        database: database,
+        authService: authService,
+        driveService: driveService,
+      );
+
+      await tester.pumpWidget(ClinicPhotosApp(
+        configService: configService,
+        database: database,
+        authService: authService,
+        sheetsService: sheetsService,
+        driveService: driveService,
+        queueService: queueService,
+        hasCompletedSetup: false,
+      ));
+
+      final materialApp = tester.widget<MaterialApp>(find.byType(MaterialApp));
+      expect(materialApp.theme?.brightness, Brightness.light);
+      expect(materialApp.darkTheme?.brightness, Brightness.dark);
+      expect(materialApp.themeMode, ThemeMode.system);
+    });
+
+    testWidgets('7.2 PatientTile for UUID patient displays NEW badge and hides raw UUID', (tester) async {
+      const patient = Patient(
+        id: 'c4e91244-1111-2222-3333-444455556666',
+        name: 'Abhijit Gaikwad',
+        phoneNumber: '9373264424',
+        legacyPatientId: null,
+        folderStatus: FolderStatus.available,
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: PatientTile(
+              patient: patient,
+              onTap: () {},
+            ),
+          ),
+        ),
+      );
+
+      expect(find.text('NEW'), findsOneWidget);
+      expect(find.text('Abhijit Gaikwad'), findsOneWidget);
+      expect(find.text('c4e91244-1111-2222-3333-444455556666'), findsNothing);
+    });
+
+    testWidgets('7.3 UnassignedSessionTile displays clinical inbox icon', (tester) async {
+      final session = CaptureSession(
+        id: 'sess-1',
+        createdAt: DateTime(2026, 10, 24, 15, 30),
+        status: 'unassigned',
+        photoCount: 4,
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: UnassignedSessionTile(
+              session: session,
+              onViewPhotos: () {},
+              onAssign: () {},
+            ),
+          ),
+        ),
+      );
+
+      expect(find.byIcon(Icons.inbox_outlined), findsOneWidget);
+      expect(find.text('4 photos'), findsOneWidget);
+    });
+
+    testWidgets('7.4 UnassignedPhotosScreen empty state displays clinical inbox icon', (tester) async {
+      final database = InMemoryAppDatabase();
+      final authService = GoogleAuthService();
+      final sheetsService = SheetsService();
+      final driveService = DriveService();
+      final queueService = UploadQueueService(
+        database: database,
+        authService: authService,
+        driveService: driveService,
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: UnassignedPhotosScreen(
+            database: database,
+            queueService: queueService,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byIcon(Icons.inbox_outlined), findsOneWidget);
+      expect(find.text('All Photos Assigned'), findsOneWidget);
     });
   });
 }

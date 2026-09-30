@@ -44,7 +44,7 @@ class PatientTile extends StatelessWidget {
                 borderRadius: BorderRadius.circular(6),
               ),
               child: Text(
-                patient.id,
+                patient.legacyPatientId ?? (patient.id.length <= 8 ? patient.id : 'NEW'),
                 style: TextStyle(
                   fontWeight: FontWeight.bold,
                   fontSize: 13,

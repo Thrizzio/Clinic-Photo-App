@@ -43,6 +43,8 @@ class _PatientsScreenState extends State<PatientsScreen> {
   SearchFilterMode _selectedSearchMode = SearchFilterMode.all;
   List<Patient> _patients = [];
   int _unassignedSessionsCount = 0;
+  int _activeUploadsCount = 0;
+  int _failedUploadsCount = 0;
   bool _isLoadingCache = true;
   bool _isSyncing = false;
   String? _syncStatusMessage;
@@ -58,14 +60,33 @@ class _PatientsScreenState extends State<PatientsScreen> {
   @override
   void initState() {
     super.initState();
+    widget.queueService.addListener(_onQueueUpdated);
     _loadCachedPatients();
+    _updateQueueStatus();
     _syncSheetInBackground(forceFullSync: true);
   }
 
   @override
   void dispose() {
+    widget.queueService.removeListener(_onQueueUpdated);
     _searchController.dispose();
     super.dispose();
+  }
+
+  void _onQueueUpdated() {
+    _updateQueueStatus();
+  }
+
+  Future<void> _updateQueueStatus() async {
+    try {
+      final status = await widget.queueService.getStatus();
+      if (mounted) {
+        setState(() {
+          _activeUploadsCount = status.activeCount;
+          _failedUploadsCount = status.failedCount;
+        });
+      }
+    } catch (_) {}
   }
 
   /// Loads cached patients and unassigned sessions count immediately from SQLite.
@@ -460,6 +481,7 @@ class _PatientsScreenState extends State<PatientsScreen> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
 
     return Scaffold(
       appBar: AppBar(
@@ -562,7 +584,7 @@ class _PatientsScreenState extends State<PatientsScreen> {
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
               color: _isOffline
-                  ? Colors.amber.shade50
+                  ? (isDark ? Colors.amber.shade900.withValues(alpha: 0.3) : Colors.amber.shade50)
                   : theme.colorScheme.surfaceContainerLow,
               child: Row(
                 children: [
@@ -578,7 +600,9 @@ class _PatientsScreenState extends State<PatientsScreen> {
                     Icon(
                       _isOffline ? Icons.cloud_off : Icons.cloud_done,
                       size: 14,
-                      color: _isOffline ? Colors.amber.shade900 : Colors.green.shade700,
+                      color: _isOffline
+                          ? (isDark ? Colors.amber.shade300 : Colors.amber.shade900)
+                          : Colors.green.shade600,
                     ),
                     const SizedBox(width: 6),
                     Expanded(
@@ -586,7 +610,9 @@ class _PatientsScreenState extends State<PatientsScreen> {
                         _syncStatusMessage ?? 'Ready',
                         style: TextStyle(
                           fontSize: 12,
-                          color: _isOffline ? Colors.amber.shade900 : Colors.black87,
+                          color: _isOffline
+                              ? (isDark ? Colors.amber.shade200 : Colors.amber.shade900)
+                              : theme.colorScheme.onSurfaceVariant,
                         ),
                       ),
                     ),
@@ -605,24 +631,86 @@ class _PatientsScreenState extends State<PatientsScreen> {
               ),
             ),
 
+            // Real-time Upload Queue Progress Pill
+            if (_activeUploadsCount > 0)
+              Container(
+                margin: const EdgeInsets.fromLTRB(16, 4, 16, 2),
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                  color: isDark ? theme.colorScheme.primaryContainer.withValues(alpha: 0.5) : theme.colorScheme.primaryContainer,
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    SizedBox(
+                      width: 12,
+                      height: 12,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: theme.colorScheme.onPrimaryContainer,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      'Uploading $_activeUploadsCount ${_activeUploadsCount == 1 ? "photo" : "photos"} to Drive…',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        color: theme.colorScheme.onPrimaryContainer,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
+            if (_failedUploadsCount > 0)
+              Container(
+                margin: const EdgeInsets.fromLTRB(16, 2, 16, 2),
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                  color: isDark ? theme.colorScheme.errorContainer.withValues(alpha: 0.5) : theme.colorScheme.errorContainer,
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.error_outline, size: 14, color: theme.colorScheme.onErrorContainer),
+                    const SizedBox(width: 6),
+                    Text(
+                      '$_failedUploadsCount ${_failedUploadsCount == 1 ? "photo" : "photos"} failed (will retry)',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: theme.colorScheme.onErrorContainer,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
             // Unassigned Photos Banner (if any exist)
             if (_unassignedSessionsCount > 0)
               Container(
                 margin: const EdgeInsets.fromLTRB(16, 6, 16, 4),
                 decoration: BoxDecoration(
-                  color: Colors.amber.shade50,
+                  color: isDark ? theme.colorScheme.tertiaryContainer.withValues(alpha: 0.4) : Colors.amber.shade50,
                   borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: Colors.amber.shade300),
+                  border: Border.all(
+                    color: isDark ? theme.colorScheme.tertiary.withValues(alpha: 0.5) : Colors.amber.shade300,
+                  ),
                 ),
                 child: ListTile(
                   dense: true,
-                  leading: Icon(Icons.inbox_outlined, color: Colors.amber.shade900),
+                  leading: Icon(
+                    Icons.inbox_outlined,
+                    color: isDark ? theme.colorScheme.onTertiaryContainer : Colors.amber.shade900,
+                  ),
                   title: Text(
                     'Unassigned Photos ($_unassignedSessionsCount ${_unassignedSessionsCount == 1 ? "session" : "sessions"})',
                     style: TextStyle(
                       fontWeight: FontWeight.bold,
                       fontSize: 13,
-                      color: Colors.amber.shade900,
+                      color: isDark ? theme.colorScheme.onTertiaryContainer : Colors.amber.shade900,
                     ),
                   ),
                   subtitle: const Text(
