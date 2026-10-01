@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../models/capture_session.dart';
@@ -32,6 +33,7 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
   bool _isLoading = true;
   bool _isSelectionMode = false;
   final Set<String> _selectedPhotoIds = {};
+  final Map<String, Uint8List> _thumbnailCache = {};
 
   @override
   void initState() {
@@ -46,6 +48,19 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
         _photos = photos;
         _isLoading = false;
       });
+    }
+  }
+
+  Future<Uint8List?> _fetchThumbnailBytes(String fileId) async {
+    if (_thumbnailCache.containsKey(fileId)) return _thumbnailCache[fileId];
+    try {
+      final client = await widget.queueService.authService.getAuthenticatedClient();
+      if (client == null) return null;
+      final bytes = await widget.queueService.driveService.getFileBytes(client: client, fileId: fileId);
+      _thumbnailCache[fileId] = bytes;
+      return bytes;
+    } catch (_) {
+      return null;
     }
   }
 
@@ -83,7 +98,7 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
         title: Text('Delete $count ${count == 1 ? 'Photo' : 'Photos'}?'),
         content: Text(
           'Are you sure you want to delete $count selected ${count == 1 ? 'photo' : 'photos'}? '
-          'This action permanently removes the files from device storage.',
+          'This action permanently removes the files from Google Drive and device storage.',
         ),
         actions: [
           TextButton(
@@ -107,33 +122,77 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
 
     final idsToDelete = _selectedPhotoIds.toList();
     final photosToDelete = _photos.where((p) => idsToDelete.contains(p.id)).toList();
+    final successfullyDeletedIds = <String>[];
 
-    // 1. Physically delete local files
     for (final photo in photosToDelete) {
-      final file = File(photo.localPath);
-      if (file.existsSync()) {
+      bool deleted = false;
+      // 1. If photo is in Drive, delete from Drive first
+      if (photo.driveFileId != null && photo.driveFileId!.isNotEmpty) {
         try {
-          file.deleteSync();
+          final client = await widget.queueService.authService.getAuthenticatedClient();
+          if (client != null) {
+            await widget.queueService.driveService.deleteFile(client: client, fileId: photo.driveFileId!);
+            deleted = true;
+          }
         } catch (e) {
-          debugPrint('Error deleting local photo file: $e');
+          debugPrint('Error deleting photo ${photo.driveFileId} from Drive: $e');
         }
+      } else {
+        deleted = true;
+      }
+
+      // 2. Physically delete local files if any
+      if (photo.localPath.isNotEmpty) {
+        final file = File(photo.localPath);
+        if (file.existsSync()) {
+          try {
+            file.deleteSync();
+          } catch (e) {
+            debugPrint('Error deleting local photo file: $e');
+          }
+        }
+      }
+
+      // 3. Delete database record only after deletion
+      if (deleted) {
+        await widget.database.deleteUpload(photo.id);
+        if (photo.driveFileId != null) {
+          _thumbnailCache.remove(photo.driveFileId!);
+        }
+        successfullyDeletedIds.add(photo.id);
       }
     }
 
-    // 2. Delete database records
-    await widget.database.deleteUploads(idsToDelete);
-
-    // 3. Reload photos
+    // 4. Reload photos
     final remaining = await widget.database.getUploadsForSession(widget.session.id);
 
     if (remaining.isEmpty) {
-      // 4. Session is now empty: remove session from database
+      // Clean up Drive session folder if empty
+      if (widget.session.driveFolderId != null && widget.session.driveFolderId!.isNotEmpty) {
+        try {
+          final client = await widget.queueService.authService.getAuthenticatedClient();
+          if (client != null) {
+            final remainingInDrive = await widget.queueService.driveService.listPatientPhotos(
+              client: client,
+              folderId: widget.session.driveFolderId!,
+            );
+            if (remainingInDrive.isEmpty) {
+              await widget.queueService.driveService.deleteFile(
+                client: client,
+                fileId: widget.session.driveFolderId!,
+              );
+            }
+          }
+        } catch (_) {}
+      }
+
+      // Remove session from database
       await widget.database.deleteSession(widget.session.id);
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('All photos deleted. Session removed.'),
+            content: const Text('All photos deleted. Session removed.'),
             backgroundColor: Colors.orange.shade800,
           ),
         );
@@ -145,14 +204,16 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
     if (mounted) {
       setState(() {
         _photos = remaining;
-        _selectedPhotoIds.clear();
-        _isSelectionMode = false;
+        _selectedPhotoIds.removeAll(successfullyDeletedIds);
+        if (_selectedPhotoIds.isEmpty) {
+          _isSelectionMode = false;
+        }
         _isLoading = false;
       });
 
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Deleted $count ${count == 1 ? 'photo' : 'photos'}.'),
+          content: Text('Deleted ${successfullyDeletedIds.length} ${successfullyDeletedIds.length == 1 ? 'photo' : 'photos'}.'),
           backgroundColor: Colors.green.shade800,
         ),
       );
@@ -175,7 +236,7 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
 
   void _showFullScreenPreview(UploadItem photo) {
     final file = File(photo.localPath);
-    if (!file.existsSync()) return;
+    final hasLocal = photo.localPath.isNotEmpty && file.existsSync();
 
     Navigator.of(context).push(
       MaterialPageRoute(
@@ -193,7 +254,27 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
             child: InteractiveViewer(
               minScale: 0.5,
               maxScale: 4.0,
-              child: Image.file(file),
+              child: hasLocal
+                  ? Image.file(file)
+                  : (photo.driveFileId != null
+                      ? FutureBuilder<Uint8List?>(
+                          future: _fetchThumbnailBytes(photo.driveFileId!),
+                          builder: (ctx, snapshot) {
+                            if (snapshot.connectionState == ConnectionState.waiting) {
+                              return const Center(child: CircularProgressIndicator(color: Colors.white));
+                            }
+                            final bytes = snapshot.data;
+                            if (bytes != null) {
+                              return Image.memory(bytes);
+                            }
+                            return const Center(
+                              child: Icon(Icons.broken_image, color: Colors.white54, size: 64),
+                            );
+                          },
+                        )
+                      : const Center(
+                          child: Icon(Icons.broken_image, color: Colors.white54, size: 64),
+                        )),
             ),
           ),
         ),
@@ -316,6 +397,7 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
                               photo: photo,
                               isSelectionMode: _isSelectionMode,
                               isSelected: isSelected,
+                              fetchImageBytes: _fetchThumbnailBytes,
                               onTap: () {
                                 if (_isSelectionMode) {
                                   _toggleSelection(photo.id);

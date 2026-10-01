@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../models/upload_item.dart';
@@ -11,6 +12,7 @@ class SelectionThumbnail extends StatelessWidget {
   final bool isSelected;
   final VoidCallback? onTap;
   final VoidCallback? onLongPress;
+  final Future<Uint8List?> Function(String fileId)? fetchImageBytes;
 
   const SelectionThumbnail({
     super.key,
@@ -19,13 +21,14 @@ class SelectionThumbnail extends StatelessWidget {
     this.isSelected = false,
     this.onTap,
     this.onLongPress,
+    this.fetchImageBytes,
   });
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final file = File(photo.localPath);
-    final fileExists = file.existsSync();
+    final fileExists = photo.localPath.isNotEmpty && file.existsSync();
 
     final timeStr = DateFormat('HH:mm:ss').format(photo.capturedAt);
 
@@ -45,7 +48,31 @@ class SelectionThumbnail extends StatelessWidget {
                     fit: BoxFit.cover,
                     errorBuilder: (context, error, stackTrace) => _buildPlaceholder(),
                   )
-                : _buildPlaceholder(),
+                : (photo.driveFileId != null && fetchImageBytes != null
+                    ? FutureBuilder<Uint8List?>(
+                        future: fetchImageBytes!(photo.driveFileId!),
+                        builder: (ctx, snapshot) {
+                          if (snapshot.connectionState == ConnectionState.waiting) {
+                            final isDark = theme.brightness == Brightness.dark;
+                            return Container(
+                              color: isDark ? Colors.grey.shade900 : Colors.grey.shade200,
+                              child: const Center(
+                                child: SizedBox(
+                                  width: 20,
+                                  height: 20,
+                                  child: CircularProgressIndicator(strokeWidth: 2),
+                                ),
+                              ),
+                            );
+                          }
+                          final bytes = snapshot.data;
+                          if (bytes != null) {
+                            return Image.memory(bytes, fit: BoxFit.cover);
+                          }
+                          return _buildPlaceholder();
+                        },
+                      )
+                    : _buildPlaceholder()),
           ),
 
           // Dark gradient overlay at bottom for timestamp readability
@@ -131,6 +158,7 @@ class SelectionThumbnail extends StatelessWidget {
       UploadStatus.failed => Colors.red,
       UploadStatus.waiting => Colors.orange,
       UploadStatus.unassigned => Colors.grey,
+      UploadStatus.uploaded => Colors.green,
     };
 
     return Container(
@@ -151,3 +179,4 @@ class SelectionThumbnail extends StatelessWidget {
     );
   }
 }
+

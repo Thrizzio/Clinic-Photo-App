@@ -5,6 +5,7 @@ import 'package:intl/intl.dart';
 import 'package:uuid/uuid.dart';
 import '../models/capture_session.dart';
 import '../models/patient.dart';
+import '../models/upload_item.dart';
 import '../services/drive.dart';
 import '../services/google_auth.dart';
 import '../services/patient_folder_service.dart';
@@ -73,11 +74,56 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
   String? _errorMessage;
   final Map<String, Uint8List> _thumbnailCache = {};
 
+  // Multi-selection state
+  bool _isSelectionMode = false;
+  final Set<String> _selectedPhotoIds = {};
+
   @override
   void initState() {
     super.initState();
     _currentPatient = widget.patient;
     _loadPhotos();
+  }
+
+  void _toggleSelection(String photoId) {
+    setState(() {
+      if (_selectedPhotoIds.contains(photoId)) {
+        _selectedPhotoIds.remove(photoId);
+        if (_selectedPhotoIds.isEmpty) {
+          _isSelectionMode = false;
+        }
+      } else {
+        _selectedPhotoIds.add(photoId);
+      }
+    });
+  }
+
+  void _enterSelectionMode([String? initialPhotoId]) {
+    setState(() {
+      _isSelectionMode = true;
+      if (initialPhotoId != null) {
+        _selectedPhotoIds.add(initialPhotoId);
+      }
+    });
+  }
+
+  void _exitSelectionMode() {
+    setState(() {
+      _isSelectionMode = false;
+      _selectedPhotoIds.clear();
+    });
+  }
+
+  void _toggleSelectAll() {
+    setState(() {
+      final allValidIds = _photos.map((p) => p.id).whereType<String>().toSet();
+      if (_selectedPhotoIds.length == allValidIds.length) {
+        _selectedPhotoIds.clear();
+        _isSelectionMode = false;
+      } else {
+        _selectedPhotoIds.addAll(allValidIds);
+      }
+    });
   }
 
   Future<void> _loadPhotos() async {
@@ -240,14 +286,24 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
     }
   }
 
-  Future<void> _handleMoveToUnassigned(drive.File photo) async {
+  /// Multi-select move to Unassigned.
+  /// Moves all selected photos into ONE new unassigned session folder on Drive.
+  /// Inserts/updates local records in the `uploads` table with status 'uploaded'.
+  /// Removes successfully moved photos from the patient gallery.
+  Future<void> _handleMoveSelectedToUnassigned([List<drive.File>? specificPhotos]) async {
+    final photosToMove = specificPhotos ??
+        _photos.where((p) => p.id != null && _selectedPhotoIds.contains(p.id!)).toList();
+
+    if (photosToMove.isEmpty) return;
+
+    final count = photosToMove.length;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Move to Unassigned?'),
+        title: Text('Move $count ${count == 1 ? 'photo' : 'photos'} to Unassigned?'),
         content: Text(
-          'Move this photo to Unassigned Sessions?\n\n'
-          'It will be detached from ${_currentPatient.displayName} and can later be assigned to any patient.',
+          'Move $count selected ${count == 1 ? 'photo' : 'photos'} to Unassigned Photos?\n\n'
+          'They will be moved into a new unassigned session folder on Google Drive and detached from ${_currentPatient.displayName}. You can later assign them to any patient.',
         ),
         actions: [
           TextButton(
@@ -257,7 +313,7 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
           FilledButton.icon(
             onPressed: () => Navigator.of(ctx).pop(true),
             icon: const Icon(Icons.inbox_outlined),
-            label: const Text('Move to Unassigned'),
+            label: Text('Move $count ${count == 1 ? 'Photo' : 'Photos'}'),
           ),
         ],
       ),
@@ -268,22 +324,25 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (_) => const Center(
+      builder: (_) => Center(
         child: Card(
           child: Padding(
-            padding: EdgeInsets.all(24.0),
+            padding: const EdgeInsets.all(24.0),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                CircularProgressIndicator(),
-                SizedBox(height: 16),
-                Text('Moving photo on Google Drive...'),
+                const CircularProgressIndicator(),
+                const SizedBox(height: 16),
+                Text('Moving $count ${count == 1 ? 'photo' : 'photos'} on Google Drive...'),
               ],
             ),
           ),
         ),
       ),
     );
+
+    final successfullyMovedIds = <String>{};
+    String? lastError;
 
     try {
       final client = await widget.authService.getAuthenticatedClient();
@@ -297,6 +356,7 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
         parentFolderId: parentFolderId,
       );
 
+      // Create ONE unassigned session folder on Drive for this batch
       final sessionTs = DateFormat('yyyyMMdd_HHmmss').format(DateTime.now());
       final sessionFolderId = await widget.driveService.getOrCreateUnassignedSessionFolder(
         client: client,
@@ -304,51 +364,139 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
         sessionFolderTimestamp: sessionTs,
       );
 
-      await widget.driveService.moveFile(
-        client: client,
-        fileId: photo.id!,
-        sourceFolderId: _currentPatient.driveFolderId!,
-        targetFolderId: sessionFolderId,
-      );
-
+      // Create ONE unassigned session in local SQLite database
       final sessionId = const Uuid().v4();
+      final now = DateTime.now();
       final session = CaptureSession(
         id: sessionId,
         patientId: null,
-        createdAt: DateTime.now(),
+        createdAt: now,
         status: 'unassigned',
-        photoCount: 1,
+        photoCount: count,
         driveFolderId: sessionFolderId,
       );
       await widget.queueService.database.insertSession(session);
 
-      if (mounted) {
-        Navigator.of(context).pop(); // dismiss loading
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Photo moved to Unassigned Sessions')),
-        );
-        _loadPhotos();
+      int seq = 1;
+      for (final photo in photosToMove) {
+        final fileId = photo.id;
+        if (fileId == null) continue;
+
+        try {
+          // 1. Move file server-side on Google Drive
+          await widget.driveService.moveFile(
+            client: client,
+            fileId: fileId,
+            sourceFolderId: _currentPatient.driveFolderId!,
+            targetFolderId: sessionFolderId,
+          );
+
+          // 2. Only after Drive succeeds, insert/update local photo record in uploads table
+          final photoTs = PatientPhotosScreen.parsePhotoTimestamp(photo);
+          final existingUpload = await widget.queueService.database.getUploadByDriveFileId(fileId) ??
+              await widget.queueService.database.getUploadByFileName(photo.name ?? '');
+
+          if (existingUpload != null) {
+            await widget.queueService.database.updateUpload(existingUpload.copyWith(
+              sessionId: sessionId,
+              patientId: null,
+              driveFolderId: sessionFolderId,
+              driveParentFolderId: sessionFolderId,
+              driveFileId: fileId,
+              status: UploadStatus.uploaded,
+            ));
+          } else {
+            await widget.queueService.database.insertUpload(UploadItem(
+              id: const Uuid().v4(),
+              sessionId: sessionId,
+              patientId: null,
+              driveFolderId: sessionFolderId,
+              driveParentFolderId: sessionFolderId,
+              driveFileId: fileId,
+              localPath: '',
+              fileName: photo.name ?? 'photo.jpg',
+              status: UploadStatus.uploaded,
+              createdAt: photoTs,
+              capturedAt: photoTs,
+              sequenceNumber: seq++,
+            ));
+          }
+
+          successfullyMovedIds.add(fileId);
+        } catch (e) {
+          lastError = e.toString();
+          debugPrint('Failed to move photo $fileId: $e');
+        }
+      }
+
+      // If no photos succeeded, clean up the empty session
+      if (successfullyMovedIds.isEmpty) {
+        await widget.queueService.database.deleteSession(sessionId);
+        try {
+          await widget.driveService.deleteFile(client: client, fileId: sessionFolderId);
+        } catch (_) {}
       }
     } catch (e) {
+      lastError = e.toString();
+    } finally {
       if (mounted) {
-        Navigator.of(context).pop(); // dismiss loading
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Failed to move photo: $e'),
-            backgroundColor: Colors.red,
-          ),
-        );
+        Navigator.of(context).pop(); // dismiss loading dialog
+
+        if (successfullyMovedIds.isNotEmpty) {
+          setState(() {
+            _photos.removeWhere((p) => successfullyMovedIds.contains(p.id));
+            _exitSelectionMode();
+          });
+
+          if (successfullyMovedIds.length == count) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  'Moved $count ${count == 1 ? 'photo' : 'photos'} to Unassigned Photos',
+                ),
+                backgroundColor: Colors.green.shade800,
+              ),
+            );
+          } else {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  'Moved ${successfullyMovedIds.length} photos. '
+                  'Failed to move ${count - successfullyMovedIds.length} photos: $lastError',
+                ),
+                backgroundColor: Colors.orange.shade900,
+              ),
+            );
+          }
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Failed to move photos: $lastError'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
       }
     }
   }
 
-  Future<void> _handleDeletePhoto(drive.File photo) async {
+  /// Multi-select delete.
+  /// Deletes selected photos from Google Drive first.
+  /// Only updates/removes local DB records after Drive confirms deletion.
+  /// Removes successfully deleted photos from the gallery; preserves failed ones.
+  Future<void> _handleDeleteSelected([List<drive.File>? specificPhotos]) async {
+    final photosToDelete = specificPhotos ??
+        _photos.where((p) => p.id != null && _selectedPhotoIds.contains(p.id!)).toList();
+
+    if (photosToDelete.isEmpty) return;
+
+    final count = photosToDelete.length;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Delete Photo?'),
-        content: const Text(
-          'Permanently delete this photo from Google Drive?\n\n'
+        title: Text('Delete $count ${count == 1 ? 'Photo' : 'Photos'}?'),
+        content: Text(
+          'Permanently delete $count selected ${count == 1 ? 'photo' : 'photos'} from Google Drive?\n\n'
           'This action cannot be undone.',
         ),
         actions: [
@@ -370,16 +518,16 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (_) => const Center(
+      builder: (_) => Center(
         child: Card(
           child: Padding(
-            padding: EdgeInsets.all(24.0),
+            padding: const EdgeInsets.all(24.0),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                CircularProgressIndicator(),
-                SizedBox(height: 16),
-                Text('Deleting photo from Google Drive...'),
+                const CircularProgressIndicator(),
+                const SizedBox(height: 16),
+                Text('Deleting $count ${count == 1 ? 'photo' : 'photos'} from Google Drive...'),
               ],
             ),
           ),
@@ -387,81 +535,80 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
       ),
     );
 
+    final successfullyDeletedIds = <String>{};
+    String? lastError;
+
     try {
       final client = await widget.authService.getAuthenticatedClient();
       if (client == null) throw StateError('Not signed in to Google account');
 
-      await widget.driveService.deleteFile(
-        client: client,
-        fileId: photo.id!,
-      );
+      for (final photo in photosToDelete) {
+        final fileId = photo.id;
+        if (fileId == null) continue;
 
-      final uploads = await widget.queueService.database.getAllUploads();
-      for (final u in uploads) {
-        if (u.driveFileId == photo.id || u.fileName == photo.name) {
-          await widget.queueService.database.deleteUpload(u.id);
+        try {
+          // 1. Delete on Google Drive first
+          await widget.driveService.deleteFile(client: client, fileId: fileId);
+
+          // 2. Only remove local database record after Drive confirmed deletion
+          final existingUpload = await widget.queueService.database.getUploadByDriveFileId(fileId) ??
+              await widget.queueService.database.getUploadByFileName(photo.name ?? '');
+          if (existingUpload != null) {
+            await widget.queueService.database.deleteUpload(existingUpload.id);
+          }
+
+          // Clear thumbnail cache
+          _thumbnailCache.remove(fileId);
+          successfullyDeletedIds.add(fileId);
+        } catch (e) {
+          lastError = e.toString();
+          debugPrint('Failed to delete photo $fileId from Drive: $e');
         }
       }
-
-      if (mounted) {
-        Navigator.of(context).pop(); // dismiss loading
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Photo deleted successfully')),
-        );
-        setState(() {
-          _photos.removeWhere((p) => p.id == photo.id);
-        });
-      }
     } catch (e) {
+      lastError = e.toString();
+    } finally {
       if (mounted) {
-        Navigator.of(context).pop(); // dismiss loading
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Failed to delete photo: $e'),
-            backgroundColor: Colors.red,
-          ),
-        );
+        Navigator.of(context).pop(); // dismiss loading dialog
+
+        if (successfullyDeletedIds.isNotEmpty) {
+          setState(() {
+            _photos.removeWhere((p) => successfullyDeletedIds.contains(p.id));
+            _exitSelectionMode();
+          });
+
+          if (successfullyDeletedIds.length == count) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  'Deleted $count ${count == 1 ? 'photo' : 'photos'} permanently',
+                ),
+                backgroundColor: Colors.green.shade800,
+              ),
+            );
+          } else {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  'Deleted ${successfullyDeletedIds.length} photos. '
+                  'Failed to delete ${count - successfullyDeletedIds.length} photos: $lastError',
+                ),
+                backgroundColor: Colors.orange.shade900,
+              ),
+            );
+          }
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Failed to delete photos: $lastError'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
       }
     }
   }
 
-  void _showPhotoOptionsSheet(drive.File photo) {
-    showModalBottomSheet(
-      context: context,
-      builder: (ctx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: const Icon(Icons.fullscreen),
-              title: const Text('View Full Screen'),
-              onTap: () {
-                Navigator.of(ctx).pop();
-                final idx = _photos.indexOf(photo);
-                if (idx != -1) _openFullScreenViewer(idx);
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.inbox_outlined),
-              title: const Text('Move to Unassigned'),
-              onTap: () {
-                Navigator.of(ctx).pop();
-                _handleMoveToUnassigned(photo);
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.delete_outline, color: Colors.red),
-              title: const Text('Delete Photo', style: TextStyle(color: Colors.red)),
-              onTap: () {
-                Navigator.of(ctx).pop();
-                _handleDeletePhoto(photo);
-              },
-            ),
-          ],
-        ),
-      ),
-    );
-  }
 
   void _openFullScreenViewer(int initialIndex) {
     Navigator.of(context).push(
@@ -473,11 +620,11 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
           fetchImageBytes: _fetchThumbnailBytes,
           onMoveToUnassigned: (photo) async {
             Navigator.of(context).pop();
-            await _handleMoveToUnassigned(photo);
+            await _handleMoveSelectedToUnassigned([photo]);
           },
           onDeletePhoto: (photo) async {
             Navigator.of(context).pop();
-            await _handleDeletePhoto(photo);
+            await _handleDeleteSelected([photo]);
           },
         ),
       ),
@@ -489,42 +636,85 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
     final theme = Theme.of(context);
 
     return Scaffold(
-      appBar: AppBar(
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(_currentPatient.displayName, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-            Text(
-              '${_currentPatient.phoneDisplay ?? ''}${_currentPatient.phoneDisplay != null ? ' • ' : ''}${_photos.length} ${_photos.length == 1 ? 'photo' : 'photos'}',
-              style: TextStyle(
-                fontSize: 12,
-                color: theme.colorScheme.onSurfaceVariant,
+      appBar: _isSelectionMode
+          ? AppBar(
+              leading: IconButton(
+                icon: const Icon(Icons.close),
+                tooltip: 'Cancel Selection',
+                onPressed: _exitSelectionMode,
               ),
+              title: Text(
+                '${_selectedPhotoIds.length} selected',
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: _toggleSelectAll,
+                  child: Text(
+                    _selectedPhotoIds.length == _photos.length ? 'Deselect All' : 'Select All',
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.inbox_outlined),
+                  tooltip: 'Move to Unassigned',
+                  onPressed: _selectedPhotoIds.isEmpty
+                      ? null
+                      : () => _handleMoveSelectedToUnassigned(),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.delete_outline, color: Colors.red),
+                  tooltip: 'Delete Selected',
+                  onPressed: _selectedPhotoIds.isEmpty
+                      ? null
+                      : () => _handleDeleteSelected(),
+                ),
+              ],
+            )
+          : AppBar(
+              title: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(_currentPatient.displayName, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                  Text(
+                    '${_currentPatient.phoneDisplay ?? ''}${_currentPatient.phoneDisplay != null ? ' • ' : ''}${_photos.length} ${_photos.length == 1 ? 'photo' : 'photos'}',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
+              actions: [
+                if (_photos.isNotEmpty)
+                  IconButton(
+                    icon: const Icon(Icons.checklist),
+                    tooltip: 'Select Photos',
+                    onPressed: () => _enterSelectionMode(),
+                  ),
+                IconButton(
+                  icon: const Icon(Icons.camera_alt_outlined),
+                  tooltip: 'Take Photos',
+                  onPressed: _handleTakePhotos,
+                ),
+                IconButton(
+                  icon: const Icon(Icons.refresh),
+                  tooltip: 'Refresh',
+                  onPressed: _loadPhotos,
+                ),
+              ],
             ),
-          ],
-        ),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.camera_alt_outlined),
-            tooltip: 'Take Photos',
-            onPressed: _handleTakePhotos,
-          ),
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            tooltip: 'Refresh',
-            onPressed: _loadPhotos,
-          ),
-        ],
-      ),
       body: RefreshIndicator(
         onRefresh: _loadPhotos,
         child: _buildBody(theme),
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _handleTakePhotos,
-        icon: const Icon(Icons.camera_alt),
-        label: const Text('Take Photos'),
-      ),
+      floatingActionButton: _isSelectionMode
+          ? null
+          : FloatingActionButton.extended(
+              onPressed: _handleTakePhotos,
+              icon: const Icon(Icons.camera_alt),
+              label: const Text('Take Photos'),
+            ),
     );
   }
 
@@ -635,38 +825,75 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
         final photo = _photos[index];
         final fileId = photo.id;
         final dateStr = PatientPhotosScreen.formatPhotoGridTimestamp(photo);
+        final isSelected = fileId != null && _selectedPhotoIds.contains(fileId);
 
         return InkWell(
-          onTap: () => _openFullScreenViewer(index),
-          onLongPress: () => _showPhotoOptionsSheet(photo),
+          onTap: () {
+            if (_isSelectionMode) {
+              if (fileId != null) _toggleSelection(fileId);
+            } else {
+              _openFullScreenViewer(index);
+            }
+          },
+          onLongPress: () {
+            if (_isSelectionMode) {
+              if (fileId != null) _toggleSelection(fileId);
+            } else {
+              if (fileId != null) {
+                _enterSelectionMode(fileId);
+              }
+            }
+          },
           borderRadius: BorderRadius.circular(8),
           child: Stack(
             fit: StackFit.expand,
             children: [
-              ClipRRect(
-                borderRadius: BorderRadius.circular(8),
-                child: fileId == null
-                    ? Container(color: Colors.grey.shade300)
-                    : FutureBuilder<Uint8List?>(
-                        future: _fetchThumbnailBytes(fileId),
-                        builder: (ctx, snapshot) {
-                          if (snapshot.connectionState == ConnectionState.waiting &&
-                              !_thumbnailCache.containsKey(fileId)) {
-                            return const _ShimmerSkeletonTile();
-                          }
-                          final bytes = snapshot.data ?? _thumbnailCache[fileId];
-                          if (bytes != null) {
-                            return Image.memory(bytes, fit: BoxFit.cover);
-                          }
-                          final isDark = Theme.of(context).brightness == Brightness.dark;
-                          return Container(
-                            color: isDark ? Colors.grey.shade900 : Colors.grey.shade300,
-                            child: const Center(
-                              child: Icon(Icons.broken_image_outlined, size: 28, color: Colors.grey),
+              Container(
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(8),
+                  border: _isSelectionMode
+                      ? Border.all(
+                          color: isSelected
+                              ? theme.colorScheme.primary
+                              : theme.colorScheme.outlineVariant.withValues(alpha: 0.5),
+                          width: isSelected ? 3.0 : 1.0,
+                        )
+                      : null,
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(6),
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      fileId == null
+                          ? Container(color: Colors.grey.shade300)
+                          : FutureBuilder<Uint8List?>(
+                              future: _fetchThumbnailBytes(fileId),
+                              builder: (ctx, snapshot) {
+                                if (snapshot.connectionState == ConnectionState.waiting &&
+                                    !_thumbnailCache.containsKey(fileId)) {
+                                  return const _ShimmerSkeletonTile();
+                                }
+                                final bytes = snapshot.data ?? _thumbnailCache[fileId];
+                                if (bytes != null) {
+                                  return Image.memory(bytes, fit: BoxFit.cover);
+                                }
+                                final isDark = theme.brightness == Brightness.dark;
+                                return Container(
+                                  color: isDark ? Colors.grey.shade900 : Colors.grey.shade300,
+                                  child: const Center(
+                                    child: Icon(Icons.broken_image_outlined, size: 28, color: Colors.grey),
+                                  ),
+                                );
+                              },
                             ),
-                          );
-                        },
-                      ),
+                      if (isSelected)
+                        Container(
+                          color: theme.colorScheme.primary.withValues(alpha: 0.25),
+                        ),
+                    ],
+                  ),
+                ),
               ),
               if (dateStr.isNotEmpty)
                 Positioned(
@@ -680,7 +907,7 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
                         begin: Alignment.bottomCenter,
                         end: Alignment.topCenter,
                         colors: [
-                          Colors.black.withValues(alpha: 0.7),
+                          Colors.black.withValues(alpha: 0.75),
                           Colors.transparent,
                         ],
                       ),
@@ -691,6 +918,27 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
                       style: const TextStyle(color: Colors.white, fontSize: 10),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ),
+              if (_isSelectionMode)
+                Positioned(
+                  top: 6,
+                  right: 6,
+                  child: Container(
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: isSelected ? theme.colorScheme.primary : Colors.black45,
+                      border: Border.all(
+                        color: Colors.white,
+                        width: 1.5,
+                      ),
+                    ),
+                    padding: const EdgeInsets.all(4),
+                    child: Icon(
+                      isSelected ? Icons.check : null,
+                      size: 14,
+                      color: Colors.white,
                     ),
                   ),
                 ),

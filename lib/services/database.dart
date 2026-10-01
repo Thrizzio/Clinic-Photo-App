@@ -108,6 +108,12 @@ abstract class AppDatabase {
   /// Gets all items currently in the queue.
   Future<List<UploadItem>> getAllUploads();
 
+  /// Retrieves an upload item by its Google Drive file ID.
+  Future<UploadItem?> getUploadByDriveFileId(String driveFileId);
+
+  /// Retrieves an upload item by its file name.
+  Future<UploadItem?> getUploadByFileName(String fileName);
+
   /// Closes the database connection.
   Future<void> close();
 
@@ -843,10 +849,23 @@ class SqliteAppDatabase implements AppDatabase {
             'drive_parent_folder_id': driveFolderId,
             'status': UploadStatus.waiting.name,
           },
-          where: 'session_id = ?',
+          where: 'session_id = ? AND (drive_file_id IS NULL OR drive_file_id = "")',
           whereArgs: [sessionId],
         );
       }
+
+      // Preserve status = 'uploaded' for items that were already moved or uploaded on Drive
+      await txn.update(
+        'uploads',
+        {
+          'patient_id': patientId,
+          'drive_folder_id': driveFolderId,
+          'drive_parent_folder_id': driveFolderId,
+          'status': UploadStatus.uploaded.name,
+        },
+        where: 'session_id = ? AND drive_file_id IS NOT NULL AND drive_file_id != ""',
+        whereArgs: [sessionId],
+      );
     });
   }
 
@@ -935,6 +954,30 @@ class SqliteAppDatabase implements AppDatabase {
   Future<List<UploadItem>> getAllUploads() async {
     final rows = await db.query('uploads', orderBy: 'created_at ASC');
     return rows.map(UploadItem.fromMap).toList();
+  }
+
+  @override
+  Future<UploadItem?> getUploadByDriveFileId(String driveFileId) async {
+    final rows = await db.query(
+      'uploads',
+      where: 'drive_file_id = ?',
+      whereArgs: [driveFileId],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    return UploadItem.fromMap(rows.first);
+  }
+
+  @override
+  Future<UploadItem?> getUploadByFileName(String fileName) async {
+    final rows = await db.query(
+      'uploads',
+      where: 'file_name = ?',
+      whereArgs: [fileName],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    return UploadItem.fromMap(rows.first);
   }
 
   @override
@@ -1157,13 +1200,15 @@ class InMemoryAppDatabase implements AppDatabase {
     for (final entry in _uploads.entries.toList()) {
       if (entry.value.sessionId == sessionId) {
         final rename = renamedPhotos?[entry.key];
+        final isAlreadyUploaded =
+            entry.value.driveFileId != null && entry.value.driveFileId!.isNotEmpty;
         _uploads[entry.key] = entry.value.copyWith(
           patientId: patientId,
           driveFolderId: driveFolderId,
           driveParentFolderId: driveFolderId,
           fileName: rename?.fileName,
           localPath: rename?.localPath,
-          status: UploadStatus.waiting,
+          status: isAlreadyUploaded ? UploadStatus.uploaded : UploadStatus.waiting,
         );
       }
     }
@@ -1235,6 +1280,22 @@ class InMemoryAppDatabase implements AppDatabase {
     final list = _uploads.values.toList();
     list.sort((a, b) => a.createdAt.compareTo(b.createdAt));
     return list;
+  }
+
+  @override
+  Future<UploadItem?> getUploadByDriveFileId(String driveFileId) async {
+    for (final u in _uploads.values) {
+      if (u.driveFileId == driveFileId) return u;
+    }
+    return null;
+  }
+
+  @override
+  Future<UploadItem?> getUploadByFileName(String fileName) async {
+    for (final u in _uploads.values) {
+      if (u.fileName == fileName) return u;
+    }
+    return null;
   }
 
   Map<String, UploadItem> dumpUploads() => Map.from(_uploads);

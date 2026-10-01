@@ -58,14 +58,20 @@ Version 4 (V4) — Flutter Android single-doctor clinical photo capture app. V4 
 5. **First-Class Cloud Unassigned State & Zero-Bandwidth Move**:
    - Unassigned photos upload immediately to `Configured Parent / Unassigned Photos / session_YYYYMMDD_HHMMSS`.
    - When the doctor assigns an unassigned session to a patient, the app executes a Google Drive server-side file move (`files.update` with `addParents` and `removeParents`), moving photos instantly in ~200ms with zero cellular bandwidth re-upload.
-6. **Viewer Actions: Move to Unassigned & Safe Deletion**:
-   - Photo viewer supports server-side `Move to Unassigned`, detaching photos from a patient and placing them in an unassigned session folder on Drive.
-   - Safe photo deletion: Google Drive deletion completes and confirms before any local queue/database records are removed. If Drive deletion fails, local records remain intact.
-7. **Deterministic IST Chronology & Filenames**:
+6. **Viewer Actions: Multi-Select Move to Unassigned & Multi-Select Deletion**:
+   - Patient photo viewer supports multi-selection mode (via tap on Select or long-press on any photo).
+   - Multi-Move: Selected photos move into ONE new unassigned session folder on Google Drive via server-side `addParents`/`removeParents`. Local SQLite `uploads` records are created/updated with `session_id = sessionId`, `patient_id = NULL`, `drive_parent_folder_id = sessionFolderId`, and `status = UploadStatus.uploaded` only after Drive confirms the move.
+   - Multi-Delete: Selected photos are deleted from Google Drive first; local DB records and cached files are removed only upon confirmed Drive deletion. Partial failures are preserved and retryable.
+7. **Unassigned Session Synchronization & Safe Folder Cleanup**:
+   - Local DB is the authoritative source of truth for session/photo relationships: `photo.session_id == unassignedSession.id`, `photo.patient_id == NULL`, `photo.drive_file_id != NULL`, `photo.drive_parent_folder_id == unassignedSession.drive_folder_id`.
+   - When assigning an unassigned session to a patient, photos already on Google Drive move server-side directly to the patient's Drive folder.
+   - The Drive session folder is deleted ONLY after verifying via `listPatientPhotos` that zero files remain in it. If verification fails or files remain, the folder is kept and retryable.
+   - Unassigned session card displays photo count, thumbnail strip, formatted IST timestamp, upload status, and Assign/Delete session actions.
+8. **Deterministic IST Chronology & Filenames**:
    - Photo filenames: `YYYYMMDD_HHMMSS_SSS_<sequence>.jpg` authoritatively formatted in Indian Standard Time (`UTC+05:30`), completely removing Patient ID from filenames and UI.
    - Photos sort descending (newest first).
    - Timestamps format in IST (`d MMM yyyy, hh:mm a`).
-8. **UI & Theme Architecture**:
+9. **UI & Theme Architecture**:
    - Material 3 theme with instant Light / Dark / System theme switching via `SegmentedButton` in Settings.
    - Persisted across app restarts in SharedPreferences via `ConfigService.setThemeMode` and dynamically reactive via `themeModeNotifier`.
    - Top-right AppBar layout: `Patients [person_add_outlined] [settings_outlined]`.

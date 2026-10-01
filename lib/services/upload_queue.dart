@@ -307,9 +307,12 @@ class UploadQueueService extends ChangeNotifier {
   }
 
   /// Workflow B: Assigns an unassigned session to a verified patient.
-  /// Validates that patient has an available Drive folder, renames files to the
-  /// patient directory structure, transitions all photos to 'waiting', and wakes the
-  /// background upload worker.
+  /// Validates that patient has an available Drive folder.
+  /// For photos already on Google Drive, moves them server-side into the patient's Drive folder.
+  /// For local photos, renames/moves files to the patient directory structure, transitions to 'waiting',
+  /// and wakes the background upload worker.
+  /// Once all photos succeed, verifies the Drive session folder is empty, deletes the empty Drive folder,
+  /// and removes the session from SQLite.
   Future<void> assignSession({
     required String sessionId,
     required Patient patient,
@@ -320,6 +323,7 @@ class UploadQueueService extends ChangeNotifier {
       );
     }
 
+    final session = await database.getSession(sessionId);
     final uploads = await database.getUploadsForSession(sessionId);
     final basePath = await _getBasePath();
     final patientSessionDir = Directory(
@@ -330,30 +334,63 @@ class UploadQueueService extends ChangeNotifier {
     }
 
     final renamedPhotos = <String, ({String fileName, String localPath})>{};
+    final failedPhotoIds = <String>[];
+    String? lastError;
 
     for (var i = 0; i < uploads.length; i++) {
       final item = uploads[i];
-      final originalFile = File(item.localPath);
-      final newFileName = item.fileName.startsWith('unassigned_')
-          ? item.fileName.substring('unassigned_'.length)
-          : item.fileName;
-      final newLocalPath = p.join(patientSessionDir.path, newFileName);
 
-      if (originalFile.existsSync()) {
+      // If photo already exists on Google Drive, move it server-side
+      if (item.driveFileId != null && item.driveFileId!.isNotEmpty) {
         try {
-          originalFile.renameSync(newLocalPath);
-        } catch (_) {
-          originalFile.copySync(newLocalPath);
-          try {
-            originalFile.deleteSync();
-          } catch (_) {}
+          final client = await authService.getAuthenticatedClient();
+          if (client == null) throw StateError('Google account authorization not available.');
+          final sourceFolder = item.driveFolderId ?? session?.driveFolderId;
+          if (sourceFolder != null &&
+              sourceFolder.isNotEmpty &&
+              sourceFolder != patient.driveFolderId) {
+            await driveService.moveFile(
+              client: client,
+              fileId: item.driveFileId!,
+              sourceFolderId: sourceFolder,
+              targetFolderId: patient.driveFolderId!,
+            );
+          }
+          await database.updateUpload(item.copyWith(
+            patientId: patient.id,
+            driveFolderId: patient.driveFolderId,
+            driveParentFolderId: patient.driveFolderId,
+            status: UploadStatus.uploaded,
+          ));
+        } catch (e) {
+          failedPhotoIds.add(item.id);
+          lastError = e.toString();
+          debugPrint('Failed to move photo ${item.id} to patient on Drive: $e');
         }
-      }
+      } else {
+        // Local file not yet uploaded
+        final originalFile = File(item.localPath);
+        final newFileName = item.fileName.startsWith('unassigned_')
+            ? item.fileName.substring('unassigned_'.length)
+            : item.fileName;
+        final newLocalPath = p.join(patientSessionDir.path, newFileName);
 
-      renamedPhotos[item.id] = (fileName: newFileName, localPath: newLocalPath);
+        if (originalFile.existsSync()) {
+          try {
+            originalFile.renameSync(newLocalPath);
+          } catch (_) {
+            originalFile.copySync(newLocalPath);
+            try {
+              originalFile.deleteSync();
+            } catch (_) {}
+          }
+        }
+
+        renamedPhotos[item.id] = (fileName: newFileName, localPath: newLocalPath);
+      }
     }
 
-    // Clean up empty unassigned directory if empty
+    // Clean up empty local unassigned directory if empty
     try {
       final unassignedSessionDir = Directory(
         p.join(basePath, AppConfig.photoQueueDirName, AppConfig.unassignedDirName, sessionId),
@@ -370,9 +407,130 @@ class UploadQueueService extends ChangeNotifier {
       renamedPhotos: renamedPhotos,
     );
 
+    // If all photos succeeded, verify Drive session folder is empty and delete it
+    if (failedPhotoIds.isEmpty) {
+      final driveSessionFolderId = session?.driveFolderId;
+      if (driveSessionFolderId != null && driveSessionFolderId.isNotEmpty) {
+        try {
+          final client = await authService.getAuthenticatedClient();
+          if (client != null) {
+            final remainingInDrive = await driveService.listPatientPhotos(
+              client: client,
+              folderId: driveSessionFolderId,
+            );
+            if (remainingInDrive.isEmpty) {
+              await driveService.deleteFile(client: client, fileId: driveSessionFolderId);
+              debugPrint('Deleted empty unassigned Drive session folder: $driveSessionFolderId');
+            } else {
+              debugPrint(
+                'Drive session folder $driveSessionFolderId still contains ${remainingInDrive.length} files. Not deleting.',
+              );
+            }
+          }
+        } catch (e) {
+          debugPrint('Warning: unable to verify/delete Drive session folder: $e');
+        }
+      }
+
+      // If no local or unassigned uploads remain for this session, remove session record
+      final remaining = await database.getUploadsForSession(sessionId);
+      final unassignedRemaining = remaining.where((u) => u.patientId == null).toList();
+      if (unassignedRemaining.isEmpty) {
+        await database.deleteSession(sessionId);
+      }
+    }
+
     _safeNotifyListeners();
 
-    unawaited(processQueue());
+    if (renamedPhotos.isNotEmpty) {
+      unawaited(processQueue());
+    }
+
+    if (failedPhotoIds.isNotEmpty) {
+      throw StateError(
+        'Failed to move ${failedPhotoIds.length} of ${uploads.length} photos: $lastError',
+      );
+    }
+  }
+
+  /// Deletes an entire unassigned session:
+  /// - Deletes all contained Drive photos.
+  /// - Removes local DB records only after successful Drive deletion.
+  /// - Once all photos are deleted, verifies the Drive session folder is empty and deletes it.
+  /// - Removes the local session record.
+  /// - Retains failed photos and session if partial deletion occurs.
+  Future<void> deleteUnassignedSession(String sessionId) async {
+    final session = await database.getSession(sessionId);
+    final uploads = await database.getUploadsForSession(sessionId);
+
+    final failedPhotoIds = <String>[];
+    String? lastError;
+
+    for (final item in uploads) {
+      if (item.driveFileId != null && item.driveFileId!.isNotEmpty) {
+        try {
+          final client = await authService.getAuthenticatedClient();
+          if (client == null) throw StateError('Google account authorization not available.');
+          await driveService.deleteFile(client: client, fileId: item.driveFileId!);
+          await database.deleteUpload(item.id);
+        } catch (e) {
+          failedPhotoIds.add(item.id);
+          lastError = e.toString();
+          debugPrint('Failed to delete Drive photo ${item.id}: $e');
+        }
+      } else {
+        // Local photo
+        final file = File(item.localPath);
+        if (file.existsSync()) {
+          try {
+            file.deleteSync();
+          } catch (_) {}
+        }
+        await database.deleteUpload(item.id);
+      }
+    }
+
+    // If all photos deleted successfully, clean up empty Drive session folder and local session
+    if (failedPhotoIds.isEmpty) {
+      final driveSessionFolderId = session?.driveFolderId;
+      if (driveSessionFolderId != null && driveSessionFolderId.isNotEmpty) {
+        try {
+          final client = await authService.getAuthenticatedClient();
+          if (client != null) {
+            final remainingInDrive = await driveService.listPatientPhotos(
+              client: client,
+              folderId: driveSessionFolderId,
+            );
+            if (remainingInDrive.isEmpty) {
+              await driveService.deleteFile(client: client, fileId: driveSessionFolderId);
+              debugPrint('Deleted empty unassigned Drive session folder: $driveSessionFolderId');
+            }
+          }
+        } catch (e) {
+          debugPrint('Warning: unable to verify/delete Drive session folder: $e');
+        }
+      }
+
+      await database.deleteSession(sessionId);
+
+      final basePath = await _getBasePath();
+      final sessionDir = Directory(
+        p.join(basePath, AppConfig.photoQueueDirName, AppConfig.unassignedDirName, sessionId),
+      );
+      if (sessionDir.existsSync()) {
+        try {
+          sessionDir.deleteSync(recursive: true);
+        } catch (_) {}
+      }
+    }
+
+    _safeNotifyListeners();
+
+    if (failedPhotoIds.isNotEmpty) {
+      throw StateError(
+        'Failed to delete ${failedPhotoIds.length} of ${uploads.length} photos: $lastError',
+      );
+    }
   }
 
   /// Main background upload loop.
