@@ -34,28 +34,24 @@ class PatientTile extends StatelessWidget {
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.center,
           children: [
-            // 1. Patient ID badge
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-              constraints: const BoxConstraints(minWidth: 64),
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                color: theme.colorScheme.primaryContainer,
-                borderRadius: BorderRadius.circular(6),
-              ),
+            // 1. Patient Avatar (initial letter)
+            CircleAvatar(
+              radius: 20,
+              backgroundColor: theme.colorScheme.primaryContainer,
               child: Text(
-                patient.legacyPatientId ?? (patient.id.length <= 8 ? patient.id : 'NEW'),
+                patient.displayName.isNotEmpty
+                    ? patient.displayName[0].toUpperCase()
+                    : '?',
                 style: TextStyle(
                   fontWeight: FontWeight.bold,
-                  fontSize: 13,
+                  fontSize: 15,
                   color: theme.colorScheme.onPrimaryContainer,
-                  letterSpacing: 0.5,
                 ),
               ),
             ),
             const SizedBox(width: 12),
 
-            // 2. Constrained content area (Patient Name & Folder Status)
+            // 2. Constrained content area (Patient Name & Phone)
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -74,14 +70,15 @@ class PatientTile extends StatelessWidget {
                           : theme.colorScheme.onSurfaceVariant,
                     ),
                   ),
-                  if (patient.phoneNumber != null && patient.phoneNumber!.isNotEmpty) ...[
-                    const SizedBox(height: 1),
+                  if ((patient.phoneDisplay ?? patient.phoneNumber) != null &&
+                      (patient.phoneDisplay ?? patient.phoneNumber)!.isNotEmpty) ...[
+                    const SizedBox(height: 2),
                     Text(
-                      patient.phoneNumber!,
+                      patient.phoneDisplay ?? patient.phoneNumber!,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
-                        fontSize: 12,
+                        fontSize: 13,
                         color: theme.colorScheme.onSurfaceVariant,
                       ),
                     ),
@@ -110,7 +107,7 @@ class PatientTile extends StatelessWidget {
                     const SizedBox(height: 2),
                     Row(
                       children: [
-                        Icon(Icons.warning_amber_rounded, size: 13, color: Colors.red.shade700),
+                        Icon(Icons.warning_amber_rounded, size: 13, color: theme.colorScheme.error),
                         const SizedBox(width: 4),
                         Expanded(
                           child: Text(
@@ -119,7 +116,7 @@ class PatientTile extends StatelessWidget {
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(
                               fontSize: 11,
-                              color: Colors.red.shade800,
+                              color: theme.colorScheme.error,
                               fontWeight: FontWeight.w600,
                             ),
                           ),
@@ -162,7 +159,7 @@ class PatientTile extends StatelessWidget {
                       color: patient.isUploadable
                           ? theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.5)
                           : (patient.folderStatus == FolderStatus.conflict
-                              ? Colors.red.shade400
+                              ? theme.colorScheme.error
                               : Colors.amber.shade700),
                       size: 20,
                     ),

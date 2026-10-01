@@ -12,29 +12,29 @@ Version 4 (V4) — Flutter Android single-doctor clinical photo capture app. V4 
   - `clinic_config.dart`: In-app clinic settings (`spreadsheetId`, `spreadsheetUrl`, `sheetTabName`, `parentDriveFolderId`, `hasCompletedSetup`, `lastPatientSync`, `lastSyncedRow`, `lastFullSync`).
 - `lib/services/`:
   - `google_auth.dart`: Google Sign-In 7.x wrapper & authenticated HTTP client (`extension_google_sign_in_as_googleapis_auth`).
-  - `config_service.dart`: SharedPreferences persistence for clinic configuration, `parentDriveFolderId`, `lastSyncedRow`, and `lastFullSync`.
+  - `config_service.dart`: SharedPreferences persistence for clinic configuration, `parentDriveFolderId`, `lastSyncedRow`, `lastFullSync`, and user-selected `themeMode` (`system`, `light`, `dark`) with reactive `themeModeNotifier`.
   - `sheets.dart`: Google Sheets API v4 metadata discovery (tabs), dynamic header row & column discovery (`discoverHeaderIndices` with phone alias discovery), header normalization, Drive folder URL parsing, relational workbook multi-tab parsing (`Visits` → `Patients` → `Appointments`), and read-only import stream (no writeback to Sheet).
   - `drive.dart`: Google Drive API v3 photo uploader, folder search with strict parent verification (`findFoldersByName`), canonical folder creator (`createFolder`), server-side mover (`moveFile`), safe deletion (`deleteFile`), unassigned root/session creator (`getOrCreateUnassignedRootFolder`, `getOrCreateUnassignedSessionFolder`), and photo listing (`listPatientPhotos`).
   - `patient_folder_service.dart`: Orchestrator for idempotent patient Drive folder resolution targeting `<Patient Name> - <Phone Number>` (or `<Patient Name>`) and legacy `<Legacy Patient ID> - <Patient Name>` reuse with parent validation.
-  - `database.dart`: Local SQLite database (v7 schema) supporting local UUID primary keys, `idx_patients_business_id` index, multi-mode local search (`SearchFilterMode: all, name, phone, patientId`), deterministic application-level deduplication, unassigned capture sessions, and persistent upload queue. Crash recovery resets `uploading` to `waiting`.
+  - `database.dart`: Local SQLite database (v7 schema) supporting local UUID primary keys, `idx_patients_business_id` index, multi-mode local search (`SearchFilterMode: all, name, phone`), deterministic application-level deduplication, unassigned capture sessions, and persistent upload queue. Crash recovery resets `uploading` to `waiting`.
   - `upload_queue.dart`: Asynchronous upload loop, gentle bounded retries, connectivity change listener, unassigned capture sessions, session assignment, instant camera return, and authoritative IST filename generation (`YYYYMMDD_HHMMSS_SSS_<sequence>.jpg`).
 - `lib/screens/`:
   - `welcome_screen.dart`: Welcome and Google account sign-in.
-  - `clinic_setup_screen.dart`: Multi-step setup wizard (URL input, tab picker, header validation, parent Drive folder setup).
-  - `patients_screen.dart`: Search-first patient selector, `+ New Patient` FAB, clinical inbox badge (`Icons.inbox_outlined`), real-time upload queue progress indicators, and dark theme support.
+  - `clinic_setup_screen.dart`: Multi-step setup wizard (URL input, tab picker, header validation, parent Drive folder setup) with semantic theme colors.
+  - `patients_screen.dart`: Search-first patient selector (All, Name, Phone filters), top-right AppBar actions (`[person_add_outlined]` and `[settings_outlined]`), bottom-right FAB with count badge (`Icons.inbox_outlined`), docked bottom navigation status bar with FAB-aware scroll padding, and zero Patient ID display.
   - `camera_screen.dart`: Rapid clinical photo capture with sequence numbering, zero Patient ID display, and non-blocking shutter.
   - `unassigned_photos_screen.dart`: Clinical inbox listing unassigned capture sessions with timestamps, photo counts, and quick actions (`[View Photos]`, `[Assign]`).
   - `session_detail_screen.dart`: Inspection screen showing local photo thumbnails, multi-select deletion mode, and `[Assign to Patient]` bottom bar.
   - `patient_photos_screen.dart`: Chronological gallery viewer with progressive thumbnail loading, shimmering skeleton placeholders, authoritative IST timestamp formatting, server-side `Move to Unassigned`, and safe `Delete Photo`.
-  - `settings_screen.dart`: Database info, parent Drive folder info, `Sync Now (Full Reconciliation)`, last synced row count, safe reconfiguration, and sign-out.
+  - `settings_screen.dart`: 4 clear sections (Appearance with Theme selector, Clinic / Storage, Data, Account), full reconciliation sync, safe reconfiguration, and sign-out.
 - `lib/widgets/`:
   - `new_patient_dialog.dart`: In-app patient creation modal with required Name, required 10-digit Indian Phone validation, and local SQLite deduplication alert with `Open Patient` button.
-  - `patient_tile.dart`: Clean, clinical patient list item with status badges (`NEW` for doctor-created UUIDs, legacy ID for imported sheet rows) and dark theme contrast.
+  - `patient_tile.dart`: Clean, clinical patient list item with patient name initials avatar, display name, and phone. Zero Patient ID or UUID exposure.
   - `unassigned_session_tile.dart`: Session card with clinical inbox icon, formatted timestamp, photo count badge, and action buttons.
-  - `patient_assignment_sheet.dart`: Searchable modal bottom sheet to select and validate patient for session assignment.
+  - `patient_assignment_sheet.dart`: Searchable modal bottom sheet to select and validate patient for session assignment with name initials avatars and zero Patient ID exposure.
   - `photo_thumbnail.dart`: Grid thumbnail widget for Google Drive photos with loading and fallback.
   - `selection_thumbnail.dart`: Thumbnail widget with checkmark selection badge for session photo deletion mode.
-  - `upload_status.dart`: Minimal status indicator pill.
+  - `upload_status.dart`: Minimal status indicator pill using semantic theme tokens.
 
 ## Data & Control Flow
 1. **Business Identity & Local Patient Creation**:
@@ -66,6 +66,10 @@ Version 4 (V4) — Flutter Android single-doctor clinical photo capture app. V4 
    - Photos sort descending (newest first).
    - Timestamps format in IST (`d MMM yyyy, hh:mm a`).
 8. **UI & Theme Architecture**:
-   - Material 3 theme with complete light and dark mode support (`ThemeMode.system`).
-   - Clinical inbox icon (`Icons.inbox_outlined`) universally used for unassigned workflows.
+   - Material 3 theme with instant Light / Dark / System theme switching via `SegmentedButton` in Settings.
+   - Persisted across app restarts in SharedPreferences via `ConfigService.setThemeMode` and dynamically reactive via `themeModeNotifier`.
+   - Top-right AppBar layout: `Patients [person_add_outlined] [settings_outlined]`.
+   - Bottom-right FAB: Unassigned Photos with `Icons.inbox_outlined` and badge count.
+   - Content accessibility: bottom navigation bar and list padding prevent any content or text hiding behind the FAB.
+   - Zero Patient ID and internal UUID exposure in doctor-facing UI; identity is displayed as Name and Phone number.
    - Progressive thumbnail loading with shimmering skeleton placeholders.

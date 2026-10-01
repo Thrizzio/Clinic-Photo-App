@@ -548,7 +548,7 @@ void main() {
       expect(materialApp.themeMode, ThemeMode.system);
     });
 
-    testWidgets('7.2 PatientTile for UUID patient displays NEW badge and hides raw UUID', (tester) async {
+    testWidgets('7.2 PatientTile displays initial avatar, name and phone, and hides raw UUID and IDs', (tester) async {
       const patient = Patient(
         id: 'c4e91244-1111-2222-3333-444455556666',
         name: 'Abhijit Gaikwad',
@@ -568,9 +568,11 @@ void main() {
         ),
       );
 
-      expect(find.text('NEW'), findsOneWidget);
+      expect(find.text('A'), findsOneWidget);
       expect(find.text('Abhijit Gaikwad'), findsOneWidget);
+      expect(find.text('9373264424'), findsOneWidget);
       expect(find.text('c4e91244-1111-2222-3333-444455556666'), findsNothing);
+      expect(find.text('NEW'), findsNothing);
     });
 
     testWidgets('7.3 UnassignedSessionTile displays clinical inbox icon', (tester) async {

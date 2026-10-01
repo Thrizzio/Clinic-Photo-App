@@ -99,7 +99,9 @@ class UploadStatusPill extends StatelessWidget {
             return Container(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
               decoration: BoxDecoration(
-                color: isDarkBackground ? Colors.black38 : Colors.grey.shade100,
+                color: isDarkBackground
+                    ? Colors.black38
+                    : Theme.of(context).colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
                 borderRadius: BorderRadius.circular(16),
               ),
               child: Row(
@@ -108,14 +110,16 @@ class UploadStatusPill extends StatelessWidget {
                   Icon(
                     Icons.check_circle_outline,
                     size: 14,
-                    color: isDarkBackground ? Colors.greenAccent : Colors.green.shade700,
+                    color: isDarkBackground ? Colors.greenAccent : Theme.of(context).colorScheme.primary,
                   ),
                   const SizedBox(width: 6),
                   Text(
                     'All photos uploaded',
                     style: TextStyle(
                       fontSize: 12,
-                      color: isDarkBackground ? Colors.white70 : Colors.black87,
+                      color: isDarkBackground
+                          ? Colors.white70
+                          : Theme.of(context).colorScheme.onSurfaceVariant,
                     ),
                   ),
                 ],

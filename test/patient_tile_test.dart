@@ -6,10 +6,11 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   group('PatientTile Widget Tests', () {
-    testWidgets('1. Displays genuine patient name and ID badge', (tester) async {
+    testWidgets('1. Displays genuine patient name and avatar, zero patient ID', (tester) async {
       const patient = Patient(
         id: '1000001',
         name: 'Anil Jain',
+        phoneNumber: '9876543210',
         folderStatus: FolderStatus.missing,
       );
 
@@ -26,12 +27,14 @@ void main() {
         ),
       );
 
-      // Verifies patient ID is shown in badge
-      expect(find.text('1000001'), findsOneWidget);
+      // Verifies patient ID is NOT shown anywhere on tile
+      expect(find.text('1000001'), findsNothing);
+      // Verifies initial avatar letter is displayed
+      expect(find.text('A'), findsOneWidget);
       // Verifies genuine patient name is displayed
       expect(find.text('Anil Jain'), findsOneWidget);
-      // Verifies "Patient 1000001" is NOT displayed
-      expect(find.text('Patient 1000001'), findsNothing);
+      // Verifies phone number is displayed
+      expect(find.text('9876543210'), findsOneWidget);
       // Verifies subtitle is displayed
       expect(find.text('Folder auto-creates on photo capture'), findsOneWidget);
       // Verifies both action buttons exist
@@ -39,7 +42,7 @@ void main() {
       expect(find.byIcon(Icons.camera_alt_outlined), findsOneWidget);
     });
 
-    testWidgets('2. Displays Name unavailable when name is missing or synthetic placeholder', (tester) async {
+    testWidgets('2. Displays Name unavailable when name is missing or synthetic placeholder, zero patient ID', (tester) async {
       const emptyPatient = Patient(
         id: '1000003',
         name: '',
@@ -57,7 +60,8 @@ void main() {
         ),
       );
 
-      expect(find.text('1000003'), findsOneWidget);
+      // Verifies patient ID is NOT shown
+      expect(find.text('1000003'), findsNothing);
       expect(find.text('Name unavailable'), findsOneWidget);
       expect(find.text('Patient 1000003'), findsNothing);
     });

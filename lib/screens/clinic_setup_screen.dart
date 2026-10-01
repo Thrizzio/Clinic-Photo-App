@@ -298,9 +298,9 @@ class _ClinicSetupScreenState extends State<ClinicSetupScreen> {
           style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
         ),
         const SizedBox(height: 8),
-        const Text(
+        Text(
           'Paste your Google Sheet link to connect the clinic patient list.',
-          style: TextStyle(color: Colors.black54, fontSize: 15),
+          style: TextStyle(color: Theme.of(context).colorScheme.onSurfaceVariant, fontSize: 15),
         ),
         const SizedBox(height: 24),
         TextField(
@@ -343,9 +343,9 @@ class _ClinicSetupScreenState extends State<ClinicSetupScreen> {
           style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
         ),
         const SizedBox(height: 8),
-        const Text(
+        Text(
           'Select the tab that contains your patient information.',
-          style: TextStyle(color: Colors.black54, fontSize: 15),
+          style: TextStyle(color: Theme.of(context).colorScheme.onSurfaceVariant, fontSize: 15),
         ),
         const SizedBox(height: 16),
         Expanded(
@@ -411,9 +411,9 @@ class _ClinicSetupScreenState extends State<ClinicSetupScreen> {
           style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
         ),
         const SizedBox(height: 8),
-        const Text(
-          'Paste the Google Drive folder link where clinical photo folders will be organized.\n\nThe app will create a subfolder for each patient:\n"<Patient ID> - <Patient Name>"',
-          style: TextStyle(color: Colors.black54, fontSize: 14),
+        Text(
+          'Paste the Google Drive folder link where clinical photo folders will be organized.\n\nThe app will create a subfolder for each patient:\n"<Patient Name> - <Phone Number>"',
+          style: TextStyle(color: Theme.of(context).colorScheme.onSurfaceVariant, fontSize: 14),
         ),
         const SizedBox(height: 24),
         TextField(
@@ -480,7 +480,13 @@ class _ClinicSetupScreenState extends State<ClinicSetupScreen> {
         const SizedBox(height: 16),
         Card(
           elevation: 0,
-          color: Colors.grey.shade100,
+          color: Theme.of(context).colorScheme.surfaceContainerLow,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+            side: BorderSide(
+              color: Theme.of(context).colorScheme.outlineVariant.withValues(alpha: 0.5),
+            ),
+          ),
           child: Padding(
             padding: const EdgeInsets.all(16.0),
             child: Column(
@@ -545,7 +551,7 @@ class _ClinicSetupScreenState extends State<ClinicSetupScreen> {
                       Expanded(
                         child: Text(
                           '$missingCount unlinked patients: folders will be created automatically in your parent Drive folder upon photo capture.',
-                          style: const TextStyle(color: Colors.black87, fontSize: 13),
+                          style: TextStyle(color: Theme.of(context).colorScheme.onSurface, fontSize: 13),
                         ),
                       ),
                     ],
@@ -561,7 +567,7 @@ class _ClinicSetupScreenState extends State<ClinicSetupScreen> {
                       Expanded(
                         child: Text(
                           '$conflictCount patients have conflicting Drive folders across visits',
-                          style: const TextStyle(color: Colors.black87, fontSize: 13),
+                          style: TextStyle(color: Theme.of(context).colorScheme.onSurface, fontSize: 13),
                         ),
                       ),
                     ],
@@ -610,17 +616,18 @@ class _ClinicSetupScreenState extends State<ClinicSetupScreen> {
   }
 
   Widget _buildErrorBanner(String message) {
+    final theme = Theme.of(context);
     return Container(
       margin: const EdgeInsets.only(bottom: 16),
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: Colors.red.shade50,
+        color: theme.colorScheme.errorContainer,
         borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: Colors.red.shade200),
+        border: Border.all(color: theme.colorScheme.error.withValues(alpha: 0.4)),
       ),
       child: Text(
         message,
-        style: TextStyle(color: Colors.red.shade900, fontSize: 13),
+        style: TextStyle(color: theme.colorScheme.onErrorContainer, fontSize: 13),
       ),
     );
   }

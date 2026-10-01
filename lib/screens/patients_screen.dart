@@ -253,7 +253,7 @@ class _PatientsScreenState extends State<PatientsScreen> {
             ],
           ),
           content: Text(
-            'Cannot capture photos for ${patient.name} (${patient.id}).\n\n'
+            'Cannot capture photos for ${patient.displayName}.\n\n'
             'Multiple distinct Google Drive folders were found across visits for this patient. '
             'Please ensure only one consistent Drive folder is assigned in the Visits sheet and refresh.',
           ),
@@ -346,11 +346,13 @@ class _PatientsScreenState extends State<PatientsScreen> {
               Row(
                 children: [
                   CircleAvatar(
+                    radius: 22,
                     backgroundColor: Theme.of(ctx).colorScheme.primaryContainer,
                     child: Text(
-                      patient.id.length > 3 ? patient.id.substring(patient.id.length - 3) : patient.id,
+                      patient.displayName.isNotEmpty ? patient.displayName[0].toUpperCase() : '?',
                       style: TextStyle(
                         fontWeight: FontWeight.bold,
+                        fontSize: 16,
                         color: Theme.of(ctx).colorScheme.onPrimaryContainer,
                       ),
                     ),
@@ -369,12 +371,15 @@ class _PatientsScreenState extends State<PatientsScreen> {
                             color: patient.hasValidName ? null : Theme.of(ctx).colorScheme.onSurfaceVariant,
                           ),
                         ),
-                        Text(
-                          'ID: ${patient.id}${patient.phoneNumber != null && patient.phoneNumber!.isNotEmpty ? ' · ${patient.phoneNumber}' : ''}',
-                          style: TextStyle(
-                            color: Theme.of(ctx).colorScheme.onSurfaceVariant,
+                        if ((patient.phoneDisplay ?? patient.phoneNumber) != null &&
+                            (patient.phoneDisplay ?? patient.phoneNumber)!.isNotEmpty)
+                          Text(
+                            patient.phoneDisplay ?? patient.phoneNumber!,
+                            style: TextStyle(
+                              fontSize: 13,
+                              color: Theme.of(ctx).colorScheme.onSurfaceVariant,
+                            ),
                           ),
-                        ),
                       ],
                     ),
                   ),
@@ -411,6 +416,20 @@ class _PatientsScreenState extends State<PatientsScreen> {
     );
   }
 
+  /// Opens the list of unassigned capture sessions.
+  Future<void> _openUnassignedPhotos() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => UnassignedPhotosScreen(
+          database: widget.database,
+          queueService: widget.queueService,
+          folderService: _patientFolderService,
+        ),
+      ),
+    );
+    _refreshAll();
+  }
+
   /// Starts Workflow B: creates a new unassigned session and opens camera immediately.
   Future<void> _startUnassignedSession() async {
     try {
@@ -430,24 +449,115 @@ class _PatientsScreenState extends State<PatientsScreen> {
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to start session: $e')),
+          SnackBar(content: Text('Could not start unassigned capture: $e')),
         );
       }
     }
   }
 
-  /// Opens the list of unassigned capture sessions.
-  Future<void> _openUnassignedPhotos() async {
-    await Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => UnassignedPhotosScreen(
-          database: widget.database,
-          queueService: widget.queueService,
-          folderService: _patientFolderService,
+  /// Displays the Unassigned Photos action menu allowing doctor to take unassigned photos or view inbox.
+  void _showUnassignedMenu() {
+    final theme = Theme.of(context);
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: theme.dividerColor.withValues(alpha: 0.5),
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  Icon(Icons.inbox_outlined, color: theme.colorScheme.primary, size: 24),
+                  const SizedBox(width: 10),
+                  Text(
+                    'Unassigned Photos',
+                    style: theme.textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  if (_unassignedSessionsCount > 0) ...[
+                    const Spacer(),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: theme.colorScheme.error,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Text(
+                        '$_unassignedSessionsCount',
+                        style: TextStyle(
+                          color: theme.colorScheme.onError,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+              const SizedBox(height: 4),
+              Text(
+                'Capture clinical photos for a new or unknown patient, or view sessions waiting to be assigned.',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+              const SizedBox(height: 12),
+              const Divider(),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: CircleAvatar(
+                  backgroundColor: theme.colorScheme.primaryContainer,
+                  child: Icon(Icons.camera_alt_outlined, color: theme.colorScheme.onPrimaryContainer),
+                ),
+                title: const Text('Take Unassigned Photos', style: TextStyle(fontWeight: FontWeight.w600)),
+                subtitle: const Text('Launch camera immediately; assign to a patient later'),
+                onTap: () {
+                  Navigator.of(ctx).pop();
+                  _startUnassignedSession();
+                },
+              ),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: CircleAvatar(
+                  backgroundColor: theme.colorScheme.secondaryContainer,
+                  child: Icon(Icons.inbox_outlined, color: theme.colorScheme.onSecondaryContainer),
+                ),
+                title: const Text('View Unassigned Photos', style: TextStyle(fontWeight: FontWeight.w600)),
+                subtitle: Text(
+                  _unassignedSessionsCount > 0
+                      ? '$_unassignedSessionsCount ${_unassignedSessionsCount == 1 ? "session" : "sessions"} waiting for assignment'
+                      : 'No unassigned sessions pending',
+                ),
+                trailing: _unassignedSessionsCount > 0
+                    ? const Icon(Icons.chevron_right)
+                    : null,
+                onTap: () {
+                  Navigator.of(ctx).pop();
+                  _openUnassignedPhotos();
+                },
+              ),
+            ],
+          ),
         ),
       ),
     );
-    _refreshAll();
   }
 
   void _openSettings() {
@@ -485,21 +595,12 @@ class _PatientsScreenState extends State<PatientsScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Select Patient', style: TextStyle(fontWeight: FontWeight.bold)),
+        title: const Text('Patients', style: TextStyle(fontWeight: FontWeight.bold)),
         actions: [
           IconButton(
-            icon: Badge(
-              isLabelVisible: _unassignedSessionsCount > 0,
-              label: Text('$_unassignedSessionsCount'),
-              child: const Icon(Icons.inbox_outlined),
-            ),
-            tooltip: 'Unassigned Inbox',
-            onPressed: _openUnassignedPhotos,
-          ),
-          IconButton(
-            icon: const Icon(Icons.add_a_photo_outlined),
-            tooltip: 'Quick Unassigned Capture',
-            onPressed: _startUnassignedSession,
+            icon: const Icon(Icons.person_add_outlined),
+            tooltip: 'New patient',
+            onPressed: _openNewPatientDialog,
           ),
           IconButton(
             icon: const Icon(Icons.settings_outlined),
@@ -508,10 +609,46 @@ class _PatientsScreenState extends State<PatientsScreen> {
           ),
         ],
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _openNewPatientDialog,
-        icon: const Icon(Icons.person_add),
-        label: const Text('New Patient'),
+      floatingActionButton: FloatingActionButton(
+        heroTag: 'unassigned_photos_fab',
+        onPressed: _showUnassignedMenu,
+        tooltip: 'Unassigned photos',
+        child: Badge(
+          isLabelVisible: _unassignedSessionsCount > 0,
+          label: Text(
+            '$_unassignedSessionsCount',
+            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 11),
+          ),
+          offset: const Offset(6, -6),
+          backgroundColor: theme.colorScheme.error,
+          textColor: theme.colorScheme.onError,
+          child: const Icon(Icons.inbox_outlined, size: 26),
+        ),
+      ),
+      bottomNavigationBar: SafeArea(
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          decoration: BoxDecoration(
+            color: theme.colorScheme.surface,
+            border: Border(
+              top: BorderSide(color: theme.dividerColor.withValues(alpha: 0.3)),
+            ),
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                '${_patients.length} ${_patients.length == 1 ? "patient" : "patients"}',
+                style: TextStyle(
+                  fontSize: 13,
+                  color: theme.colorScheme.onSurfaceVariant,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+              UploadStatusPill(queueService: widget.queueService),
+            ],
+          ),
+        ),
       ),
       body: SafeArea(
         child: Column(
@@ -524,10 +661,10 @@ class _PatientsScreenState extends State<PatientsScreen> {
                 onChanged: _handleSearch,
                 decoration: InputDecoration(
                   hintText: switch (_selectedSearchMode) {
-                    SearchFilterMode.all => 'Search patient ID, name, or phone...',
+                    SearchFilterMode.all => 'Search patients by name or phone...',
                     SearchFilterMode.name => 'Search by patient name...',
                     SearchFilterMode.phone => 'Search by phone number...',
-                    SearchFilterMode.patientId => 'Search by patient ID...',
+                    _ => 'Search patients...',
                   },
                   prefixIcon: const Icon(Icons.search),
                   suffixIcon: _searchController.text.isNotEmpty
@@ -556,7 +693,9 @@ class _PatientsScreenState extends State<PatientsScreen> {
               child: SingleChildScrollView(
                 scrollDirection: Axis.horizontal,
                 child: Row(
-                  children: SearchFilterMode.values.map((mode) {
+                  children: SearchFilterMode.values
+                      .where((mode) => mode != SearchFilterMode.patientId)
+                      .map((mode) {
                     final isSelected = _selectedSearchMode == mode;
                     return Padding(
                       padding: const EdgeInsets.only(right: 8.0),
@@ -688,48 +827,14 @@ class _PatientsScreenState extends State<PatientsScreen> {
                 ),
               ),
 
-            // Unassigned Photos Banner (if any exist)
-            if (_unassignedSessionsCount > 0)
-              Container(
-                margin: const EdgeInsets.fromLTRB(16, 6, 16, 4),
-                decoration: BoxDecoration(
-                  color: isDark ? theme.colorScheme.tertiaryContainer.withValues(alpha: 0.4) : Colors.amber.shade50,
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(
-                    color: isDark ? theme.colorScheme.tertiary.withValues(alpha: 0.5) : Colors.amber.shade300,
-                  ),
-                ),
-                child: ListTile(
-                  dense: true,
-                  leading: Icon(
-                    Icons.inbox_outlined,
-                    color: isDark ? theme.colorScheme.onTertiaryContainer : Colors.amber.shade900,
-                  ),
-                  title: Text(
-                    'Unassigned Photos ($_unassignedSessionsCount ${_unassignedSessionsCount == 1 ? "session" : "sessions"})',
-                    style: TextStyle(
-                      fontWeight: FontWeight.bold,
-                      fontSize: 13,
-                      color: isDark ? theme.colorScheme.onTertiaryContainer : Colors.amber.shade900,
-                    ),
-                  ),
-                  subtitle: const Text(
-                    'Tap to inspect thumbnails and assign to patients',
-                    style: TextStyle(fontSize: 11),
-                  ),
-                  trailing: const Icon(Icons.arrow_forward_ios, size: 14),
-                  onTap: _openUnassignedPhotos,
-                ),
-              ),
-
             // Patients List
             Expanded(
               child: _isLoadingCache
                   ? const Center(child: CircularProgressIndicator())
                   : _patients.isEmpty
                       ? Center(
-                          child: Padding(
-                            padding: const EdgeInsets.all(32.0),
+                          child: SingleChildScrollView(
+                            padding: const EdgeInsets.fromLTRB(32, 32, 32, 88),
                             child: Text(
                               _searchController.text.isNotEmpty
                                   ? 'No patients match "${_searchController.text}"'
@@ -742,6 +847,7 @@ class _PatientsScreenState extends State<PatientsScreen> {
                       : RefreshIndicator(
                           onRefresh: () => _syncSheetInBackground(forceFullSync: true),
                           child: ListView.builder(
+                            padding: const EdgeInsets.fromLTRB(0, 0, 0, 88),
                             itemCount: _patients.length,
                             itemBuilder: (context, index) {
                               final patient = _patients[index];
@@ -754,31 +860,6 @@ class _PatientsScreenState extends State<PatientsScreen> {
                             },
                           ),
                         ),
-            ),
-
-            // Bottom Minimal Upload Status Bar
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-              decoration: BoxDecoration(
-                color: theme.colorScheme.surface,
-                border: Border(
-                  top: BorderSide(color: theme.dividerColor.withValues(alpha: 0.3)),
-                ),
-              ),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text(
-                    '${_patients.length} patients',
-                    style: TextStyle(
-                      fontSize: 13,
-                      color: theme.colorScheme.onSurfaceVariant,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                  UploadStatusPill(queueService: widget.queueService),
-                ],
-              ),
             ),
           ],
         ),

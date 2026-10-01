@@ -1,3 +1,4 @@
+import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/clinic_config.dart';
 
@@ -10,14 +11,35 @@ class ConfigService {
   static const String _keyLastPatientSync = 'lastPatientSync';
   static const String _keyLastSyncedRow = 'lastSyncedRow';
   static const String _keyLastFullSync = 'lastFullSync';
+  static const String _keyThemeMode = 'themeMode';
 
   final SharedPreferences _prefs;
+  late final ValueNotifier<ThemeMode> themeModeNotifier;
 
-  ConfigService(this._prefs);
+  ConfigService(this._prefs) {
+    themeModeNotifier = ValueNotifier<ThemeMode>(getThemeMode());
+  }
 
   static Future<ConfigService> init() async {
     final prefs = await SharedPreferences.getInstance();
     return ConfigService(prefs);
+  }
+
+  ThemeMode getThemeMode() {
+    final val = _prefs.getString(_keyThemeMode);
+    switch (val) {
+      case 'light':
+        return ThemeMode.light;
+      case 'dark':
+        return ThemeMode.dark;
+      default:
+        return ThemeMode.system;
+    }
+  }
+
+  Future<void> setThemeMode(ThemeMode mode) async {
+    await _prefs.setString(_keyThemeMode, mode.name);
+    themeModeNotifier.value = mode;
   }
 
   ClinicConfig loadConfig() {

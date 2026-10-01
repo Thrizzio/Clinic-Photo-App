@@ -66,51 +66,56 @@ class ClinicPhotosApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: AppConfig.appName,
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        useMaterial3: true,
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF006688), // Professional clinical teal/blue
-          brightness: Brightness.light,
-        ),
-        appBarTheme: const AppBarTheme(
-          centerTitle: false,
-          elevation: 0,
-          scrolledUnderElevation: 1,
-        ),
-      ),
-      darkTheme: ThemeData(
-        useMaterial3: true,
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF006688),
-          brightness: Brightness.dark,
-        ),
-        appBarTheme: const AppBarTheme(
-          centerTitle: false,
-          elevation: 0,
-          scrolledUnderElevation: 1,
-        ),
-      ),
-      themeMode: ThemeMode.system,
-      home: hasCompletedSetup
-          ? PatientsScreen(
-              authService: authService,
-              configService: configService,
-              sheetsService: sheetsService,
-              database: database,
-              queueService: queueService,
-              driveService: driveService,
-            )
-          : WelcomeScreen(
-              authService: authService,
-              configService: configService,
-              sheetsService: sheetsService,
-              database: database,
-              queueService: queueService,
-              driveService: driveService,
+    return ValueListenableBuilder<ThemeMode>(
+      valueListenable: configService.themeModeNotifier,
+      builder: (context, currentThemeMode, _) {
+        return MaterialApp(
+          title: AppConfig.appName,
+          debugShowCheckedModeBanner: false,
+          theme: ThemeData(
+            useMaterial3: true,
+            colorScheme: ColorScheme.fromSeed(
+              seedColor: const Color(0xFF006688), // Professional clinical teal/blue
+              brightness: Brightness.light,
             ),
+            appBarTheme: const AppBarTheme(
+              centerTitle: false,
+              elevation: 0,
+              scrolledUnderElevation: 1,
+            ),
+          ),
+          darkTheme: ThemeData(
+            useMaterial3: true,
+            colorScheme: ColorScheme.fromSeed(
+              seedColor: const Color(0xFF006688),
+              brightness: Brightness.dark,
+            ),
+            appBarTheme: const AppBarTheme(
+              centerTitle: false,
+              elevation: 0,
+              scrolledUnderElevation: 1,
+            ),
+          ),
+          themeMode: currentThemeMode,
+          home: hasCompletedSetup
+              ? PatientsScreen(
+                  authService: authService,
+                  configService: configService,
+                  sheetsService: sheetsService,
+                  database: database,
+                  queueService: queueService,
+                  driveService: driveService,
+                )
+              : WelcomeScreen(
+                  authService: authService,
+                  configService: configService,
+                  sheetsService: sheetsService,
+                  database: database,
+                  queueService: queueService,
+                  driveService: driveService,
+                ),
+        );
+      },
     );
   }
 }

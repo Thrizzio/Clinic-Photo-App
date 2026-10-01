@@ -93,7 +93,7 @@ class _PatientAssignmentSheetState extends State<PatientAssignmentSheet> {
             setState(() {
               _isLoading = false;
               _errorMessage =
-                  'Could not resolve Drive folder for ${patient.name} (${patient.id}). Status: ${resolved.patient.folderStatus.name}';
+                  'Could not resolve Drive folder for ${patient.displayName}. Status: ${resolved.patient.folderStatus.name}';
             });
             return;
           }
@@ -107,7 +107,7 @@ class _PatientAssignmentSheetState extends State<PatientAssignmentSheet> {
       } else {
         setState(() {
           _errorMessage =
-              'Cannot assign to ${patient.name} (${patient.id}): This patient does not have a Google Drive folder in the Visits sheet. Photos remain safely saved.';
+              'Cannot assign to ${patient.displayName}: This patient does not have a Google Drive folder in the Visits sheet. Photos remain safely saved.';
         });
         return;
       }
@@ -117,7 +117,7 @@ class _PatientAssignmentSheetState extends State<PatientAssignmentSheet> {
       setState(() {
         _isLoading = false;
         _errorMessage =
-            'Cannot assign to ${patient.name} (${patient.id}): This patient has conflicting Google Drive folders across different visits. Please resolve in the Visits sheet first.';
+            'Cannot assign to ${patient.displayName}: This patient has conflicting Google Drive folders across different visits. Please resolve in the Visits sheet first.';
       });
       return;
     }
@@ -133,7 +133,7 @@ class _PatientAssignmentSheetState extends State<PatientAssignmentSheet> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              'Session assigned to ${targetPatient.name}. Photos queued for upload.',
+              'Session assigned to ${targetPatient.displayName}. Photos queued for upload.',
             ),
             backgroundColor: Colors.green.shade800,
           ),
@@ -195,7 +195,7 @@ class _PatientAssignmentSheetState extends State<PatientAssignmentSheet> {
             onChanged: _loadPatients,
             autofocus: true,
             decoration: InputDecoration(
-              hintText: 'Search by Patient ID or Name...',
+              hintText: 'Search patients by name or phone...',
               prefixIcon: const Icon(Icons.search),
               border: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(12),
@@ -208,21 +208,21 @@ class _PatientAssignmentSheetState extends State<PatientAssignmentSheet> {
               margin: const EdgeInsets.only(top: 12),
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
-                color: Colors.red.shade50,
+                color: theme.colorScheme.errorContainer,
                 borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: Colors.red.shade200),
+                border: Border.all(color: theme.colorScheme.error),
               ),
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Icon(Icons.error_outline, color: Colors.red.shade700, size: 20),
+                  Icon(Icons.error_outline, color: theme.colorScheme.onErrorContainer, size: 20),
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
                       _errorMessage!,
                       style: TextStyle(
                         fontSize: 13,
-                        color: Colors.red.shade900,
+                        color: theme.colorScheme.onErrorContainer,
                       ),
                     ),
                   ),
@@ -255,28 +255,37 @@ class _PatientAssignmentSheetState extends State<PatientAssignmentSheet> {
                               backgroundColor: patient.isUploadable
                                   ? theme.colorScheme.primaryContainer
                                   : (patient.folderStatus == FolderStatus.conflict
-                                      ? Colors.red.shade100
+                                      ? theme.colorScheme.errorContainer
                                       : Colors.amber.shade100),
                               child: Text(
-                                patient.id.length > 3
-                                    ? patient.id.substring(patient.id.length - 3)
-                                    : patient.id,
+                                patient.displayName.isNotEmpty
+                                    ? patient.displayName[0].toUpperCase()
+                                    : '?',
                                 style: TextStyle(
-                                  fontSize: 12,
+                                  fontSize: 14,
                                   fontWeight: FontWeight.bold,
                                   color: patient.isUploadable
                                       ? theme.colorScheme.onPrimaryContainer
                                       : (patient.folderStatus == FolderStatus.conflict
-                                          ? Colors.red.shade900
+                                          ? theme.colorScheme.onErrorContainer
                                           : Colors.amber.shade900),
                                 ),
                               ),
                             ),
                             title: Text(
-                              patient.name,
+                              patient.displayName,
                               style: const TextStyle(fontWeight: FontWeight.w600),
                             ),
-                            subtitle: Text('ID: ${patient.id}'),
+                            subtitle: ((patient.phoneDisplay ?? patient.phoneNumber) != null &&
+                                    (patient.phoneDisplay ?? patient.phoneNumber)!.isNotEmpty)
+                                ? Text(
+                                    patient.phoneDisplay ?? patient.phoneNumber!,
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: theme.colorScheme.onSurfaceVariant,
+                                    ),
+                                  )
+                                : null,
                             trailing: patient.isUploadable
                                 ? const Icon(Icons.check_circle_outline, color: Colors.green)
                                 : (patient.folderStatus == FolderStatus.conflict

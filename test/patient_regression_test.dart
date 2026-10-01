@@ -482,7 +482,7 @@ void main() {
   // 4. UI REGRESSION TESTS
   // =========================================================================
   group('4. UI regression tests', () {
-    testWidgets('4.1 PatientTile displays actual patient name and ID', (tester) async {
+    testWidgets('4.1 PatientTile displays actual patient name and zero ID', (tester) async {
       const patient = Patient(
         id: '1000001',
         name: 'Anil Jain',
@@ -503,7 +503,8 @@ void main() {
         ),
       );
 
-      expect(find.text('1000001'), findsOneWidget);
+      expect(find.text('1000001'), findsNothing);
+      expect(find.text('A'), findsOneWidget);
       expect(find.text('Anil Jain'), findsOneWidget);
       expect(find.text('+91 98765 43210'), findsOneWidget);
       expect(find.text('Folder auto-creates on photo capture'), findsOneWidget);
@@ -529,7 +530,7 @@ void main() {
         ),
       );
 
-      expect(find.text('1000002'), findsOneWidget);
+      expect(find.text('1000002'), findsNothing);
       expect(find.text('Name unavailable'), findsOneWidget);
     });
 
@@ -633,11 +634,11 @@ void main() {
       expect(find.text('Anil Jain'), findsOneWidget);
       expect(find.text('Shilpa Kalbhor'), findsOneWidget);
 
-      // Verify all filter chips exist: All, Name, Phone, Patient ID
+      // Verify filter chips exist: All, Name, Phone (zero Patient ID chip)
       expect(find.widgetWithText(ChoiceChip, 'All'), findsOneWidget);
       expect(find.widgetWithText(ChoiceChip, 'Name'), findsOneWidget);
       expect(find.widgetWithText(ChoiceChip, 'Phone'), findsOneWidget);
-      expect(find.widgetWithText(ChoiceChip, 'Patient ID'), findsOneWidget);
+      expect(find.widgetWithText(ChoiceChip, 'Patient ID'), findsNothing);
 
       // Enter search query "Anil"
       await tester.enterText(find.byType(TextField), 'Anil');
