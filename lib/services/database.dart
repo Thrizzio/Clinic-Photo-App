@@ -94,7 +94,7 @@ abstract class AppDatabase {
   Future<void> assignSessionToPatient({
     required String sessionId,
     required String patientId,
-    required String driveFolderId,
+    String? driveFolderId,
     Map<String, ({String fileName, String localPath})>? renamedPhotos,
   });
 
@@ -1001,9 +1001,12 @@ class SqliteAppDatabase implements AppDatabase {
   Future<void> assignSessionToPatient({
     required String sessionId,
     required String patientId,
-    required String driveFolderId,
+    String? driveFolderId,
     Map<String, ({String fileName, String localPath})>? renamedPhotos,
   }) async {
+    final hasFolder = driveFolderId != null && driveFolderId.isNotEmpty;
+    final targetStatus = hasFolder ? UploadStatus.waiting.name : UploadStatus.pending.name;
+
     await db.transaction((txn) async {
       await txn.update(
         'capture_sessions',
@@ -1025,7 +1028,7 @@ class SqliteAppDatabase implements AppDatabase {
               'drive_parent_folder_id': driveFolderId,
               'file_name': entry.value.fileName,
               'local_path': entry.value.localPath,
-              'status': UploadStatus.waiting.name,
+              'status': targetStatus,
             },
             where: 'id = ? AND session_id = ?',
             whereArgs: [entry.key, sessionId],
@@ -1038,7 +1041,7 @@ class SqliteAppDatabase implements AppDatabase {
             'patient_id': patientId,
             'drive_folder_id': driveFolderId,
             'drive_parent_folder_id': driveFolderId,
-            'status': UploadStatus.waiting.name,
+            'status': targetStatus,
           },
           where: 'session_id = ? AND (drive_file_id IS NULL OR drive_file_id = "")',
           whereArgs: [sessionId],
@@ -1046,17 +1049,19 @@ class SqliteAppDatabase implements AppDatabase {
       }
 
       // Preserve status = 'uploaded' for items that were already moved or uploaded on Drive
-      await txn.update(
-        'uploads',
-        {
-          'patient_id': patientId,
-          'drive_folder_id': driveFolderId,
-          'drive_parent_folder_id': driveFolderId,
-          'status': UploadStatus.uploaded.name,
-        },
-        where: 'session_id = ? AND drive_file_id IS NOT NULL AND drive_file_id != ""',
-        whereArgs: [sessionId],
-      );
+      if (hasFolder) {
+        await txn.update(
+          'uploads',
+          {
+            'patient_id': patientId,
+            'drive_folder_id': driveFolderId,
+            'drive_parent_folder_id': driveFolderId,
+            'status': UploadStatus.uploaded.name,
+          },
+          where: 'session_id = ? AND drive_file_id IS NOT NULL AND drive_file_id != ""',
+          whereArgs: [sessionId],
+        );
+      }
     });
   }
 
@@ -1419,9 +1424,11 @@ class InMemoryAppDatabase implements AppDatabase {
   Future<void> assignSessionToPatient({
     required String sessionId,
     required String patientId,
-    required String driveFolderId,
+    String? driveFolderId,
     Map<String, ({String fileName, String localPath})>? renamedPhotos,
   }) async {
+    final hasFolder = driveFolderId != null && driveFolderId.isNotEmpty;
+    final targetStatus = hasFolder ? UploadStatus.waiting : UploadStatus.pending;
     final session = _sessions[sessionId];
     if (session != null) {
       _sessions[sessionId] = session.copyWith(
@@ -1440,7 +1447,7 @@ class InMemoryAppDatabase implements AppDatabase {
           driveParentFolderId: driveFolderId,
           fileName: rename?.fileName,
           localPath: rename?.localPath,
-          status: isAlreadyUploaded ? UploadStatus.uploaded : UploadStatus.waiting,
+          status: isAlreadyUploaded ? UploadStatus.uploaded : targetStatus,
         );
       }
     }

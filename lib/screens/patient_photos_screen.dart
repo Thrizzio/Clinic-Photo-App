@@ -3,7 +3,9 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:googleapis/drive/v3.dart' as drive;
 import 'package:intl/intl.dart';
+import 'package:path/path.dart' as p;
 import 'package:uuid/uuid.dart';
+import '../config.dart';
 import '../models/capture_session.dart';
 import '../models/patient.dart';
 import '../models/upload_item.dart';
@@ -464,6 +466,22 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
           final existingUpload = await widget.queueService.database.getUploadByDriveFileId(fileId) ??
               await widget.queueService.database.getUploadByFileName(photo.name ?? '');
 
+          String localPath = existingUpload?.localPath ?? '';
+          if (localPath.isNotEmpty && File(localPath).existsSync()) {
+            try {
+              final basePath = await widget.queueService.getBasePath();
+              final unassignedSessionDir = Directory(
+                p.join(basePath, AppConfig.photoQueueDirName, AppConfig.unassignedDirName, sessionId),
+              );
+              if (!unassignedSessionDir.existsSync()) {
+                unassignedSessionDir.createSync(recursive: true);
+              }
+              final newLocalPath = p.join(unassignedSessionDir.path, p.basename(localPath));
+              File(localPath).renameSync(newLocalPath);
+              localPath = newLocalPath;
+            } catch (_) {}
+          }
+
           if (existingUpload != null) {
             await widget.queueService.database.updateUpload(existingUpload.copyWith(
               sessionId: sessionId,
@@ -471,6 +489,7 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
               driveFolderId: sessionFolderId,
               driveParentFolderId: sessionFolderId,
               driveFileId: fileId,
+              localPath: localPath,
               status: UploadStatus.uploaded,
             ));
           } else {
@@ -481,7 +500,7 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
               driveFolderId: sessionFolderId,
               driveParentFolderId: sessionFolderId,
               driveFileId: fileId,
-              localPath: '',
+              localPath: localPath,
               fileName: photo.name ?? 'photo.jpg',
               status: UploadStatus.uploaded,
               createdAt: photoTs,

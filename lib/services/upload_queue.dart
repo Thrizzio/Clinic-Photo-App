@@ -97,6 +97,9 @@ class UploadQueueService extends ChangeNotifier {
         (await getApplicationDocumentsDirectory()).path;
   }
 
+  /// Returns the base directory for photo storage.
+  Future<String> getBasePath() async => _getBasePath();
+
   /// Formats deterministic photo filename in authoritative Indian Standard Time (UTC+05:30):
   /// `YYYYMMDD_HHMMSS_SSS_<sequence>.jpg`
   static String formatPhotoFileName(DateTime timestamp, int sequenceNumber) {
@@ -315,10 +318,21 @@ class UploadQueueService extends ChangeNotifier {
     required String sessionId,
     required Patient patient,
   }) async {
-    if (!patient.isUploadable) {
+    if (patient.folderStatus == FolderStatus.missing ||
+        patient.folderStatus == FolderStatus.conflict) {
       throw ArgumentError(
         'Cannot assign session: Patient ${patient.id} folder status is ${patient.folderStatus.name}.',
       );
+    }
+
+    String? targetFolderId = patient.driveFolderId;
+    if ((targetFolderId == null || targetFolderId.isEmpty) && patientFolderService != null) {
+      try {
+        final res = await patientFolderService!.getOrCreatePatientFolder(patient);
+        targetFolderId = res.driveFolderId.isNotEmpty ? res.driveFolderId : res.patient.driveFolderId;
+      } catch (e) {
+        debugPrint('assignSession: Could not obtain folder for patient ${patient.id}: $e');
+      }
     }
 
     final session = await database.getSession(sessionId);
@@ -340,24 +354,31 @@ class UploadQueueService extends ChangeNotifier {
 
       // If photo already exists on Google Drive, move it server-side
       if (item.driveFileId != null && item.driveFileId!.isNotEmpty) {
+        if (targetFolderId == null || targetFolderId.isEmpty) {
+          failedPhotoIds.add(item.id);
+          lastError = 'Target patient does not have a Google Drive folder yet.';
+          debugPrint('Cannot move photo ${item.id} to patient on Drive: missing target folder');
+          continue;
+        }
+
         try {
           final client = await authService.getAuthenticatedClient();
           if (client == null) throw StateError('Google account authorization not available.');
           final sourceFolder = item.driveFolderId ?? session?.driveFolderId;
           if (sourceFolder != null &&
               sourceFolder.isNotEmpty &&
-              sourceFolder != patient.driveFolderId) {
+              sourceFolder != targetFolderId) {
             await driveService.moveFile(
               client: client,
               fileId: item.driveFileId!,
               sourceFolderId: sourceFolder,
-              targetFolderId: patient.driveFolderId!,
+              targetFolderId: targetFolderId,
             );
           }
           await database.updateUpload(item.copyWith(
             patientId: patient.id,
-            driveFolderId: patient.driveFolderId,
-            driveParentFolderId: patient.driveFolderId,
+            driveFolderId: targetFolderId,
+            driveParentFolderId: targetFolderId,
             status: UploadStatus.uploaded,
           ));
         } catch (e) {
@@ -401,7 +422,7 @@ class UploadQueueService extends ChangeNotifier {
     await database.assignSessionToPatient(
       sessionId: sessionId,
       patientId: patient.id,
-      driveFolderId: patient.driveFolderId!,
+      driveFolderId: targetFolderId,
       renamedPhotos: renamedPhotos,
     );
 
