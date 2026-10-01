@@ -7,6 +7,8 @@ import '../services/drive.dart';
 import '../services/google_auth.dart';
 import '../services/sheets.dart';
 import '../services/upload_queue.dart';
+import '../services/patient_sync_service.dart';
+import '../services/supabase_patient_service.dart';
 import 'patients_screen.dart';
 
 class ClinicSetupScreen extends StatefulWidget {
@@ -16,6 +18,7 @@ class ClinicSetupScreen extends StatefulWidget {
   final AppDatabase database;
   final UploadQueueService queueService;
   final DriveService? driveService;
+  final SupabasePatientService? supabaseService;
   final bool isReconfiguration;
 
   const ClinicSetupScreen({
@@ -26,6 +29,7 @@ class ClinicSetupScreen extends StatefulWidget {
     required this.database,
     required this.queueService,
     this.driveService,
+    this.supabaseService,
     this.isReconfiguration = false,
   });
 
@@ -221,8 +225,18 @@ class _ClinicSetupScreenState extends State<ClinicSetupScreen> {
     });
 
     try {
-      // 1. Replace local SQLite patient cache
-      await widget.database.replacePatients(_validatedPatients);
+      // 1. Reconcile patients into Supabase and SQLite without deleting doctor-created patients
+      final syncService = PatientSyncService(
+        database: widget.database,
+        supabaseService: widget.supabaseService,
+        sheetsService: widget.sheetsService,
+      );
+      await syncService.reconcileSheetPatients(_validatedPatients);
+      try {
+        await syncService.syncLocalWithSupabase();
+      } catch (e) {
+        debugPrint('Offline/error during Supabase sync in setup: $e');
+      }
 
       // 2. Persist configuration to SharedPreferences
       final now = DateTime.now();
@@ -251,6 +265,7 @@ class _ClinicSetupScreenState extends State<ClinicSetupScreen> {
               sheetsService: widget.sheetsService,
               database: widget.database,
               queueService: widget.queueService,
+              supabaseService: widget.supabaseService,
             ),
           ),
         );

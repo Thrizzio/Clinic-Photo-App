@@ -5,6 +5,7 @@ import '../services/drive.dart';
 import '../services/google_auth.dart';
 import '../services/sheets.dart';
 import '../services/upload_queue.dart';
+import '../services/supabase_patient_service.dart';
 import 'clinic_setup_screen.dart';
 import 'patients_screen.dart';
 
@@ -15,6 +16,7 @@ class WelcomeScreen extends StatefulWidget {
   final AppDatabase database;
   final UploadQueueService queueService;
   final DriveService? driveService;
+  final SupabasePatientService? supabaseService;
 
   const WelcomeScreen({
     super.key,
@@ -24,6 +26,7 @@ class WelcomeScreen extends StatefulWidget {
     required this.database,
     required this.queueService,
     this.driveService,
+    this.supabaseService,
   });
 
   @override
@@ -66,6 +69,7 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
               database: widget.database,
               queueService: widget.queueService,
               driveService: driveService,
+              supabaseService: widget.supabaseService,
             ),
           ),
         );
@@ -79,6 +83,7 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
               database: widget.database,
               queueService: widget.queueService,
               driveService: driveService,
+              supabaseService: widget.supabaseService,
             ),
           ),
         );

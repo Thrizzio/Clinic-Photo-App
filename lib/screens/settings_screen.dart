@@ -7,6 +7,8 @@ import '../services/drive.dart';
 import '../services/google_auth.dart';
 import '../services/sheets.dart';
 import '../services/upload_queue.dart';
+import '../services/patient_sync_service.dart';
+import '../services/supabase_patient_service.dart';
 import 'clinic_setup_screen.dart';
 import 'welcome_screen.dart';
 
@@ -17,6 +19,7 @@ class SettingsScreen extends StatefulWidget {
   final AppDatabase database;
   final UploadQueueService queueService;
   final DriveService? driveService;
+  final SupabasePatientService? supabaseService;
 
   const SettingsScreen({
     super.key,
@@ -26,6 +29,7 @@ class SettingsScreen extends StatefulWidget {
     required this.database,
     required this.queueService,
     this.driveService,
+    this.supabaseService,
   });
 
   @override
@@ -69,7 +73,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
         sheetName: _config.sheetTabName,
       );
 
-      await widget.database.replacePatients(result.patients);
+      final syncService = PatientSyncService(
+        database: widget.database,
+        supabaseService: widget.supabaseService,
+        sheetsService: widget.sheetsService,
+      );
+      final reconResult = await syncService.reconcileSheetPatients(result.patients);
+      try {
+        await syncService.syncLocalWithSupabase();
+      } catch (e) {
+        debugPrint('Offline/error during Supabase sync in settings: $e');
+      }
+
       final now = DateTime.now();
       await widget.configService.updateLastSync(
         now,
@@ -85,7 +100,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('✓ Full reconciliation: ${result.patients.length} patients from ${result.totalRows} rows'),
+            content: Text('✓ Full reconciliation: ${reconResult.reconciledPatients.length} patients (${reconResult.linkedExistingCount} linked, ${reconResult.createdNewCount} new) from ${result.totalRows} rows'),
             backgroundColor: Colors.green.shade800,
           ),
         );
@@ -115,6 +130,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           database: widget.database,
           queueService: widget.queueService,
           driveService: widget.driveService,
+          supabaseService: widget.supabaseService,
           isReconfiguration: true,
         ),
       ),

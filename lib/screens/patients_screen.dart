@@ -15,6 +15,8 @@ import 'patient_photos_screen.dart';
 import 'settings_screen.dart';
 import 'unassigned_photos_screen.dart';
 import '../widgets/new_patient_dialog.dart';
+import '../services/patient_sync_service.dart';
+import '../services/supabase_patient_service.dart';
 
 class PatientsScreen extends StatefulWidget {
   final GoogleAuthService authService;
@@ -23,6 +25,7 @@ class PatientsScreen extends StatefulWidget {
   final AppDatabase database;
   final UploadQueueService queueService;
   final DriveService? driveService;
+  final SupabasePatientService? supabaseService;
 
   const PatientsScreen({
     super.key,
@@ -32,6 +35,7 @@ class PatientsScreen extends StatefulWidget {
     required this.database,
     required this.queueService,
     this.driveService,
+    this.supabaseService,
   });
 
   @override
@@ -55,6 +59,11 @@ class _PatientsScreenState extends State<PatientsScreen> {
     authService: widget.authService,
     configService: widget.configService,
     database: widget.database,
+  );
+  late final PatientSyncService _patientSyncService = PatientSyncService(
+    database: widget.database,
+    supabaseService: widget.supabaseService,
+    sheetsService: widget.sheetsService,
   );
 
   @override
@@ -148,7 +157,7 @@ class _PatientsScreenState extends State<PatientsScreen> {
 
         if (incResult != null) {
           if (incResult.updatedPatients.isNotEmpty) {
-            await widget.database.upsertPatients(incResult.updatedPatients);
+            await _patientSyncService.reconcileSheetPatients(incResult.updatedPatients);
           }
           await widget.configService.updateLastSync(
             now,
@@ -161,7 +170,7 @@ class _PatientsScreenState extends State<PatientsScreen> {
             spreadsheetId: config.spreadsheetId,
             sheetName: config.sheetTabName,
           );
-          await widget.database.replacePatients(fullResult.patients);
+          await _patientSyncService.reconcileSheetPatients(fullResult.patients);
           await widget.configService.updateLastSync(
             now,
             lastSyncedRow: fullResult.totalRows,
@@ -176,15 +185,19 @@ class _PatientsScreenState extends State<PatientsScreen> {
           sheetName: config.sheetTabName,
         );
         debugPrint('FULL RECONCILIATION RESULT PATIENTS: ${fullResult.patients.length}');
-        for (final p in fullResult.patients.take(5)) {
-          debugPrint('FULL RESULT PATIENT: id=${p.id}, name="${p.name}", displayName="${p.displayName}"');
-        }
-        await widget.database.replacePatients(fullResult.patients);
+        await _patientSyncService.reconcileSheetPatients(fullResult.patients);
         await widget.configService.updateLastSync(
           now,
           lastSyncedRow: fullResult.totalRows,
           isFullSync: true,
         );
+      }
+
+      // Reconcile and push/pull any cloud updates with Supabase
+      try {
+        await _patientSyncService.syncLocalWithSupabase();
+      } catch (e) {
+        debugPrint('Offline/error during Supabase sync: $e');
       }
 
       final dbPatients = await widget.database.getPatients();
@@ -571,6 +584,7 @@ class _PatientsScreenState extends State<PatientsScreen> {
           database: widget.database,
           queueService: widget.queueService,
           driveService: widget.driveService,
+          supabaseService: widget.supabaseService,
         ),
       ),
     )
@@ -581,7 +595,11 @@ class _PatientsScreenState extends State<PatientsScreen> {
   }
 
   Future<void> _openNewPatientDialog() async {
-    final patient = await NewPatientDialog.show(context, database: widget.database);
+    final patient = await NewPatientDialog.show(
+      context,
+      database: widget.database,
+      supabaseService: widget.supabaseService,
+    );
     if (patient != null && mounted) {
       await _loadCachedPatients();
       _handleTakePhotosForPatient(patient);

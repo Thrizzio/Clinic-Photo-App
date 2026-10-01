@@ -33,9 +33,9 @@ class PatientSyncService {
 
   PatientSyncService({
     required this.database,
-    required this.supabaseService,
+    SupabasePatientService? supabaseService,
     required this.sheetsService,
-  });
+  }) : supabaseService = supabaseService ?? InMemorySupabasePatientService();
 
   /// Reconciles parsed Google Sheets patients into Supabase and SQLite.
   ///

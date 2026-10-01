@@ -2,24 +2,31 @@ import 'package:flutter/material.dart';
 import 'package:uuid/uuid.dart';
 import '../models/patient.dart';
 import '../services/database.dart';
+import '../services/supabase_patient_service.dart';
 
 class NewPatientDialog extends StatefulWidget {
   final AppDatabase database;
+  final SupabasePatientService? supabaseService;
 
   const NewPatientDialog({
     super.key,
     required this.database,
+    this.supabaseService,
   });
 
   /// Displays the dialog and returns the created or selected existing [Patient], or null if cancelled.
   static Future<Patient?> show(
     BuildContext context, {
     required AppDatabase database,
+    SupabasePatientService? supabaseService,
   }) {
     return showDialog<Patient>(
       context: context,
       barrierDismissible: false,
-      builder: (_) => NewPatientDialog(database: database),
+      builder: (_) => NewPatientDialog(
+        database: database,
+        supabaseService: supabaseService,
+      ),
     );
   }
 
@@ -114,11 +121,21 @@ class _NewPatientDialogState extends State<NewPatientDialog> {
         normalizedPhone: normPhone,
         source: PatientSource.doctorCreated,
         folderStatus: FolderStatus.missing,
+        syncStatus: 'pending_cloud',
         createdAt: now,
         updatedAt: now,
       );
 
       await widget.database.upsertPatients([newPatient]);
+
+      if (widget.supabaseService != null) {
+        try {
+          await widget.supabaseService!.upsertPatient(newPatient);
+          await widget.database.updatePatient(newPatient.copyWith(syncStatus: 'synced'));
+        } catch (e) {
+          debugPrint('Offline/error pushing new patient to Supabase: $e');
+        }
+      }
 
       if (mounted) {
         Navigator.of(context).pop(newPatient);
