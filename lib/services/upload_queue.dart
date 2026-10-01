@@ -14,6 +14,7 @@ import '../models/upload_item.dart';
 import 'database.dart';
 import 'drive.dart';
 import 'google_auth.dart';
+import 'patient_folder_service.dart';
 
 class QueueStatus {
   final int activeCount;
@@ -35,6 +36,7 @@ class UploadQueueService extends ChangeNotifier {
   final DriveService driveService;
   final Connectivity connectivity;
   final String? customDocsDirectory;
+  PatientFolderService? patientFolderService;
 
   bool _isProcessing = false;
   bool _disposed = false;
@@ -48,6 +50,7 @@ class UploadQueueService extends ChangeNotifier {
     required this.database,
     required this.authService,
     required this.driveService,
+    this.patientFolderService,
     Connectivity? connectivity,
     this.customDocsDirectory,
   }) : connectivity = connectivity ?? Connectivity() {
@@ -115,12 +118,6 @@ class UploadQueueService extends ChangeNotifier {
     DateTime? capturedAt,
     int? sequenceNumber,
   }) async {
-    if (!patient.isUploadable) {
-      throw ArgumentError(
-        'Cannot enqueue photo: Patient ${patient.id} does not have an available Drive folder.',
-      );
-    }
-
     final now = capturedAt ?? DateTime.now();
     final seq = sequenceNumber ?? 1;
     final fileName = formatPhotoFileName(now, seq);
@@ -132,7 +129,7 @@ class UploadQueueService extends ChangeNotifier {
         p.join(basePath, AppConfig.photoQueueDirName, 'patients', patient.id, sessionId),
       );
     } else {
-      queueDir = Directory(p.join(basePath, AppConfig.photoQueueDirName));
+      queueDir = Directory(p.join(basePath, AppConfig.photoQueueDirName, 'patients', patient.id));
     }
     if (!queueDir.existsSync()) {
       queueDir.createSync(recursive: true);
@@ -155,6 +152,7 @@ class UploadQueueService extends ChangeNotifier {
       tempFile.deleteSync();
     } catch (_) {}
 
+    final hasDriveFolder = patient.driveFolderId != null && patient.driveFolderId!.isNotEmpty;
     final item = UploadItem(
       id: _uuid.v4(),
       sessionId: sessionId,
@@ -162,7 +160,7 @@ class UploadQueueService extends ChangeNotifier {
       driveFolderId: patient.driveFolderId,
       localPath: localPath,
       fileName: fileName,
-      status: UploadStatus.waiting,
+      status: hasDriveFolder ? UploadStatus.waiting : UploadStatus.pending,
       retryCount: 0,
       createdAt: now,
       capturedAt: now,
@@ -540,35 +538,64 @@ class UploadQueueService extends ChangeNotifier {
 
     try {
       while (!_disposed) {
-        final item = await database.getNextPendingUpload();
-        if (item == null) break;
+        final pendingItem = await database.getNextPendingUpload();
+        if (pendingItem == null) break;
+        var currentItem = pendingItem;
 
-        final localFile = File(item.localPath);
+        final localFile = File(currentItem.localPath);
         if (!localFile.existsSync()) {
-          await database.updateUpload(item.copyWith(
+          await database.updateUpload(currentItem.copyWith(
             status: UploadStatus.failed,
-            lastError: 'Local photo file not found at ${item.localPath}',
+            lastError: 'Local photo file not found at ${currentItem.localPath}',
           ));
           _safeNotifyListeners();
           continue;
         }
 
-        if (item.driveFolderId == null || item.driveFolderId!.isEmpty) {
-          await database.updateUpload(item.copyWith(
-            status: UploadStatus.failed,
-            lastError: 'Missing Drive folder ID for upload',
-          ));
-          _safeNotifyListeners();
-          continue;
+        if (currentItem.driveFolderId == null || currentItem.driveFolderId!.isEmpty) {
+          // If patient has an ID, try to resolve Drive folder
+          if (currentItem.patientId != null) {
+            final patient = await database.getPatient(currentItem.patientId!);
+            if (patient != null) {
+              if (patient.driveFolderId != null && patient.driveFolderId!.isNotEmpty) {
+                currentItem = currentItem.copyWith(
+                  driveFolderId: patient.driveFolderId,
+                  status: UploadStatus.waiting,
+                );
+                await database.updateUpload(currentItem);
+              } else if (patientFolderService != null) {
+                try {
+                  final client = await authService.getAuthenticatedClient();
+                  if (client != null) {
+                    final res = await patientFolderService!.getOrCreatePatientFolder(patient);
+                    if (res.patient.driveFolderId != null && res.patient.driveFolderId!.isNotEmpty) {
+                      currentItem = currentItem.copyWith(
+                        driveFolderId: res.patient.driveFolderId,
+                        status: UploadStatus.waiting,
+                      );
+                      await database.updateUpload(currentItem);
+                    }
+                  }
+                } catch (e) {
+                  debugPrint('Folder creation for offline patient deferred: $e');
+                }
+              }
+            }
+          }
+
+          if (currentItem.driveFolderId == null || currentItem.driveFolderId!.isEmpty) {
+            debugPrint('Pending upload ${currentItem.id} waiting for Drive folder creation.');
+            break;
+          }
         }
 
-        await database.updateUpload(item.copyWith(status: UploadStatus.uploading));
+        await database.updateUpload(currentItem.copyWith(status: UploadStatus.uploading));
         _safeNotifyListeners();
 
         final client = await authService.getAuthenticatedClient();
         if (client == null) {
           await _handleFailure(
-            item,
+            currentItem,
             'Google account authorization not available. Please sign in.',
           );
           break;
@@ -578,42 +605,35 @@ class UploadQueueService extends ChangeNotifier {
           final driveFileId = await driveService.uploadPhoto(
             client: client,
             file: localFile,
-            folderId: item.driveFolderId!,
-            fileName: item.fileName,
+            folderId: currentItem.driveFolderId!,
+            fileName: currentItem.fileName,
           );
 
           // DRIVE CONFIRMED:
-          // 1. Delete local file
-          if (localFile.existsSync()) {
-            try {
-              localFile.deleteSync();
-            } catch (e) {
-              debugPrint('Warning: unable to delete local file: $e');
+          // In V5, local file is retained as an offline cache for instant viewing.
+          // Update SQLite record with status uploaded and drive_file_id:
+          await database.updateUpload(currentItem.copyWith(
+            status: UploadStatus.uploaded,
+            driveFileId: driveFileId,
+            lastError: null,
+          ));
+
+          // If item belonged to an unassigned session, check if session is completed
+          if (currentItem.sessionId != null) {
+            final remaining = await database.getUploadsForSession(currentItem.sessionId!);
+            final pendingInSession = remaining.where(
+              (u) => u.status != UploadStatus.uploaded,
+            ).toList();
+            if (pendingInSession.isEmpty) {
+              await database.deleteSession(currentItem.sessionId!);
             }
           }
 
-          // 2. Delete row from uploads
-          await database.deleteUpload(item.id);
-
-          // 3. If item belonged to an unassigned session, check if session is completed
-          if (item.sessionId != null) {
-            final remaining = await database.getUploadsForSession(item.sessionId!);
-            if (remaining.isEmpty) {
-              await database.deleteSession(item.sessionId!);
-              try {
-                final sessionDir = Directory(p.dirname(item.localPath));
-                if (sessionDir.existsSync()) {
-                  sessionDir.deleteSync(recursive: true);
-                }
-              } catch (_) {}
-            }
-          }
-
-          debugPrint('Upload finalized and record removed for: ${item.fileName} ($driveFileId)');
+          debugPrint('Upload finalized and marked uploaded for: ${currentItem.fileName} ($driveFileId)');
           _safeNotifyListeners();
         } catch (e) {
-          debugPrint('Upload attempt failed for ${item.fileName}: $e');
-          await _handleFailure(item, e.toString());
+          debugPrint('Upload attempt failed for ${currentItem.fileName}: $e');
+          await _handleFailure(currentItem, e.toString());
         }
       }
     } finally {

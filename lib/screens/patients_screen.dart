@@ -284,50 +284,15 @@ class _PatientsScreenState extends State<PatientsScreen> {
     Patient targetPatient = patient;
 
     if (patient.folderStatus == FolderStatus.missing) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Row(
-            children: [
-              const SizedBox(
-                width: 16,
-                height: 16,
-                child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
-              ),
-              const SizedBox(width: 12),
-              Expanded(child: Text('Setting up Drive folder for ${patient.name}...')),
-            ],
-          ),
-          duration: const Duration(seconds: 4),
-        ),
-      );
-
       try {
         final res = await _patientFolderService.getOrCreatePatientFolder(patient);
         if (res.patient.isUploadable) {
           targetPatient = res.patient;
           await widget.database.updatePatient(targetPatient);
           await _loadCachedPatients();
-        } else {
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text('Could not create folder: ${res.patient.folderStatus.name}'),
-                backgroundColor: Colors.red,
-              ),
-            );
-          }
-          return;
         }
       } catch (e) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Failed to create Drive folder: $e'),
-              backgroundColor: Colors.red,
-            ),
-          );
-        }
-        return;
+        debugPrint('Drive folder setup deferred while offline: $e');
       }
     }
 

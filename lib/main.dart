@@ -8,6 +8,7 @@ import 'services/drive.dart';
 import 'services/google_auth.dart';
 import 'services/sheets.dart';
 import 'services/upload_queue.dart';
+import 'services/patient_folder_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -18,10 +19,19 @@ void main() async {
   final sheetsService = SheetsService();
   final driveService = DriveService();
 
+  final folderService = PatientFolderService(
+    driveService: driveService,
+    sheetsService: sheetsService,
+    authService: authService,
+    configService: configService,
+    database: database,
+  );
+
   final queueService = UploadQueueService(
     database: database,
     authService: authService,
     driveService: driveService,
+    patientFolderService: folderService,
   );
 
   final config = configService.loadConfig();

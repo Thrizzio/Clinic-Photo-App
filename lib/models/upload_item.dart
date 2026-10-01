@@ -1,5 +1,6 @@
 enum UploadStatus {
   unassigned,
+  pending,
   waiting,
   uploading,
   failed,
@@ -8,6 +9,7 @@ enum UploadStatus {
   static UploadStatus fromString(String value) {
     return switch (value.toLowerCase()) {
       'unassigned' => UploadStatus.unassigned,
+      'pending' => UploadStatus.pending,
       'uploading' => UploadStatus.uploading,
       'failed' => UploadStatus.failed,
       'uploaded' => UploadStatus.uploaded,

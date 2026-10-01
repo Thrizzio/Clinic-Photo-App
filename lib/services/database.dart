@@ -1102,8 +1102,8 @@ class SqliteAppDatabase implements AppDatabase {
   Future<UploadItem?> getNextPendingUpload() async {
     final rows = await db.query(
       'uploads',
-      where: 'status = ?',
-      whereArgs: [UploadStatus.waiting.name],
+      where: 'status = ? OR status = ?',
+      whereArgs: [UploadStatus.waiting.name, UploadStatus.pending.name],
       orderBy: 'created_at ASC',
       limit: 1,
     );
@@ -1114,7 +1114,7 @@ class SqliteAppDatabase implements AppDatabase {
   @override
   Future<int> getActiveUploadsCount() async {
     final count = Sqflite.firstIntValue(await db.rawQuery(
-      "SELECT COUNT(*) FROM uploads WHERE status = 'waiting' OR status = 'uploading'",
+      "SELECT COUNT(*) FROM uploads WHERE status = 'waiting' OR status = 'uploading' OR status = 'pending'",
     ));
     return count ?? 0;
   }
@@ -1473,7 +1473,9 @@ class InMemoryAppDatabase implements AppDatabase {
   @override
   Future<UploadItem?> getNextPendingUpload() async {
     final waiting = _uploads.values
-        .where((u) => u.status == UploadStatus.waiting)
+        .where((u) =>
+            u.status == UploadStatus.waiting ||
+            u.status == UploadStatus.pending)
         .toList();
     if (waiting.isEmpty) return null;
     waiting.sort((a, b) => a.createdAt.compareTo(b.createdAt));
@@ -1485,7 +1487,8 @@ class InMemoryAppDatabase implements AppDatabase {
     return _uploads.values
         .where((u) =>
             u.status == UploadStatus.waiting ||
-            u.status == UploadStatus.uploading)
+            u.status == UploadStatus.uploading ||
+            u.status == UploadStatus.pending)
         .length;
   }
 

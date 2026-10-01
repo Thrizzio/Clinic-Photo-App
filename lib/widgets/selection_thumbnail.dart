@@ -154,6 +154,7 @@ class SelectionThumbnail extends StatelessWidget {
 
   Widget _buildStatusBadge(BuildContext context) {
     final color = switch (photo.status) {
+      UploadStatus.pending => Colors.amber.shade800,
       UploadStatus.uploading => Colors.blue,
       UploadStatus.failed => Colors.red,
       UploadStatus.waiting => Colors.orange,
