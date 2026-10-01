@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:googleapis/drive/v3.dart' as drive;
@@ -73,6 +74,8 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
   bool _isLoading = true;
   String? _errorMessage;
   final Map<String, Uint8List> _thumbnailCache = {};
+  final Map<String, UploadItem> _localUploadsByFileId = {};
+  final Map<String, UploadItem> _localUploadsByFileName = {};
 
   // Multi-selection state
   bool _isSelectionMode = false;
@@ -82,7 +85,34 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
   void initState() {
     super.initState();
     _currentPatient = widget.patient;
+    widget.queueService.addListener(_onQueueUpdated);
     _loadPhotos();
+  }
+
+  @override
+  void dispose() {
+    widget.queueService.removeListener(_onQueueUpdated);
+    super.dispose();
+  }
+
+  void _onQueueUpdated() {
+    if (mounted) {
+      _refreshLocalUploads();
+    }
+  }
+
+  Future<void> _refreshLocalUploads() async {
+    final localUploads = await widget.queueService.database.getUploadsForPatient(_currentPatient.id);
+    if (!mounted) return;
+    setState(() {
+      for (final u in localUploads) {
+        _localUploadsByFileId[u.id] = u;
+        if (u.driveFileId != null && u.driveFileId!.isNotEmpty) {
+          _localUploadsByFileId[u.driveFileId!] = u;
+        }
+        _localUploadsByFileName[u.fileName] = u;
+      }
+    });
   }
 
   void _toggleSelection(String photoId) {
@@ -126,28 +156,52 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
     });
   }
 
+  void _sortPhotos(List<drive.File> list) {
+    list.sort((a, b) {
+      final timeA = PatientPhotosScreen.parsePhotoTimestamp(a);
+      final timeB = PatientPhotosScreen.parsePhotoTimestamp(b);
+      final cmp = timeB.compareTo(timeA);
+      if (cmp != 0) return cmp;
+      return (b.name ?? '').compareTo(a.name ?? '');
+    });
+  }
+
   Future<void> _loadPhotos() async {
     setState(() {
       _isLoading = true;
       _errorMessage = null;
     });
 
-    if (_currentPatient.folderStatus == FolderStatus.missing ||
-        _currentPatient.driveFolderId == null ||
-        _currentPatient.driveFolderId!.isEmpty) {
-      if (mounted) {
-        setState(() {
-          _photos = [];
-          _isLoading = false;
-        });
+    // 1. Immediately load local uploads from SQLite cache
+    final localUploads = await widget.queueService.database.getUploadsForPatient(_currentPatient.id);
+    for (final u in localUploads) {
+      _localUploadsByFileId[u.id] = u;
+      if (u.driveFileId != null && u.driveFileId!.isNotEmpty) {
+        _localUploadsByFileId[u.driveFileId!] = u;
       }
-      return;
+      _localUploadsByFileName[u.fileName] = u;
+    }
+
+    final localPhotos = localUploads.map((u) => drive.File(
+      id: u.driveFileId ?? u.id,
+      name: u.fileName,
+      createdTime: u.capturedAt,
+    )).toList();
+
+    _sortPhotos(localPhotos);
+
+    if (mounted) {
+      setState(() {
+        _photos = localPhotos;
+        if (localPhotos.isNotEmpty) {
+          _isLoading = false;
+        }
+      });
     }
 
     if (_currentPatient.folderStatus == FolderStatus.conflict) {
       if (mounted) {
         setState(() {
-          _photos = [];
           _isLoading = false;
           _errorMessage =
               'Multiple Google Drive folders found across visits for this patient. '
@@ -157,43 +211,70 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
       return;
     }
 
+    if (_currentPatient.driveFolderId == null || _currentPatient.driveFolderId!.isEmpty) {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
+      return;
+    }
+
+    // 2. Fetch remote photos from Google Drive in background and reconcile
     try {
       final client = await widget.authService.getAuthenticatedClient();
       if (client == null) {
         if (mounted) {
           setState(() {
             _isLoading = false;
-            _errorMessage = 'Google authorization required. Please sign in to view Drive photos.';
+            if (_photos.isEmpty) {
+              _errorMessage = 'Google authorization required. Please sign in to view Drive photos.';
+            }
           });
         }
         return;
       }
 
-      final photos = await widget.driveService.listPatientPhotos(
+      final remotePhotos = await widget.driveService.listPatientPhotos(
         client: client,
         folderId: _currentPatient.driveFolderId!,
       );
 
-      // Deterministic descending sort by IST timestamp (newest first)
-      photos.sort((a, b) {
-        final timeA = PatientPhotosScreen.parsePhotoTimestamp(a);
-        final timeB = PatientPhotosScreen.parsePhotoTimestamp(b);
-        final cmp = timeB.compareTo(timeA);
-        if (cmp != 0) return cmp;
-        return (b.name ?? '').compareTo(a.name ?? '');
-      });
+      final mergedMap = <String, drive.File>{};
+      for (final p in localPhotos) {
+        final key = p.name ?? p.id ?? '';
+        if (key.isNotEmpty) mergedMap[key] = p;
+      }
+      for (final p in remotePhotos) {
+        final key = p.name ?? p.id ?? '';
+        if (key.isNotEmpty) {
+          mergedMap[key] = p;
+          if (p.id != null) {
+            final local = _localUploadsByFileName[p.name];
+            if (local != null) {
+              _localUploadsByFileId[p.id!] = local;
+            }
+          }
+        }
+      }
+
+      final combined = mergedMap.values.toList();
+      _sortPhotos(combined);
 
       if (mounted) {
         setState(() {
-          _photos = photos;
+          _photos = combined;
           _isLoading = false;
         });
       }
     } catch (e) {
+      debugPrint('Background Drive photo sync failed: $e');
       if (mounted) {
         setState(() {
           _isLoading = false;
-          _errorMessage = 'Failed to load photos from Google Drive: $e';
+          if (_photos.isEmpty) {
+            _errorMessage = 'Failed to load photos from Google Drive: $e';
+          }
         });
       }
     }
@@ -202,56 +283,29 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
   Future<void> _handleTakePhotos() async {
     Patient patientToCapture = _currentPatient;
 
-    if (!patientToCapture.isUploadable) {
-      if (patientToCapture.folderStatus == FolderStatus.conflict) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Cannot capture photos: conflicting Drive folders in Visits sheet.'),
-            backgroundColor: Colors.red,
-          ),
-        );
-        return;
-      }
+    if (patientToCapture.folderStatus == FolderStatus.conflict) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Cannot capture photos: conflicting Drive folders in Visits sheet.'),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
 
-      if (widget.folderService != null) {
-        setState(() {
-          _isLoading = true;
-        });
-        try {
-          final res = await widget.folderService!.getOrCreatePatientFolder(patientToCapture);
-          if (res.patient.isUploadable) {
-            patientToCapture = res.patient;
-            if (mounted) {
-              setState(() {
-                _currentPatient = patientToCapture;
-                _isLoading = false;
-              });
-            }
-          } else {
-            if (mounted) {
-              setState(() {
-                _isLoading = false;
-              });
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                  content: Text('Could not create folder: ${res.patient.folderStatus.name}'),
-                  backgroundColor: Colors.red,
-                ),
-              );
-            }
-            return;
-          }
-        } catch (e) {
+    if (patientToCapture.folderStatus == FolderStatus.missing && widget.folderService != null) {
+      try {
+        final res = await widget.folderService!.getOrCreatePatientFolder(patientToCapture);
+        if (res.patient.isUploadable) {
+          patientToCapture = res.patient;
           if (mounted) {
             setState(() {
-              _isLoading = false;
+              _currentPatient = patientToCapture;
             });
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text('Folder creation failed: $e'), backgroundColor: Colors.red),
-            );
           }
-          return;
         }
+      } catch (e) {
+        debugPrint('Drive folder setup deferred while offline: $e');
       }
     }
 
@@ -269,9 +323,23 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
     _loadPhotos();
   }
 
-  Future<Uint8List?> _fetchThumbnailBytes(String fileId) async {
+  Future<Uint8List?> _fetchThumbnailBytes(String fileId, [String? fileName]) async {
     if (_thumbnailCache.containsKey(fileId)) {
       return _thumbnailCache[fileId];
+    }
+
+    // Check local disk cache first
+    final upload = _localUploadsByFileId[fileId] ??
+        (fileName != null ? _localUploadsByFileName[fileName] : null);
+    if (upload != null) {
+      final localFile = File(upload.localPath);
+      if (localFile.existsSync()) {
+        try {
+          final bytes = await localFile.readAsBytes();
+          _thumbnailCache[fileId] = bytes;
+          return bytes;
+        } catch (_) {}
+      }
     }
 
     try {
@@ -723,7 +791,7 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
       return const Center(child: CircularProgressIndicator());
     }
 
-    if (_errorMessage != null) {
+    if (_errorMessage != null && _photos.isEmpty) {
       return Center(
         child: Padding(
           padding: const EdgeInsets.all(24.0),
@@ -749,68 +817,69 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
       );
     }
 
-    if (_currentPatient.folderStatus == FolderStatus.missing ||
-        _currentPatient.driveFolderId == null ||
-        _currentPatient.driveFolderId!.isEmpty) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24.0),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(Icons.folder_open_outlined, size: 56, color: Colors.blueGrey.shade300),
-              const SizedBox(height: 16),
-              const Text(
-                'No photos yet',
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                'Google Drive folder will be automatically created when the first photo is taken.',
-                textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 14, color: theme.colorScheme.onSurfaceVariant),
-              ),
-              const SizedBox(height: 24),
-              FilledButton.icon(
-                onPressed: _handleTakePhotos,
-                icon: const Icon(Icons.camera_alt),
-                label: const Text('Take First Photo'),
-              ),
-            ],
-          ),
-        ),
-      );
-    }
-
     if (_photos.isEmpty) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24.0),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(Icons.photo_library_outlined, size: 56, color: Colors.grey.shade400),
-              const SizedBox(height: 16),
-              const Text(
-                'No photos found in patient folder',
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                'Photos captured for this patient will appear here once uploaded.',
-                textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 14, color: theme.colorScheme.onSurfaceVariant),
-              ),
-              const SizedBox(height: 24),
-              FilledButton.icon(
-                onPressed: _handleTakePhotos,
-                icon: const Icon(Icons.camera_alt),
-                label: const Text('Take Photos'),
-              ),
-            ],
+      final isMissingFolder = _currentPatient.folderStatus == FolderStatus.missing ||
+          _currentPatient.driveFolderId == null ||
+          _currentPatient.driveFolderId!.isEmpty;
+      if (isMissingFolder) {
+        return Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24.0),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(Icons.folder_open_outlined, size: 56, color: Colors.blueGrey.shade300),
+                const SizedBox(height: 16),
+                const Text(
+                  'No photos yet',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Google Drive folder will be automatically created when the first photo is taken.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 14, color: theme.colorScheme.onSurfaceVariant),
+                ),
+                const SizedBox(height: 24),
+                FilledButton.icon(
+                  onPressed: _handleTakePhotos,
+                  icon: const Icon(Icons.camera_alt),
+                  label: const Text('Take First Photo'),
+                ),
+              ],
+            ),
           ),
-        ),
-      );
+        );
+      } else {
+        return Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24.0),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(Icons.photo_library_outlined, size: 56, color: Colors.grey.shade400),
+                const SizedBox(height: 16),
+                const Text(
+                  'No photos found in patient folder',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Photos captured for this patient will appear here once uploaded.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 14, color: theme.colorScheme.onSurfaceVariant),
+                ),
+                const SizedBox(height: 24),
+                FilledButton.icon(
+                  onPressed: _handleTakePhotos,
+                  icon: const Icon(Icons.camera_alt),
+                  label: const Text('Take Photos'),
+                ),
+              ],
+            ),
+          ),
+        );
+      }
     }
 
     return GridView.builder(
@@ -826,6 +895,8 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
         final fileId = photo.id;
         final dateStr = PatientPhotosScreen.formatPhotoGridTimestamp(photo);
         final isSelected = fileId != null && _selectedPhotoIds.contains(fileId);
+        final upload = (fileId != null ? _localUploadsByFileId[fileId] : null) ??
+            _localUploadsByFileName[photo.name ?? ''];
 
         return InkWell(
           onTap: () {
@@ -868,7 +939,7 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
                       fileId == null
                           ? Container(color: Colors.grey.shade300)
                           : FutureBuilder<Uint8List?>(
-                              future: _fetchThumbnailBytes(fileId),
+                              future: _fetchThumbnailBytes(fileId, photo.name),
                               builder: (ctx, snapshot) {
                                 if (snapshot.connectionState == ConnectionState.waiting &&
                                     !_thumbnailCache.containsKey(fileId)) {
@@ -895,6 +966,33 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
                   ),
                 ),
               ),
+              if (upload != null)
+                Positioned(
+                  top: 6,
+                  left: 6,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: switch (upload.status) {
+                        UploadStatus.pending => Colors.amber.shade800,
+                        UploadStatus.uploading => Colors.blue.shade700,
+                        UploadStatus.failed => Colors.red.shade700,
+                        UploadStatus.uploaded => Colors.green.shade700,
+                        _ => Colors.orange.shade700,
+                      }.withValues(alpha: 0.9),
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: Text(
+                      upload.status.name.toUpperCase(),
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 8,
+                        fontWeight: FontWeight.bold,
+                        letterSpacing: 0.5,
+                      ),
+                    ),
+                  ),
+                ),
               if (dateStr.isNotEmpty)
                 Positioned(
                   left: 0,
