@@ -170,4 +170,33 @@ class PatientSyncService {
 
     return reconcileSheetPatients(sheetResult.patients);
   }
+
+  /// Synchronizes canonical patients between Supabase and local SQLite cache:
+  /// 1. Pushes any locally created/updated patients marked 'pending_cloud' to Supabase.
+  /// 2. Pulls all canonical patients from Supabase and caches them in SQLite.
+  Future<void> syncLocalWithSupabase() async {
+    // 1. Push pending local patients to Supabase
+    final localPatients = await database.getPatients();
+    final pending = localPatients.where((p) => p.syncStatus == 'pending_cloud').toList();
+
+    for (final patient in pending) {
+      try {
+        await supabaseService.upsertPatient(patient);
+        final synced = patient.copyWith(syncStatus: 'synced');
+        await database.updatePatient(synced);
+      } catch (e) {
+        debugPrint('Failed to push patient ${patient.id} to Supabase: $e');
+      }
+    }
+
+    // 2. Pull canonical patients from Supabase to SQLite
+    try {
+      final cloudPatients = await supabaseService.fetchAllPatients();
+      if (cloudPatients.isNotEmpty) {
+        await database.upsertPatients(cloudPatients);
+      }
+    } catch (e) {
+      debugPrint('Failed to fetch patients from Supabase: $e');
+    }
+  }
 }
