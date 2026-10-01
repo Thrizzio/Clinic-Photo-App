@@ -61,6 +61,9 @@ class Patient {
   /// Record last update timestamp.
   final DateTime? updatedAt;
 
+  /// Local sync status: 'synced', 'pending_cloud', or 'failed_cloud'.
+  final String syncStatus;
+
   const Patient({
     required this.id,
     String? name,
@@ -76,6 +79,7 @@ class Patient {
     this.folderStatus = FolderStatus.available,
     this.createdAt,
     this.updatedAt,
+    this.syncStatus = 'synced',
   })  : _name = displayName ?? name ?? '',
         // ignore: prefer_initializing_formals
         _normalizedName = normalizedName,
@@ -337,6 +341,7 @@ class Patient {
       'folder_status': folderStatus.name,
       'created_at': createdIso,
       'updated_at': updatedIso,
+      'sync_status': syncStatus,
       // Legacy backward-compatibility columns
       'name': _name,
       'phone_number': cleanP,
@@ -355,6 +360,7 @@ class Patient {
     final rawSource = (map['source'] as String?) ?? 'clinic_sheet';
     final legacyId = (map['legacy_patient_id'] as String?) ??
         ((map['id'] != null && !map['id'].toString().contains('-')) ? map['id'].toString() : null);
+    final syncStat = (map['sync_status'] as String?) ?? 'synced';
 
     return Patient(
       id: ((map['id'] ?? map['patient_id']) as String?) ?? '',
@@ -369,6 +375,7 @@ class Patient {
       folderStatus: FolderStatus.fromString(map['folder_status'] as String? ?? 'available'),
       createdAt: map['created_at'] != null ? DateTime.tryParse(map['created_at'] as String) : null,
       updatedAt: map['updated_at'] != null ? DateTime.tryParse(map['updated_at'] as String) : null,
+      syncStatus: syncStat,
     );
   }
 
@@ -385,6 +392,7 @@ class Patient {
     FolderStatus? folderStatus,
     DateTime? createdAt,
     DateTime? updatedAt,
+    String? syncStatus,
     // Legacy parameter aliases
     String? phoneNumber,
     String? phoneNumberNormalized,
@@ -404,6 +412,7 @@ class Patient {
       folderStatus: folderStatus ?? this.folderStatus,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
+      syncStatus: syncStatus ?? this.syncStatus,
     );
   }
 

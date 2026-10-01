@@ -45,6 +45,25 @@ abstract class AppDatabase {
     SearchFilterMode mode = SearchFilterMode.all,
   });
 
+  /// Links an external source ID (e.g. 'google_sheets' -> '1000048') to a patient UUID.
+  Future<void> linkPatientSource({
+    required String patientId,
+    required String source,
+    required String externalId,
+  });
+
+  /// Resolves a patient UUID given an external source identifier.
+  Future<String?> getPatientIdBySource({
+    required String source,
+    required String externalId,
+  });
+
+  /// Gets all source mappings for a patient UUID.
+  Future<List<Map<String, String>>> getSourcesForPatient(String patientId);
+
+  /// Gets all uploads (local photo records) belonging to a given patient.
+  Future<List<UploadItem>> getUploadsForPatient(String patientId);
+
   // --- Capture Sessions Operations ---
 
   /// Inserts a new capture session.
@@ -147,7 +166,7 @@ abstract class AppDatabase {
 /// SQLite-backed production database implementation for Android.
 class SqliteAppDatabase implements AppDatabase {
   static const String _dbName = 'clinic_photos.db';
-  static const int _dbVersion = 7;
+  static const int _dbVersion = 8;
 
   final Database db;
 
@@ -178,6 +197,7 @@ class SqliteAppDatabase implements AppDatabase {
               folder_status TEXT NOT NULL,
               created_at TEXT NOT NULL,
               updated_at TEXT,
+              sync_status TEXT DEFAULT 'synced',
               name TEXT,
               phone_number TEXT,
               phone_number_normalized TEXT
@@ -232,6 +252,22 @@ class SqliteAppDatabase implements AppDatabase {
           await db.execute(
             'CREATE INDEX IF NOT EXISTS idx_uploads_session_id ON uploads(session_id)',
           );
+          await db.execute('''
+            CREATE TABLE IF NOT EXISTS patient_sources (
+              id TEXT PRIMARY KEY,
+              patient_id TEXT NOT NULL,
+              source TEXT NOT NULL,
+              external_id TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              FOREIGN KEY (patient_id) REFERENCES patients(id) ON DELETE CASCADE
+            )
+          ''');
+          await db.execute(
+            'CREATE INDEX IF NOT EXISTS idx_patient_sources_patient_id ON patient_sources(patient_id)',
+          );
+          await db.execute(
+            'CREATE INDEX IF NOT EXISTS idx_patient_sources_source_ext ON patient_sources(source, external_id)',
+          );
         },
         onUpgrade: (db, oldVersion, newVersion) async {
           if (oldVersion < 2) {
@@ -248,10 +284,15 @@ class SqliteAppDatabase implements AppDatabase {
           if (oldVersion < 7) {
             await _migrateToV7(db);
           }
+
+          if (oldVersion < 8) {
+            await _migrateToV8(db);
+          }
         },
         onOpen: (db) async {
           // Ensure schema compatibility on existing databases
           await _migrateToV7(db);
+          await _migrateToV8(db);
           await _ensureUploadsTableSchema(db);
 
           // Crash recovery: Any upload that was interrupted in 'uploading'
@@ -546,6 +587,67 @@ class SqliteAppDatabase implements AppDatabase {
     }
   }
 
+  /// Migrates older database versions to Schema v8:
+  /// - Ensures sync_status column exists in patients table
+  /// - Creates patient_sources table for mapping external IDs to canonical UUIDs
+  /// - Migrates existing legacy_patient_id records into patient_sources
+  static Future<void> _migrateToV8(Database db) async {
+    final patientInfo = await db.rawQuery("PRAGMA table_info(patients)");
+    if (patientInfo.isNotEmpty) {
+      final hasSyncStatus = patientInfo.any((c) => c['name'] == 'sync_status');
+      if (!hasSyncStatus) {
+        try {
+          await db.execute("ALTER TABLE patients ADD COLUMN sync_status TEXT DEFAULT 'synced'");
+        } catch (_) {}
+      }
+    }
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS patient_sources (
+        id TEXT PRIMARY KEY,
+        patient_id TEXT NOT NULL,
+        source TEXT NOT NULL,
+        external_id TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      )
+    ''');
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_patient_sources_patient_id ON patient_sources(patient_id)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_patient_sources_source_ext ON patient_sources(source, external_id)',
+    );
+
+    final legacyPatients = await db.query(
+      'patients',
+      columns: ['id', 'legacy_patient_id', 'created_at'],
+      where: "legacy_patient_id IS NOT NULL AND legacy_patient_id != ''",
+    );
+    const uuidGen = Uuid();
+    for (final row in legacyPatients) {
+      final pId = row['id']?.toString() ?? '';
+      final legId = row['legacy_patient_id']?.toString() ?? '';
+      final createdAt = row['created_at']?.toString() ?? DateTime.now().toIso8601String();
+      if (pId.isNotEmpty && legId.isNotEmpty) {
+        final existing = await db.query(
+          'patient_sources',
+          where: 'source = ? AND external_id = ?',
+          whereArgs: ['google_sheets', legId],
+          limit: 1,
+        );
+        if (existing.isEmpty) {
+          await db.insert('patient_sources', {
+            'id': uuidGen.v4(),
+            'patient_id': pId,
+            'source': 'google_sheets',
+            'external_id': legId,
+            'created_at': createdAt,
+          });
+        }
+      }
+    }
+  }
+
   // --- Patients Cache Operations ---
 
   @override
@@ -628,6 +730,22 @@ class SqliteAppDatabase implements AppDatabase {
       return Patient.fromMap(rows.first);
     }
 
+    // Lookup by source mapping (e.g. Google Sheets external ID)
+    final sourceRows = await db.query(
+      'patient_sources',
+      columns: ['patient_id'],
+      where: 'external_id = ?',
+      whereArgs: [id],
+      limit: 1,
+    );
+    if (sourceRows.isNotEmpty) {
+      final pId = sourceRows.first['patient_id']?.toString();
+      if (pId != null) {
+        final p = await getPatient(pId);
+        if (p != null) return p;
+      }
+    }
+
     // Fallback for lookup by legacy spreadsheet ID
     final legacyRows = await db.query(
       'patients',
@@ -640,6 +758,79 @@ class SqliteAppDatabase implements AppDatabase {
     }
 
     return null;
+  }
+
+  @override
+  Future<void> linkPatientSource({
+    required String patientId,
+    required String source,
+    required String externalId,
+  }) async {
+    final existing = await db.query(
+      'patient_sources',
+      where: 'source = ? AND external_id = ?',
+      whereArgs: [source, externalId],
+      limit: 1,
+    );
+    if (existing.isNotEmpty) {
+      await db.update(
+        'patient_sources',
+        {'patient_id': patientId},
+        where: 'source = ? AND external_id = ?',
+        whereArgs: [source, externalId],
+      );
+    } else {
+      await db.insert('patient_sources', {
+        'id': const Uuid().v4(),
+        'patient_id': patientId,
+        'source': source,
+        'external_id': externalId,
+        'created_at': DateTime.now().toIso8601String(),
+      });
+    }
+  }
+
+  @override
+  Future<String?> getPatientIdBySource({
+    required String source,
+    required String externalId,
+  }) async {
+    final rows = await db.query(
+      'patient_sources',
+      columns: ['patient_id'],
+      where: 'source = ? AND external_id = ?',
+      whereArgs: [source, externalId],
+      limit: 1,
+    );
+    if (rows.isNotEmpty) {
+      return rows.first['patient_id']?.toString();
+    }
+    return null;
+  }
+
+  @override
+  Future<List<Map<String, String>>> getSourcesForPatient(String patientId) async {
+    final rows = await db.query(
+      'patient_sources',
+      columns: ['source', 'external_id'],
+      where: 'patient_id = ?',
+      whereArgs: [patientId],
+    );
+    return rows.map((r) => {
+      'source': r['source']?.toString() ?? '',
+      'external_id': r['external_id']?.toString() ?? '',
+    }).toList();
+  }
+
+  @override
+  Future<List<UploadItem>> getUploadsForPatient(String patientId) async {
+    final rows = await db.query(
+      'uploads',
+      where: 'patient_id = ?',
+      whereArgs: [patientId],
+      orderBy: 'captured_at DESC, created_at DESC',
+    );
+    return rows.map(UploadItem.fromMap).toList();
   }
 
   @override
@@ -991,6 +1182,8 @@ class InMemoryAppDatabase implements AppDatabase {
   final Map<String, Patient> _patients = {};
   final Map<String, CaptureSession> _sessions = {};
   final Map<String, UploadItem> _uploads = {};
+  final Map<String, String> _sourceToPatientId = {};
+  final Map<String, List<({String source, String externalId})>> _patientSources = {};
 
   InMemoryAppDatabase({
     Map<String, Patient>? initialPatients,
@@ -1070,12 +1263,51 @@ class InMemoryAppDatabase implements AppDatabase {
     if (_patients.containsKey(id)) {
       return _patients[id];
     }
+    // Lookup by source mapping (e.g. Google Sheets external ID)
+    final pId = _sourceToPatientId['google_sheets:$id'] ??
+        _sourceToPatientId.entries.firstWhere((e) => e.key.endsWith(':$id'), orElse: () => const MapEntry('', '')).value;
+    if (pId.isNotEmpty && _patients.containsKey(pId)) {
+      return _patients[pId];
+    }
     for (final p in _patients.values) {
       if (p.legacyPatientId == id) {
         return p;
       }
     }
     return null;
+  }
+
+  @override
+  Future<void> linkPatientSource({
+    required String patientId,
+    required String source,
+    required String externalId,
+  }) async {
+    _sourceToPatientId['$source:$externalId'] = patientId;
+    final list = _patientSources.putIfAbsent(patientId, () => []);
+    list.removeWhere((item) => item.source == source && item.externalId == externalId);
+    list.add((source: source, externalId: externalId));
+  }
+
+  @override
+  Future<String?> getPatientIdBySource({
+    required String source,
+    required String externalId,
+  }) async {
+    return _sourceToPatientId['$source:$externalId'];
+  }
+
+  @override
+  Future<List<Map<String, String>>> getSourcesForPatient(String patientId) async {
+    final list = _patientSources[patientId] ?? [];
+    return list.map((s) => {'source': s.source, 'external_id': s.externalId}).toList();
+  }
+
+  @override
+  Future<List<UploadItem>> getUploadsForPatient(String patientId) async {
+    final list = _uploads.values.where((u) => u.patientId == patientId).toList();
+    list.sort((a, b) => b.capturedAt.compareTo(a.capturedAt));
+    return list;
   }
 
   @override
