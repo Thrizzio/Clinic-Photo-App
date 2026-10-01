@@ -29,4 +29,15 @@ abstract final class AppConfig {
   /// Private app-specific folders for queued and unassigned clinical photos.
   static const String photoQueueDirName = 'photo_queue';
   static const String unassignedDirName = 'unassigned';
+
+  /// Supabase project credentials.
+  /// Configurable via compile-time `--dart-define` or app settings.
+  static const String defaultSupabaseUrl = String.fromEnvironment(
+    'SUPABASE_URL',
+    defaultValue: 'https://xyzcompany.supabase.co',
+  );
+  static const String defaultSupabaseAnonKey = String.fromEnvironment(
+    'SUPABASE_ANON_KEY',
+    defaultValue: 'public-anon-key-placeholder',
+  );
 }
