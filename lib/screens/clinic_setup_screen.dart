@@ -7,7 +7,6 @@ import '../services/drive.dart';
 import '../services/google_auth.dart';
 import '../services/sheets.dart';
 import '../services/upload_queue.dart';
-import '../services/patient_sync_service.dart';
 import '../services/supabase_patient_service.dart';
 import '../services/supabase_auth_service.dart';
 import 'patients_screen.dart';
@@ -228,17 +227,21 @@ class _ClinicSetupScreenState extends State<ClinicSetupScreen> {
     });
 
     try {
-      // 1. Reconcile patients into Supabase and SQLite without deleting doctor-created patients
-      final syncService = PatientSyncService(
-        database: widget.database,
-        supabaseService: widget.supabaseService,
-        sheetsService: widget.sheetsService,
-      );
-      await syncService.reconcileSheetPatients(_validatedPatients);
-      try {
-        await syncService.syncLocalWithSupabase();
-      } catch (e) {
-        debugPrint('Offline/error during Supabase sync in setup: $e');
+      // 1. Persist validated patients and external Sheet source mappings to local SQLite
+      final localPatients = _validatedPatients.map((p) => p.copyWith(
+        syncStatus: 'pending_cloud',
+      )).toList();
+      await widget.database.upsertPatients(localPatients);
+
+      for (final p in localPatients) {
+        final sheetId = (p.legacyPatientId != null && p.legacyPatientId!.isNotEmpty)
+            ? p.legacyPatientId!
+            : p.id;
+        await widget.database.linkPatientSource(
+          patientId: p.id,
+          source: 'google_sheets',
+          externalId: sheetId,
+        );
       }
 
       // 2. Persist configuration to SharedPreferences
@@ -268,6 +271,7 @@ class _ClinicSetupScreenState extends State<ClinicSetupScreen> {
               sheetsService: widget.sheetsService,
               database: widget.database,
               queueService: widget.queueService,
+              driveService: _driveService,
               supabaseService: widget.supabaseService,
               supabaseAuthService: widget.supabaseAuthService,
             ),

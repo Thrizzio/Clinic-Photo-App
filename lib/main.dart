@@ -43,11 +43,6 @@ void main() async {
         client: client,
         configService: configService,
       );
-      try {
-        await supabaseAuthService.ensureAuthenticated();
-      } catch (authErr) {
-        debugPrint('Supabase auto-auth notice: $authErr');
-      }
       supabaseService = SupabasePatientService.live(client);
     }
   } catch (e) {
@@ -73,7 +68,18 @@ void main() async {
 
   // If already set up, attempt silent sign-in and resume pending uploads
   if (config.hasCompletedSetup) {
-    await authService.signInSilently();
+    final account = await authService.signInSilently();
+    if (account != null && supabaseAuthService != null && !supabaseAuthService.isAuthenticated) {
+      final auth = account.authentication;
+      final idToken = auth.idToken;
+      if (idToken != null && idToken.isNotEmpty) {
+        try {
+          await supabaseAuthService.signInWithGoogle(idToken: idToken);
+        } catch (e) {
+          debugPrint('Silent Supabase auth notice: $e');
+        }
+      }
+    }
     // Wake up queue processor in background to resume any pending uploads
     queueService.processQueue();
   }

@@ -58,6 +58,17 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
         return;
       }
 
+      // Establish authenticated Supabase session using the Google ID token
+      if (widget.supabaseAuthService != null) {
+        final auth = account.authentication;
+        final idToken = auth.idToken;
+        if (idToken == null || idToken.isEmpty) {
+          throw Exception('Google Sign-In succeeded, but no Google ID token was provided.');
+        }
+
+        await widget.supabaseAuthService!.signInWithGoogle(idToken: idToken);
+      }
+
       if (!mounted) return;
 
       final config = widget.configService.loadConfig();

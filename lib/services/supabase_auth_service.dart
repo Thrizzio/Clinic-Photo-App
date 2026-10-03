@@ -29,6 +29,28 @@ class SupabaseAuthService {
   /// Stream of authentication state changes.
   Stream<AuthState> get authStateChanges => client.auth.onAuthStateChange;
 
+  /// Signs in to Supabase using a Google ID token obtained from Google Sign-In.
+  ///
+  /// Verifies that Supabase establishes an authenticated session and currentUser.
+  /// Fails explicitly if the session cannot be created.
+  Future<AuthResponse> signInWithGoogle({
+    required String idToken,
+    String? accessToken,
+  }) async {
+    final response = await client.auth.signInWithIdToken(
+      provider: OAuthProvider.google,
+      idToken: idToken,
+      accessToken: accessToken,
+    );
+
+    if (response.session == null || response.user == null) {
+      throw const AuthException('Failed to establish Supabase session with Google credentials.');
+    }
+
+    debugPrint('SupabaseAuthService: Successfully authenticated via Google ID token as ${response.user?.email} (${response.user?.id})');
+    return response;
+  }
+
   /// Signs in an existing clinic doctor account with email and password.
   Future<AuthResponse> signIn({
     required String email,
