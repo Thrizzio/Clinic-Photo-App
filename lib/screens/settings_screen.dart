@@ -9,6 +9,8 @@ import '../services/sheets.dart';
 import '../services/upload_queue.dart';
 import '../services/patient_sync_service.dart';
 import '../services/supabase_patient_service.dart';
+import '../services/supabase_auth_service.dart';
+import '../config.dart';
 import 'clinic_setup_screen.dart';
 import 'welcome_screen.dart';
 
@@ -20,6 +22,7 @@ class SettingsScreen extends StatefulWidget {
   final UploadQueueService queueService;
   final DriveService? driveService;
   final SupabasePatientService? supabaseService;
+  final SupabaseAuthService? supabaseAuthService;
 
   const SettingsScreen({
     super.key,
@@ -30,6 +33,7 @@ class SettingsScreen extends StatefulWidget {
     required this.queueService,
     this.driveService,
     this.supabaseService,
+    this.supabaseAuthService,
   });
 
   @override
@@ -78,11 +82,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
         supabaseService: widget.supabaseService,
         sheetsService: widget.sheetsService,
       );
+      if (widget.supabaseAuthService != null) {
+        try {
+          await widget.supabaseAuthService!.ensureAuthenticated();
+        } catch (authErr) {
+          debugPrint('Notice before sync: $authErr');
+        }
+      }
       final reconResult = await syncService.reconcileSheetPatients(result.patients);
+      String? syncNotice;
       try {
         await syncService.syncLocalWithSupabase();
       } catch (e) {
-        debugPrint('Offline/error during Supabase sync in settings: $e');
+        syncNotice = PatientSyncService.formatSupabaseError(e);
+        debugPrint('Offline/error during Supabase sync in settings: $syncNotice');
       }
 
       final now = DateTime.now();
@@ -98,12 +111,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
       });
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('✓ Full reconciliation: ${reconResult.reconciledPatients.length} patients (${reconResult.linkedExistingCount} linked, ${reconResult.createdNewCount} new) from ${result.totalRows} rows'),
-            backgroundColor: Colors.green.shade800,
-          ),
-        );
+        final hasCloudIssue = syncNotice != null || !reconResult.isSupabaseSynced;
+        if (hasCloudIssue) {
+          final errDetail = syncNotice ?? reconResult.supabaseError ?? 'Supabase table verified empty (0 rows synced)';
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('⚠️ Local cache updated (${reconResult.reconciledPatients.length} patients), but Supabase sync failed:\n$errDetail'),
+              backgroundColor: Colors.orange.shade900,
+              duration: const Duration(seconds: 8),
+            ),
+          );
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('✓ Full reconciliation: ${reconResult.reconciledPatients.length} patients (${reconResult.linkedExistingCount} linked, ${reconResult.createdNewCount} new) from ${result.totalRows} rows.\nCloud verified: ${reconResult.cloudPatientCount} patients in Supabase.'),
+              backgroundColor: Colors.green.shade800,
+            ),
+          );
+        }
       }
     } catch (e) {
       setState(() {
@@ -439,10 +464,237 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
             ),
           ),
+          const SizedBox(height: 20),
+
+          // 5. Clinic Cloud Database Section (Supabase)
+          _buildSectionHeader(
+            theme,
+            icon: Icons.cloud_sync_outlined,
+            title: 'Clinic Cloud Database (Supabase)',
+            subtitle: 'PostgreSQL canonical patient identity & multi-device sync',
+          ),
+          Builder(
+            builder: (context) {
+              final isSupabaseAuth = widget.supabaseAuthService?.isAuthenticated ?? false;
+              final supabaseEmail = widget.supabaseAuthService?.currentEmail;
+
+              return Card(
+                elevation: 0,
+                color: theme.colorScheme.surfaceContainerLow,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  side: BorderSide(
+                    color: theme.colorScheme.outlineVariant.withValues(alpha: 0.5),
+                  ),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: CircleAvatar(
+                          backgroundColor: isSupabaseAuth
+                              ? Colors.teal.shade100
+                              : theme.colorScheme.errorContainer,
+                          child: Icon(
+                            isSupabaseAuth ? Icons.verified_user : Icons.lock_outline,
+                            color: isSupabaseAuth ? Colors.teal.shade900 : theme.colorScheme.error,
+                          ),
+                        ),
+                        title: Text(
+                          isSupabaseAuth
+                              ? (supabaseEmail ?? 'Authenticated Doctor')
+                              : 'Not Authenticated',
+                          style: theme.textTheme.bodyLarge?.copyWith(fontWeight: FontWeight.w600),
+                        ),
+                        subtitle: Text(
+                          isSupabaseAuth
+                              ? 'Protected by PostgreSQL Row-Level Security (RLS: authenticated)'
+                              : 'Patient cloud sync requires an authenticated clinic user session',
+                          style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                        ),
+                      ),
+                      const Divider(height: 16),
+                      Wrap(
+                        spacing: 8,
+                        children: [
+                          OutlinedButton.icon(
+                            icon: const Icon(Icons.login),
+                            label: Text(isSupabaseAuth ? 'Switch Account' : 'Sign In / Register'),
+                            onPressed: _showSupabaseAuthDialog,
+                          ),
+                          if (isSupabaseAuth)
+                            TextButton.icon(
+                              icon: Icon(Icons.logout, color: theme.colorScheme.error),
+                              label: Text('Sign Out', style: TextStyle(color: theme.colorScheme.error)),
+                              onPressed: _handleSupabaseSignOut,
+                            ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
+          ),
           const SizedBox(height: 32),
         ],
       ),
     );
+  }
+
+  Future<void> _showSupabaseAuthDialog() async {
+    if (widget.supabaseAuthService == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Supabase service is not initialized.')),
+      );
+      return;
+    }
+
+    final emailController = TextEditingController(
+      text: widget.supabaseAuthService!.currentEmail ??
+          widget.configService.getDoctorEmail() ??
+          AppConfig.defaultDoctorEmail,
+    );
+    final passwordController = TextEditingController(
+      text: widget.configService.getDoctorPassword() ??
+          AppConfig.defaultDoctorPassword,
+    );
+
+    String? dialogError;
+    bool dialogLoading = false;
+
+    await showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          return AlertDialog(
+            title: const Text('Clinic Cloud Authentication'),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Text(
+                    'Sign in with your clinic credentials to enable secure, authenticated cloud sync with Supabase PostgreSQL.',
+                    style: TextStyle(fontSize: 13),
+                  ),
+                  const SizedBox(height: 16),
+                  TextField(
+                    controller: emailController,
+                    decoration: const InputDecoration(
+                      labelText: 'Doctor Email',
+                      border: OutlineInputBorder(),
+                      prefixIcon: Icon(Icons.email_outlined),
+                    ),
+                    keyboardType: TextInputType.emailAddress,
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: passwordController,
+                    decoration: const InputDecoration(
+                      labelText: 'Password',
+                      border: OutlineInputBorder(),
+                      prefixIcon: Icon(Icons.lock_outline),
+                    ),
+                    obscureText: true,
+                  ),
+                  if (dialogError != null) ...[
+                    const SizedBox(height: 12),
+                    Text(
+                      dialogError!,
+                      style: TextStyle(color: Theme.of(ctx).colorScheme.error, fontSize: 13),
+                    ),
+                  ],
+                  if (dialogLoading) ...[
+                    const SizedBox(height: 16),
+                    const Center(child: CircularProgressIndicator()),
+                  ],
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: dialogLoading ? null : () => Navigator.of(ctx).pop(),
+                child: const Text('Cancel'),
+              ),
+              OutlinedButton(
+                onPressed: dialogLoading
+                    ? null
+                    : () async {
+                        setDialogState(() {
+                          dialogLoading = true;
+                          dialogError = null;
+                        });
+                        try {
+                          await widget.supabaseAuthService!.signUp(
+                            email: emailController.text.trim(),
+                            password: passwordController.text,
+                          );
+                          if (mounted) setState(() {});
+                          if (ctx.mounted) Navigator.of(ctx).pop();
+                          if (mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(content: Text('✓ Account created and signed in!')),
+                            );
+                          }
+                        } catch (e) {
+                          setDialogState(() {
+                            dialogLoading = false;
+                            dialogError = 'Registration failed: $e';
+                          });
+                        }
+                      },
+                child: const Text('Create Account'),
+              ),
+              FilledButton(
+                onPressed: dialogLoading
+                    ? null
+                    : () async {
+                        setDialogState(() {
+                          dialogLoading = true;
+                          dialogError = null;
+                        });
+                        try {
+                          await widget.supabaseAuthService!.signIn(
+                            email: emailController.text.trim(),
+                            password: passwordController.text,
+                          );
+                          if (mounted) setState(() {});
+                          if (ctx.mounted) Navigator.of(ctx).pop();
+                          if (mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(content: Text('✓ Signed in to Clinic Cloud')),
+                            );
+                          }
+                        } catch (e) {
+                          setDialogState(() {
+                            dialogLoading = false;
+                            dialogError = 'Sign-in failed: $e';
+                          });
+                        }
+                      },
+                child: const Text('Sign In'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Future<void> _handleSupabaseSignOut() async {
+    if (widget.supabaseAuthService != null) {
+      await widget.supabaseAuthService!.signOut();
+      if (mounted) {
+        setState(() {});
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Signed out from Clinic Cloud (Supabase).')),
+        );
+      }
+    }
   }
 
   Widget _buildDataRow(ThemeData theme, String label, String value) {

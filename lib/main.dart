@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import 'config.dart';
 import 'screens/patients_screen.dart';
 import 'screens/welcome_screen.dart';
@@ -9,6 +10,8 @@ import 'services/google_auth.dart';
 import 'services/sheets.dart';
 import 'services/upload_queue.dart';
 import 'services/patient_folder_service.dart';
+import 'services/supabase_patient_service.dart';
+import 'services/supabase_auth_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -18,6 +21,38 @@ void main() async {
   final authService = GoogleAuthService();
   final sheetsService = SheetsService();
   final driveService = DriveService();
+
+  SupabasePatientService? supabaseService;
+  SupabaseAuthService? supabaseAuthService;
+  try {
+    final url = AppConfig.supabaseUrl;
+    final key = AppConfig.defaultSupabaseAnonKey;
+    if (url.startsWith('https://') &&
+        !url.contains('xyzcompany') &&
+        !key.contains('placeholder')) {
+      await Supabase.initialize(
+        url: url,
+        // ignore: deprecated_member_use
+        anonKey: key,
+        authOptions: const FlutterAuthClientOptions(
+          authFlowType: AuthFlowType.implicit,
+        ),
+      );
+      final client = Supabase.instance.client;
+      supabaseAuthService = SupabaseAuthService(
+        client: client,
+        configService: configService,
+      );
+      try {
+        await supabaseAuthService.ensureAuthenticated();
+      } catch (authErr) {
+        debugPrint('Supabase auto-auth notice: $authErr');
+      }
+      supabaseService = SupabasePatientService.live(client);
+    }
+  } catch (e) {
+    debugPrint('Could not initialize live Supabase client: $e');
+  }
 
   final folderService = PatientFolderService(
     driveService: driveService,
@@ -50,6 +85,8 @@ void main() async {
     sheetsService: sheetsService,
     driveService: driveService,
     queueService: queueService,
+    supabaseService: supabaseService,
+    supabaseAuthService: supabaseAuthService,
     hasCompletedSetup: config.hasCompletedSetup,
   ));
 }
@@ -61,6 +98,8 @@ class ClinicPhotosApp extends StatelessWidget {
   final SheetsService sheetsService;
   final DriveService driveService;
   final UploadQueueService queueService;
+  final SupabasePatientService? supabaseService;
+  final SupabaseAuthService? supabaseAuthService;
   final bool hasCompletedSetup;
 
   const ClinicPhotosApp({
@@ -71,6 +110,8 @@ class ClinicPhotosApp extends StatelessWidget {
     required this.sheetsService,
     required this.driveService,
     required this.queueService,
+    this.supabaseService,
+    this.supabaseAuthService,
     required this.hasCompletedSetup,
   });
 
@@ -115,6 +156,7 @@ class ClinicPhotosApp extends StatelessWidget {
                   database: database,
                   queueService: queueService,
                   driveService: driveService,
+                  supabaseService: supabaseService,
                 )
               : WelcomeScreen(
                   authService: authService,
@@ -123,6 +165,7 @@ class ClinicPhotosApp extends StatelessWidget {
                   database: database,
                   queueService: queueService,
                   driveService: driveService,
+                  supabaseService: supabaseService,
                 ),
         );
       },

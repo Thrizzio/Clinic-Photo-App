@@ -624,7 +624,7 @@ class SheetsService {
     }
 
     return SheetParseResult(
-      patients: patientsMap.values.toList(),
+      patients: patientsMap.values.where((p) => p.hasValidName).toList(),
       totalRows: rows.length,
       headerIndices: headerIndices,
     );
@@ -941,7 +941,7 @@ class SheetsService {
       }
 
       return IncrementalSyncResult(
-        updatedPatients: resolvedMap.values.toList(),
+        updatedPatients: resolvedMap.values.where((p) => p.hasValidName).toList(),
         newRowsCount: newRows.length,
         newLastSyncedRow: lastSyncedRow + newRows.length,
       );

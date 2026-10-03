@@ -80,6 +80,10 @@ class RemoteSupabasePatientService implements SupabasePatientService {
 
   @override
   Future<Patient?> getPatientById(String id) async {
+    if (!Patient.isValidUuid(id)) {
+      return null;
+    }
+
     try {
       final response = await client
           .from('patients')
@@ -121,6 +125,12 @@ class RemoteSupabasePatientService implements SupabasePatientService {
 
   @override
   Future<Patient> upsertPatient(Patient patient) async {
+    if (!Patient.isValidUuid(patient.id)) {
+      throw ArgumentError(
+        'Cannot upsert patient with non-UUID id: "${patient.id}". Supabase requires a valid UUID primary key.',
+      );
+    }
+
     final nowIso = DateTime.now().toUtc().toIso8601String();
     final rowData = {
       'id': patient.id,
@@ -133,11 +143,23 @@ class RemoteSupabasePatientService implements SupabasePatientService {
     };
 
     try {
-      await client.from('patients').upsert(
-        rowData,
-        onConflict: 'id',
-      );
-      return patient;
+      final response = await client
+          .from('patients')
+          .upsert(
+            rowData,
+            onConflict: 'id',
+          )
+          .select()
+          .maybeSingle();
+
+      if (response != null) {
+        return _patientFromSupabaseRow(response).copyWith(
+          legacyPatientId: patient.legacyPatientId,
+          source: patient.source,
+          syncStatus: 'synced',
+        );
+      }
+      return patient.copyWith(syncStatus: 'synced');
     } catch (e) {
       debugPrint('Supabase upsertPatient error: $e');
       rethrow;
@@ -150,6 +172,12 @@ class RemoteSupabasePatientService implements SupabasePatientService {
     required String source,
     required String externalId,
   }) async {
+    if (!Patient.isValidUuid(patientId)) {
+      throw ArgumentError(
+        'Cannot link patient source with non-UUID patientId: "$patientId". patient_id must be a valid UUID foreign key.',
+      );
+    }
+
     final rowData = {
       'id': const Uuid().v4(),
       'patient_id': patientId,
@@ -183,7 +211,11 @@ class RemoteSupabasePatientService implements SupabasePatientService {
           .maybeSingle();
 
       if (response == null) return null;
-      return response['patient_id']?.toString();
+      final pId = response['patient_id']?.toString();
+      if (pId != null && Patient.isValidUuid(pId)) {
+        return pId;
+      }
+      return null;
     } catch (e) {
       debugPrint('Supabase getPatientIdBySource error: $e');
       rethrow;
@@ -192,6 +224,10 @@ class RemoteSupabasePatientService implements SupabasePatientService {
 
   @override
   Future<List<Map<String, String>>> getSourcesForPatient(String patientId) async {
+    if (!Patient.isValidUuid(patientId)) {
+      return [];
+    }
+
     try {
       final response = await client
           .from('patient_sources')
@@ -267,6 +303,7 @@ class InMemorySupabasePatientService implements SupabasePatientService {
 
   @override
   Future<Patient?> getPatientById(String id) async {
+    if (!Patient.isValidUuid(id)) return null;
     return _patients[id];
   }
 
@@ -287,6 +324,11 @@ class InMemorySupabasePatientService implements SupabasePatientService {
 
   @override
   Future<Patient> upsertPatient(Patient patient) async {
+    if (!Patient.isValidUuid(patient.id)) {
+      throw ArgumentError(
+        'Cannot upsert patient with non-UUID id: "${patient.id}". Supabase requires a valid UUID primary key.',
+      );
+    }
     _patients[patient.id] = patient;
     return patient;
   }
@@ -297,6 +339,11 @@ class InMemorySupabasePatientService implements SupabasePatientService {
     required String source,
     required String externalId,
   }) async {
+    if (!Patient.isValidUuid(patientId)) {
+      throw ArgumentError(
+        'Cannot link patient source with non-UUID patientId: "$patientId". patient_id must be a valid UUID foreign key.',
+      );
+    }
     _sourceToPatientId['$source:$externalId'] = patientId;
     final list = _patientSources.putIfAbsent(patientId, () => []);
     list.removeWhere((item) => item.source == source && item.externalId == externalId);
@@ -308,11 +355,16 @@ class InMemorySupabasePatientService implements SupabasePatientService {
     required String source,
     required String externalId,
   }) async {
-    return _sourceToPatientId['$source:$externalId'];
+    final pId = _sourceToPatientId['$source:$externalId'];
+    if (pId != null && Patient.isValidUuid(pId)) {
+      return pId;
+    }
+    return null;
   }
 
   @override
   Future<List<Map<String, String>>> getSourcesForPatient(String patientId) async {
+    if (!Patient.isValidUuid(patientId)) return [];
     final list = _patientSources[patientId] ?? [];
     return list.map((s) => {'source': s.source, 'external_id': s.externalId}).toList();
   }

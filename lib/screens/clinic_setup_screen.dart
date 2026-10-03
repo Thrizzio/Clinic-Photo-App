@@ -9,6 +9,7 @@ import '../services/sheets.dart';
 import '../services/upload_queue.dart';
 import '../services/patient_sync_service.dart';
 import '../services/supabase_patient_service.dart';
+import '../services/supabase_auth_service.dart';
 import 'patients_screen.dart';
 
 class ClinicSetupScreen extends StatefulWidget {
@@ -19,6 +20,7 @@ class ClinicSetupScreen extends StatefulWidget {
   final UploadQueueService queueService;
   final DriveService? driveService;
   final SupabasePatientService? supabaseService;
+  final SupabaseAuthService? supabaseAuthService;
   final bool isReconfiguration;
 
   const ClinicSetupScreen({
@@ -30,6 +32,7 @@ class ClinicSetupScreen extends StatefulWidget {
     required this.queueService,
     this.driveService,
     this.supabaseService,
+    this.supabaseAuthService,
     this.isReconfiguration = false,
   });
 
@@ -266,6 +269,7 @@ class _ClinicSetupScreenState extends State<ClinicSetupScreen> {
               database: widget.database,
               queueService: widget.queueService,
               supabaseService: widget.supabaseService,
+              supabaseAuthService: widget.supabaseAuthService,
             ),
           ),
         );

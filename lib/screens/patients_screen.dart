@@ -17,6 +17,7 @@ import 'unassigned_photos_screen.dart';
 import '../widgets/new_patient_dialog.dart';
 import '../services/patient_sync_service.dart';
 import '../services/supabase_patient_service.dart';
+import '../services/supabase_auth_service.dart';
 
 class PatientsScreen extends StatefulWidget {
   final GoogleAuthService authService;
@@ -26,6 +27,7 @@ class PatientsScreen extends StatefulWidget {
   final UploadQueueService queueService;
   final DriveService? driveService;
   final SupabasePatientService? supabaseService;
+  final SupabaseAuthService? supabaseAuthService;
 
   const PatientsScreen({
     super.key,
@@ -36,6 +38,7 @@ class PatientsScreen extends StatefulWidget {
     required this.queueService,
     this.driveService,
     this.supabaseService,
+    this.supabaseAuthService,
   });
 
   @override
@@ -127,7 +130,7 @@ class _PatientsScreenState extends State<PatientsScreen> {
 
   /// Background sync with Google Sheet.
   /// If [forceFullSync] is true, or if no full sync has occurred, or if incremental sync fails:
-  /// performs a complete reconciliation using validateAndFetchPatients + replacePatients.
+  /// performs a complete reconciliation using validateAndFetchPatients + reconcileSheetPatients.
   Future<void> _syncSheetInBackground({bool forceFullSync = false}) async {
     final config = widget.configService.loadConfig();
     if (!config.hasCompletedSetup || config.spreadsheetId.isEmpty) return;
@@ -195,6 +198,9 @@ class _PatientsScreenState extends State<PatientsScreen> {
 
       // Reconcile and push/pull any cloud updates with Supabase
       try {
+        if (widget.supabaseAuthService != null) {
+          await widget.supabaseAuthService!.ensureAuthenticated();
+        }
         await _patientSyncService.syncLocalWithSupabase();
       } catch (e) {
         debugPrint('Offline/error during Supabase sync: $e');
@@ -550,6 +556,7 @@ class _PatientsScreenState extends State<PatientsScreen> {
           queueService: widget.queueService,
           driveService: widget.driveService,
           supabaseService: widget.supabaseService,
+          supabaseAuthService: widget.supabaseAuthService,
         ),
       ),
     )

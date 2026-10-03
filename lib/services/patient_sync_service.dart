@@ -11,12 +11,18 @@ class ReconciliationResult {
   final int linkedExistingCount;
   final int createdNewCount;
   final List<Patient> reconciledPatients;
+  final bool isSupabaseSynced;
+  final String? supabaseError;
+  final int cloudPatientCount;
 
   const ReconciliationResult({
     required this.totalSheetPatients,
     required this.linkedExistingCount,
     required this.createdNewCount,
     required this.reconciledPatients,
+    this.isSupabaseSynced = false,
+    this.supabaseError,
+    this.cloudPatientCount = 0,
   });
 }
 
@@ -36,6 +42,18 @@ class PatientSyncService {
     SupabasePatientService? supabaseService,
     required this.sheetsService,
   }) : supabaseService = supabaseService ?? InMemorySupabasePatientService();
+
+  /// Formats raw Supabase errors into human-actionable diagnostic messages.
+  /// Explicitly identifies RLS 42501 (Unauthorized: role mismatch).
+  static String formatSupabaseError(dynamic e) {
+    final str = e.toString();
+    if (str.contains('42501') ||
+        str.contains('row-level security') ||
+        str.contains('Unauthorized')) {
+      return "Supabase RLS Error (42501 Unauthorized): Row-Level Security policies on 'patients'/'patient_sources' require the 'authenticated' role, but the app connects with the 'anon' role without a Supabase Auth session.";
+    }
+    return str;
+  }
 
   /// Reconciles parsed Google Sheets patients into Supabase and SQLite.
   ///
@@ -58,25 +76,36 @@ class PatientSyncService {
     int createdCount = 0;
     final reconciled = <Patient>[];
     const uuidGen = Uuid();
+    String? lastSupabaseError;
 
     for (final incoming in sheetPatients) {
-      final externalId = incoming.legacyPatientId ?? incoming.id;
+      // 0. Skip rows with no usable patient name - do not create "Name unavailable" patients
+      if (!incoming.hasValidName || incoming.displayName == 'Name unavailable') {
+        continue;
+      }
+
+      final sheetPatientId = (incoming.legacyPatientId != null && incoming.legacyPatientId!.isNotEmpty)
+          ? incoming.legacyPatientId!
+          : incoming.id;
       final normName = incoming.normalizedName;
       final normPhone = incoming.normalizedPhone;
 
       // 1. Check if this external Sheet ID is already mapped to a canonical patient UUID
-      String? canonicalId = await supabaseService.getPatientIdBySource(
+      String? canonicalUuid = await supabaseService.getPatientIdBySource(
         source: 'google_sheets',
-        externalId: externalId,
-      ) ?? await database.getPatientIdBySource(
-        source: 'google_sheets',
-        externalId: externalId,
+        externalId: sheetPatientId,
       );
+      if (canonicalUuid == null || !Patient.isValidUuid(canonicalUuid)) {
+        canonicalUuid = await database.getPatientIdBySource(
+          source: 'google_sheets',
+          externalId: sheetPatientId,
+        );
+      }
 
       Patient? existingPatient;
-      if (canonicalId != null && canonicalId.isNotEmpty) {
-        existingPatient = await supabaseService.getPatientById(canonicalId) ??
-            await database.getPatient(canonicalId);
+      if (canonicalUuid != null && Patient.isValidUuid(canonicalUuid)) {
+        existingPatient = await supabaseService.getPatientById(canonicalUuid) ??
+            await database.getPatient(canonicalUuid);
       }
 
       // 2. If not mapped by external ID, search by business identity: (normalized_name, normalized_phone)
@@ -88,71 +117,112 @@ class PatientSyncService {
       if (existingPatient != null) {
         // MATCH FOUND: Retain existing canonical UUID and Drive folder!
         linkedCount++;
-        final merged = Patient.merge(existingPatient, incoming.copyWith(id: existingPatient.id));
+        final effectiveUuid = Patient.isValidUuid(existingPatient.id)
+            ? existingPatient.id
+            : uuidGen.v4();
+
+        final merged = Patient.merge(
+          existingPatient,
+          incoming.copyWith(
+            id: effectiveUuid,
+            legacyPatientId: sheetPatientId,
+          ),
+        ).copyWith(
+          id: effectiveUuid,
+          legacyPatientId: sheetPatientId,
+        );
 
         // Update Supabase
+        bool supabaseSuccess = false;
         try {
           await supabaseService.upsertPatient(merged);
           await supabaseService.linkPatientSource(
-            patientId: existingPatient.id,
+            patientId: effectiveUuid,
             source: 'google_sheets',
-            externalId: externalId,
+            externalId: sheetPatientId,
           );
+          supabaseSuccess = true;
         } catch (e) {
-          debugPrint('Warning: unable to sync reconciled patient to Supabase: $e');
+          lastSupabaseError = formatSupabaseError(e);
+          debugPrint('Warning: unable to sync reconciled patient to Supabase: $lastSupabaseError');
         }
 
-        // Update SQLite
-        await database.updatePatient(merged);
-        await database.linkPatientSource(
-          patientId: existingPatient.id,
-          source: 'google_sheets',
-          externalId: externalId,
+        // Update SQLite (only mark synced if Supabase write succeeded)
+        final localPatient = merged.copyWith(
+          syncStatus: supabaseSuccess ? 'synced' : 'pending_cloud',
         );
 
-        reconciled.add(merged);
+        if (existingPatient.id != effectiveUuid) {
+          await database.updatePatientId(oldId: existingPatient.id, newId: effectiveUuid);
+        }
+        await database.updatePatient(localPatient);
+        await database.linkPatientSource(
+          patientId: effectiveUuid,
+          source: 'google_sheets',
+          externalId: sheetPatientId,
+        );
+
+        reconciled.add(localPatient);
       } else {
-        // GENUINELY NEW PATIENT: Assign fresh canonical UUID
+        // GENUINELY NEW PATIENT: Assign fresh canonical UUID (never use Sheet ID as patients.id)
         createdCount++;
-        final newUuid = incoming.id.contains('-') ? incoming.id : uuidGen.v4();
+        final newUuid = uuidGen.v4();
         final newCanonical = incoming.copyWith(
           id: newUuid,
-          legacyPatientId: externalId,
+          legacyPatientId: sheetPatientId,
           source: PatientSource.clinicSheet,
-          syncStatus: 'synced',
           createdAt: DateTime.now(),
           updatedAt: DateTime.now(),
         );
 
         // Insert into Supabase
+        bool supabaseSuccess = false;
         try {
           await supabaseService.upsertPatient(newCanonical);
           await supabaseService.linkPatientSource(
             patientId: newUuid,
             source: 'google_sheets',
-            externalId: externalId,
+            externalId: sheetPatientId,
           );
+          supabaseSuccess = true;
         } catch (e) {
-          debugPrint('Warning: unable to insert new patient to Supabase: $e');
+          lastSupabaseError = formatSupabaseError(e);
+          debugPrint('Warning: unable to insert new patient to Supabase: $lastSupabaseError');
         }
 
-        // Insert into SQLite
-        await database.upsertPatients([newCanonical]);
+        // Insert into SQLite (only mark synced if Supabase write succeeded)
+        final localCanonical = newCanonical.copyWith(
+          syncStatus: supabaseSuccess ? 'synced' : 'pending_cloud',
+        );
+        await database.upsertPatients([localCanonical]);
         await database.linkPatientSource(
           patientId: newUuid,
           source: 'google_sheets',
-          externalId: externalId,
+          externalId: sheetPatientId,
         );
 
-        reconciled.add(newCanonical);
+        reconciled.add(localCanonical);
       }
     }
+
+    // Verify Supabase persistence by querying back patients count
+    int cloudCount = 0;
+    try {
+      final cloud = await supabaseService.fetchAllPatients();
+      cloudCount = cloud.length;
+    } catch (e) {
+      lastSupabaseError ??= formatSupabaseError(e);
+    }
+    final isSynced = (lastSupabaseError == null) && (cloudCount > 0 || reconciled.isEmpty);
 
     return ReconciliationResult(
       totalSheetPatients: sheetPatients.length,
       linkedExistingCount: linkedCount,
       createdNewCount: createdCount,
       reconciledPatients: reconciled,
+      isSupabaseSynced: isSynced,
+      supabaseError: lastSupabaseError,
+      cloudPatientCount: cloudCount,
     );
   }
 
@@ -173,30 +243,96 @@ class PatientSyncService {
 
   /// Synchronizes canonical patients between Supabase and local SQLite cache:
   /// 1. Pushes any locally created/updated patients marked 'pending_cloud' to Supabase.
+  ///    (If Supabase is completely empty, bootstraps all valid local patients to cloud).
   /// 2. Pulls all canonical patients from Supabase and caches them in SQLite.
   Future<void> syncLocalWithSupabase() async {
-    // 1. Push pending local patients to Supabase
-    final localPatients = await database.getPatients();
-    final pending = localPatients.where((p) => p.syncStatus == 'pending_cloud').toList();
+    List<Patient> cloudPatients = const [];
+    try {
+      cloudPatients = await supabaseService.fetchAllPatients();
+    } catch (e) {
+      debugPrint('Supabase fetchAllPatients notice: $e');
+    }
 
-    for (final patient in pending) {
+    final localPatients = await database.getPatients();
+
+    // If Supabase is empty but we have local patients (initial cloud migration / bootstrap),
+    // treat all valid local patients as pending cloud push!
+    final List<Patient> toPush;
+    if (cloudPatients.isEmpty && localPatients.isNotEmpty) {
+      toPush = localPatients.where((p) => Patient.isValidUuid(p.id) && p.hasValidName).toList();
+    } else {
+      toPush = localPatients.where((p) => p.syncStatus == 'pending_cloud' && Patient.isValidUuid(p.id)).toList();
+    }
+
+    String? lastPushError;
+    for (final patient in toPush) {
       try {
-        await supabaseService.upsertPatient(patient);
-        final synced = patient.copyWith(syncStatus: 'synced');
-        await database.updatePatient(synced);
+        Patient? cloudMatch;
+        if (patient.legacyPatientId != null && patient.legacyPatientId!.isNotEmpty) {
+          final cloudUuid = await supabaseService.getPatientIdBySource(
+            source: 'google_sheets',
+            externalId: patient.legacyPatientId!,
+          );
+          if (cloudUuid != null && Patient.isValidUuid(cloudUuid)) {
+            cloudMatch = await supabaseService.getPatientById(cloudUuid);
+          }
+        }
+
+        if (cloudMatch == null && patient.normalizedPhone != null && patient.normalizedPhone!.isNotEmpty) {
+          cloudMatch = await supabaseService.findPatientByBusinessIdentity(
+            patient.normalizedName,
+            patient.normalizedPhone!,
+          );
+        }
+
+        if (cloudMatch != null) {
+          final merged = Patient.merge(
+            cloudMatch,
+            patient.copyWith(id: cloudMatch.id),
+          ).copyWith(
+            id: cloudMatch.id,
+            syncStatus: 'synced',
+          );
+
+          await supabaseService.upsertPatient(merged);
+          if (patient.legacyPatientId != null && patient.legacyPatientId!.isNotEmpty) {
+            await supabaseService.linkPatientSource(
+              patientId: cloudMatch.id,
+              source: 'google_sheets',
+              externalId: patient.legacyPatientId!,
+            );
+          }
+
+          if (patient.id != cloudMatch.id) {
+            await database.updatePatientId(oldId: patient.id, newId: cloudMatch.id);
+          }
+          await database.updatePatient(merged);
+        } else {
+          await supabaseService.upsertPatient(patient);
+          if (patient.legacyPatientId != null && patient.legacyPatientId!.isNotEmpty) {
+            await supabaseService.linkPatientSource(
+              patientId: patient.id,
+              source: 'google_sheets',
+              externalId: patient.legacyPatientId!,
+            );
+          }
+          final synced = patient.copyWith(syncStatus: 'synced');
+          await database.updatePatient(synced);
+        }
       } catch (e) {
-        debugPrint('Failed to push patient ${patient.id} to Supabase: $e');
+        lastPushError = formatSupabaseError(e);
+        debugPrint('Failed to push patient ${patient.id} to Supabase: $lastPushError');
       }
     }
 
-    // 2. Pull canonical patients from Supabase to SQLite
-    try {
-      final cloudPatients = await supabaseService.fetchAllPatients();
-      if (cloudPatients.isNotEmpty) {
-        await database.upsertPatients(cloudPatients);
-      }
-    } catch (e) {
-      debugPrint('Failed to fetch patients from Supabase: $e');
+    if (lastPushError != null) {
+      throw Exception(lastPushError);
+    }
+
+    // Pull canonical patients from Supabase to SQLite
+    final updatedCloud = await supabaseService.fetchAllPatients();
+    if (updatedCloud.isNotEmpty) {
+      await database.upsertPatients(updatedCloud);
     }
   }
 }

@@ -21,13 +21,13 @@ void main() {
       await database.close();
     });
 
-    test('empty query returns all patients ordered by ID', () async {
+    test('empty query returns all patients ordered alphabetically by name', () async {
       final results = await database.searchPatients('');
       expect(results.length, 4);
-      expect(results[0].id, 'P001');
-      expect(results[1].id, 'P002');
-      expect(results[2].id, 'P014');
-      expect(results[3].id, 'P032');
+      expect(results[0].id, 'P014'); // Amit Patel
+      expect(results[1].id, 'P002'); // Ananya Patel
+      expect(results[2].id, 'P032'); // Priya Shah
+      expect(results[3].id, 'P001'); // Rahul Sharma
     });
 
     test('case-insensitive search by name: "rahul" finds Rahul Sharma', () async {

@@ -25,6 +25,9 @@ abstract class AppDatabase {
   // --- Patients Cache Operations ---
 
   /// Replaces the entire patients cache with fresh records.
+  /// DEPRECATED: Do not call in production Sheet sync paths (use [upsertPatients]).
+  /// Retained only for legacy unit test setups.
+  @Deprecated('Use upsertPatients instead for safe synchronization')
   Future<void> replacePatients(List<Patient> patients);
 
   /// Upserts a batch of patients (used during incremental sync and deduplication).
@@ -89,6 +92,19 @@ abstract class AppDatabase {
 
   /// Updates a patient's cached record.
   Future<void> updatePatient(Patient patient);
+
+  /// Atomically updates a patient's primary ID from [oldId] to [newId] across patients,
+  /// uploads, capture_sessions, and patient_sources.
+  Future<void> updatePatientId({required String oldId, required String newId});
+
+  /// Safely inspects existing local SQLite patients with unusable names (e.g. "Name unavailable", empty, placeholder):
+  /// - Distinguishes doctor-created patients vs stale Google Sheet imports.
+  /// - Determines whether they have clinical photos (in uploads) or capture sessions.
+  /// - Determines whether they have an established Google Drive folder.
+  /// - Hard invariant: NEVER deletes doctor-created patients.
+  /// - Hard invariant: NEVER deletes patients with photos, capture sessions, or Drive folders.
+  /// - Only removes confirmed stale Sheet-imported records that have NO photos, NO sessions, and NO Drive folder.
+  Future<int> reconcileStalePlaceholderPatients();
 
   /// Atomically assigns an unassigned session and all its photos to a patient.
   Future<void> assignSessionToPatient({
@@ -293,6 +309,8 @@ class SqliteAppDatabase implements AppDatabase {
           // Ensure schema compatibility on existing databases
           await _migrateToV7(db);
           await _migrateToV8(db);
+          await _migrateLegacyNonUuidPatients(db);
+          await _reconcileStalePlaceholderPatients(db);
           await _ensureUploadsTableSchema(db);
 
           // Crash recovery: Any upload that was interrupted in 'uploading'
@@ -648,6 +666,197 @@ class SqliteAppDatabase implements AppDatabase {
     }
   }
 
+  /// Migrates any legacy patients that have non-UUID primary keys (e.g. numeric Sheet IDs like '1000001')
+  /// to valid UUIDs while preserving all foreign keys in uploads, capture_sessions, and patient_sources.
+  static Future<void> _migrateLegacyNonUuidPatients(Database db) async {
+    final rows = await db.rawQuery(
+      "SELECT * FROM patients WHERE id NOT LIKE '%-%' OR length(id) != 36",
+    );
+    if (rows.isEmpty) return;
+
+    final uuidGen = const Uuid();
+    for (final row in rows) {
+      final oldId = row['id']?.toString() ?? '';
+      if (oldId.isEmpty) continue;
+
+      final oldName = (row['display_name'] ?? row['name'] ?? '').toString();
+      final hasUsable = Patient.isUsableName(oldName, oldId);
+
+      // Check if patient has any uploads or capture sessions
+      final uploadCount = Sqflite.firstIntValue(await db.rawQuery(
+        'SELECT COUNT(*) FROM uploads WHERE patient_id = ?',
+        [oldId],
+      )) ?? 0;
+      final sessionCount = Sqflite.firstIntValue(await db.rawQuery(
+        'SELECT COUNT(*) FROM capture_sessions WHERE patient_id = ?',
+        [oldId],
+      )) ?? 0;
+
+      if (!hasUsable && uploadCount == 0 && sessionCount == 0) {
+        // Discard unusable placeholder rows that have zero photos and zero sessions
+        await db.delete('patients', where: 'id = ?', whereArgs: [oldId]);
+        continue;
+      }
+
+      // Legitimate patient or patient with photos: assign a new UUID
+      final newUuid = uuidGen.v4();
+      final legacyId = (row['legacy_patient_id'] != null && row['legacy_patient_id'].toString().isNotEmpty)
+          ? row['legacy_patient_id'].toString()
+          : oldId;
+
+      await db.transaction((txn) async {
+        // 1. Update patient record
+        await txn.update(
+          'patients',
+          {
+            'id': newUuid,
+            'legacy_patient_id': legacyId,
+            'sync_status': 'pending_cloud',
+          },
+          where: 'id = ?',
+          whereArgs: [oldId],
+        );
+
+        // 2. Update foreign keys in uploads and capture_sessions
+        await txn.update(
+          'uploads',
+          {'patient_id': newUuid},
+          where: 'patient_id = ?',
+          whereArgs: [oldId],
+        );
+        await txn.update(
+          'capture_sessions',
+          {'patient_id': newUuid},
+          where: 'patient_id = ?',
+          whereArgs: [oldId],
+        );
+
+        // 3. Ensure patient_sources mapping exists
+        final existingSources = await txn.query(
+          'patient_sources',
+          where: 'source = ? AND external_id = ?',
+          whereArgs: ['google_sheets', legacyId],
+        );
+        if (existingSources.isEmpty) {
+          await txn.insert('patient_sources', {
+            'id': uuidGen.v4(),
+            'patient_id': newUuid,
+            'source': 'google_sheets',
+            'external_id': legacyId,
+            'created_at': DateTime.now().toIso8601String(),
+          });
+        } else {
+          await txn.update(
+            'patient_sources',
+            {'patient_id': newUuid},
+            where: 'source = ? AND external_id = ?',
+            whereArgs: ['google_sheets', legacyId],
+          );
+        }
+      });
+    }
+
+    // Fix any remaining patient_sources rows that pointed to non-UUIDs
+    final legacySources = await db.rawQuery(
+      "SELECT id, patient_id FROM patient_sources WHERE patient_id NOT LIKE '%-%' OR length(patient_id) != 36",
+    );
+    for (final s in legacySources) {
+      final sId = s['id']?.toString();
+      final pId = s['patient_id']?.toString() ?? '';
+      final mappedPatient = await db.query(
+        'patients',
+        columns: ['id'],
+        where: 'legacy_patient_id = ?',
+        whereArgs: [pId],
+        limit: 1,
+      );
+      if (mappedPatient.isNotEmpty && sId != null) {
+        final newPatientId = mappedPatient.first['id']?.toString();
+        if (newPatientId != null && Patient.isValidUuid(newPatientId)) {
+          await db.update(
+            'patient_sources',
+            {'patient_id': newPatientId},
+            where: 'id = ?',
+            whereArgs: [sId],
+          );
+        }
+      }
+    }
+  }
+
+  /// Visible for unit testing legacy non-UUID patients migration.
+  @visibleForTesting
+  static Future<void> migrateLegacyNonUuidPatientsForTesting(Database db) =>
+      _migrateLegacyNonUuidPatients(db);
+
+  /// Safely inspects existing local SQLite patients with unusable names (e.g. "Name unavailable", empty, placeholder):
+  /// - Distinguishes doctor-created patients vs stale Google Sheet imports.
+  /// - Determines whether they have clinical photos (in uploads) or capture sessions.
+  /// - Determines whether they have an established Google Drive folder.
+  /// - Hard invariant: NEVER deletes doctor-created patients.
+  /// - Hard invariant: NEVER deletes patients with photos, capture sessions, or Drive folders.
+  /// - Only removes confirmed stale Sheet-imported records that have NO photos, NO sessions, and NO Drive folder.
+  static Future<int> _reconcileStalePlaceholderPatients(Database db) async {
+    final rows = await db.query('patients');
+    int cleanedCount = 0;
+    for (final row in rows) {
+      final id = row['id']?.toString() ?? '';
+      if (id.isEmpty) continue;
+
+      final name = (row['display_name'] ?? row['name'] ?? '').toString();
+      final legacyId = row['legacy_patient_id']?.toString();
+      final isUsable = Patient.isUsableName(name, id, legacyId);
+
+      if (isUsable) continue;
+
+      final source = row['source']?.toString() ?? '';
+      final isDoctorCreated = source == PatientSource.doctorCreated.name ||
+          source == 'doctorCreated' ||
+          source == 'doctor_created';
+
+      // 1. Manually-created doctor patients must NEVER be deleted
+      if (isDoctorCreated) continue;
+
+      // 2. Check for associated photos (uploads)
+      final uploadCount = Sqflite.firstIntValue(await db.rawQuery(
+        'SELECT COUNT(*) FROM uploads WHERE patient_id = ?',
+        [id],
+      )) ?? 0;
+
+      // 3. Check for associated capture sessions
+      final sessionCount = Sqflite.firstIntValue(await db.rawQuery(
+        'SELECT COUNT(*) FROM capture_sessions WHERE patient_id = ?',
+        [id],
+      )) ?? 0;
+
+      // 4. Check for Google Drive folder
+      final driveFolderId = row['drive_folder_id']?.toString() ?? '';
+
+      // If patient has photos, sessions, or a Drive folder, PRESERVE them!
+      if (uploadCount > 0 || sessionCount > 0 || driveFolderId.isNotEmpty) {
+        continue;
+      }
+
+      // 5. Confirmed stale Sheet import record with no useful identity, no photos, no sessions, no Drive folder:
+      // Remove safely from patients and patient_sources
+      await db.transaction((txn) async {
+        await txn.delete('patient_sources', where: 'patient_id = ?', whereArgs: [id]);
+        await txn.delete('patients', where: 'id = ?', whereArgs: [id]);
+      });
+      cleanedCount++;
+    }
+    return cleanedCount;
+  }
+
+  @override
+  Future<int> reconcileStalePlaceholderPatients() =>
+      _reconcileStalePlaceholderPatients(db);
+
+  /// Visible for unit testing stale placeholder patients reconciliation.
+  @visibleForTesting
+  static Future<int> reconcileStalePlaceholderPatientsForTesting(Database db) =>
+      _reconcileStalePlaceholderPatients(db);
+
   // --- Patients Cache Operations ---
 
   @override
@@ -686,14 +895,14 @@ class SqliteAppDatabase implements AppDatabase {
           );
         }
 
-        // 3. Check legacy_patient_id match if incoming has one
+        // 3. Check legacy_patient_id or legacy ID match if incoming has one
         if (existingRows.isEmpty &&
             incoming.legacyPatientId != null &&
             incoming.legacyPatientId!.isNotEmpty) {
           existingRows = await txn.query(
             'patients',
-            where: 'legacy_patient_id = ?',
-            whereArgs: [incoming.legacyPatientId],
+            where: 'legacy_patient_id = ? OR id = ?',
+            whereArgs: [incoming.legacyPatientId, incoming.legacyPatientId],
             limit: 1,
           );
         }
@@ -706,13 +915,25 @@ class SqliteAppDatabase implements AppDatabase {
           );
         } else {
           final existing = Patient.fromMap(existingRows.first);
-          final merged = Patient.merge(existing, incoming);
-          await txn.update(
-            'patients',
-            merged.toMap(),
-            where: 'id = ?',
-            whereArgs: [existing.id],
-          );
+          final canonicalId = (!Patient.isValidUuid(existing.id) && Patient.isValidUuid(incoming.id))
+              ? incoming.id
+              : existing.id;
+          final merged = Patient.merge(existing, incoming).copyWith(id: canonicalId);
+
+          if (existing.id != canonicalId) {
+            await txn.delete('patients', where: 'id = ?', whereArgs: [existing.id]);
+            await txn.insert('patients', merged.toMap(), conflictAlgorithm: ConflictAlgorithm.replace);
+            await txn.update('uploads', {'patient_id': canonicalId}, where: 'patient_id = ?', whereArgs: [existing.id]);
+            await txn.update('capture_sessions', {'patient_id': canonicalId}, where: 'patient_id = ?', whereArgs: [existing.id]);
+            await txn.update('patient_sources', {'patient_id': canonicalId}, where: 'patient_id = ?', whereArgs: [existing.id]);
+          } else {
+            await txn.update(
+              'patients',
+              merged.toMap(),
+              where: 'id = ?',
+              whereArgs: [canonicalId],
+            );
+          }
         }
       }
     });
@@ -803,7 +1024,10 @@ class SqliteAppDatabase implements AppDatabase {
       limit: 1,
     );
     if (rows.isNotEmpty) {
-      return rows.first['patient_id']?.toString();
+      final pId = rows.first['patient_id']?.toString();
+      if (pId != null && Patient.isValidUuid(pId)) {
+        return pId;
+      }
     }
     return null;
   }
@@ -848,7 +1072,10 @@ class SqliteAppDatabase implements AppDatabase {
 
   @override
   Future<List<Patient>> getPatients() async {
-    final rows = await db.query('patients', orderBy: 'id ASC');
+    final rows = await db.query(
+      'patients',
+      orderBy: 'display_name COLLATE NOCASE ASC, name COLLATE NOCASE ASC',
+    );
     return rows.map(Patient.fromMap).toList();
   }
 
@@ -903,7 +1130,7 @@ class SqliteAppDatabase implements AppDatabase {
       'patients',
       where: whereClause,
       whereArgs: whereArgs,
-      orderBy: 'id ASC',
+      orderBy: 'display_name COLLATE NOCASE ASC, name COLLATE NOCASE ASC',
     );
     return rows.map(Patient.fromMap).toList();
   }
@@ -995,6 +1222,16 @@ class SqliteAppDatabase implements AppDatabase {
       where: 'id = ?',
       whereArgs: [patient.id],
     );
+  }
+
+  @override
+  Future<void> updatePatientId({required String oldId, required String newId}) async {
+    await db.transaction((txn) async {
+      await txn.update('patients', {'id': newId}, where: 'id = ?', whereArgs: [oldId]);
+      await txn.update('uploads', {'patient_id': newId}, where: 'patient_id = ?', whereArgs: [oldId]);
+      await txn.update('capture_sessions', {'patient_id': newId}, where: 'patient_id = ?', whereArgs: [oldId]);
+      await txn.update('patient_sources', {'patient_id': newId}, where: 'patient_id = ?', whereArgs: [oldId]);
+    });
   }
 
   @override
@@ -1258,7 +1495,25 @@ class InMemoryAppDatabase implements AppDatabase {
       if (existing == null) {
         _patients[incoming.id] = incoming;
       } else {
-        _patients[existing.id] = Patient.merge(existing, incoming);
+        final canonicalId = (!Patient.isValidUuid(existing.id) && Patient.isValidUuid(incoming.id))
+            ? incoming.id
+            : existing.id;
+        final merged = Patient.merge(existing, incoming).copyWith(id: canonicalId);
+        if (existing.id != canonicalId) {
+          _patients.remove(existing.id);
+          _patients[canonicalId] = merged;
+          for (final entry in _sourceToPatientId.entries.toList()) {
+            if (entry.value == existing.id) {
+              _sourceToPatientId[entry.key] = canonicalId;
+            }
+          }
+          final sources = _patientSources.remove(existing.id);
+          if (sources != null) {
+            _patientSources[canonicalId] = sources;
+          }
+        } else {
+          _patients[canonicalId] = merged;
+        }
       }
     }
   }
@@ -1299,7 +1554,11 @@ class InMemoryAppDatabase implements AppDatabase {
     required String source,
     required String externalId,
   }) async {
-    return _sourceToPatientId['$source:$externalId'];
+    final pId = _sourceToPatientId['$source:$externalId'];
+    if (pId != null && Patient.isValidUuid(pId)) {
+      return pId;
+    }
+    return null;
   }
 
   @override
@@ -1329,7 +1588,11 @@ class InMemoryAppDatabase implements AppDatabase {
   @override
   Future<List<Patient>> getPatients() async {
     final list = _patients.values.toList();
-    list.sort((a, b) => a.id.compareTo(b.id));
+    list.sort((a, b) {
+      final cmp = a.displayName.toLowerCase().compareTo(b.displayName.toLowerCase());
+      if (cmp != 0) return cmp;
+      return a.id.compareTo(b.id);
+    });
     return list;
   }
 
@@ -1361,7 +1624,11 @@ class InMemoryAppDatabase implements AppDatabase {
       };
     }).toList();
 
-    matches.sort((a, b) => a.id.compareTo(b.id));
+    matches.sort((a, b) {
+      final cmp = a.displayName.toLowerCase().compareTo(b.displayName.toLowerCase());
+      if (cmp != 0) return cmp;
+      return a.id.compareTo(b.id);
+    });
     return matches;
   }
 
@@ -1418,6 +1685,60 @@ class InMemoryAppDatabase implements AppDatabase {
   @override
   Future<void> updatePatient(Patient patient) async {
     _patients[patient.id] = patient;
+  }
+
+  @override
+  Future<void> updatePatientId({required String oldId, required String newId}) async {
+    final p = _patients.remove(oldId);
+    if (p != null) {
+      _patients[newId] = p.copyWith(id: newId);
+    }
+    for (final entry in _sourceToPatientId.entries.toList()) {
+      if (entry.value == oldId) {
+        _sourceToPatientId[entry.key] = newId;
+      }
+    }
+    final sources = _patientSources.remove(oldId);
+    if (sources != null) {
+      _patientSources[newId] = sources;
+    }
+    for (final key in _sessions.keys.toList()) {
+      final s = _sessions[key]!;
+      if (s.patientId == oldId) {
+        _sessions[key] = s.copyWith(patientId: newId);
+      }
+    }
+    for (final key in _uploads.keys.toList()) {
+      final u = _uploads[key]!;
+      if (u.patientId == oldId) {
+        _uploads[key] = u.copyWith(patientId: newId);
+      }
+    }
+  }
+
+  @override
+  Future<int> reconcileStalePlaceholderPatients() async {
+    final toRemove = <String>[];
+    for (final p in _patients.values) {
+      if (Patient.isUsableName(p.displayName, p.id, p.legacyPatientId)) continue;
+      if (p.source == PatientSource.doctorCreated) continue;
+      if (p.driveFolderId != null && p.driveFolderId!.isNotEmpty) continue;
+
+      final hasUploads = _uploads.values.any((u) => u.patientId == p.id);
+      if (hasUploads) continue;
+
+      final hasSessions = _sessions.values.any((s) => s.patientId == p.id);
+      if (hasSessions) continue;
+
+      toRemove.add(p.id);
+    }
+
+    for (final id in toRemove) {
+      _patients.remove(id);
+      _patientSources.remove(id);
+      _sourceToPatientId.removeWhere((_, targetId) => targetId == id);
+    }
+    return toRemove.length;
   }
 
   @override

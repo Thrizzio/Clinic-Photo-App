@@ -35,7 +35,7 @@ Key V5 capabilities:
 |  +--------------------------------------------------------------------------+  |
 |  |                     SQLite AppDatabase (Local Cache)                     |  |
 |  |  - patients (UUID, name, phone, source, drive_folder_id, sync_status)   |  |
-|  |  - patient_sources (patient_id, source_system, source_patient_id)        |  |
+|  |  - patient_sources (id, patient_id, source, external_id, created_at)    |  |
 |  |  - capture_sessions (unassigned & assigned capture sessions)             |  |
 |  |  - uploads (upload queue with local_path, drive_file_id, status)         |  |
 |  +--------------------------------------------------------------------------+  |
@@ -62,15 +62,16 @@ Key V5 capabilities:
   - `upload_item.dart`: Persistent photo capture & upload queue record (`id`, `sessionId`, `patientId`, `driveFolderId`, `localPath`, `fileName`, `status: pending | waiting | uploading | uploaded | failed | unassigned`, `retryCount`, `lastError`, `driveFileId`, `capturedAt`, `sequenceNumber`).
   - `clinic_config.dart`: Settings model (`spreadsheetId`, `spreadsheetUrl`, `sheetTabName`, `parentDriveFolderId`, `hasCompletedSetup`, `lastPatientSync`, `lastSyncedRow`, `lastFullSync`).
 - `lib/services/`:
+  - `supabase_auth_service.dart`: Manages Supabase authentication for clinic staff / doctor, persisting sessions across app restarts using `FlutterAuthStorage`. Ensures all reads and writes satisfy PostgreSQL Row-Level Security (RLS `TO authenticated`).
   - `supabase_patient_service.dart`: Supabase client managing canonical `patients` and `patient_sources` tables, remote business identity lookup, and cross-source reconciliation.
-  - `patient_sync_service.dart`: Reconciles external Google Sheets rows with Supabase canonical patients and updates SQLite local cache.
-  - `database.dart`: SQLite database (schema v8) with `patients`, `patient_sources`, `capture_sessions`, and `uploads` tables. Crash recovery resets `uploading` to `waiting`.
+  - `patient_sync_service.dart`: Reconciles external Google Sheets rows with Supabase canonical patients and updates SQLite local cache with truthful sync reporting (detects RLS 42501 violations).
+  - `database.dart`: SQLite database (schema v8) with `patients`, `patient_sources`, `capture_sessions`, and `uploads` tables. `replacePatients()` is deprecated with zero production callers; Sheet sync strictly uses `upsertPatients()`. Patient list is ordered alphabetically (`display_name COLLATE NOCASE ASC, name COLLATE NOCASE ASC`). Crash recovery resets `uploading` to `waiting`.
   - `upload_queue.dart`: Manages disk persistence (`photo_queue/`), SQLite upload state machine, background uploading, Drive folder auto-creation for offline captures, unassigned sessions, and session assignment.
   - `patient_folder_service.dart`: Idempotent Google Drive folder resolver (`<Patient Name> - <Phone Number>` or legacy `<Legacy Patient ID> - <Patient Name>`).
   - `drive.dart`: Google Drive API v3 client (folder queries, uploads, server-side moves, deletions, thumbnail streaming).
   - `sheets.dart`: Google Sheets API v4 metadata discovery, dynamic headers, and read-only import stream.
-  - `google_auth.dart`: Google Sign-In 7.x wrapper and authenticated HTTP client.
-  - `config_service.dart`: SharedPreferences settings persistence and reactive `themeModeNotifier`.
+  - `google_auth.dart`: Google Sign-In 7.x wrapper and authenticated HTTP client for Google APIs (Google Drive & Sheets).
+  - `config_service.dart`: SharedPreferences settings persistence, doctor credentials storage, and reactive `themeModeNotifier`.
 - `lib/screens/`:
   - `welcome_screen.dart`: Welcome & Google sign-in.
   - `clinic_setup_screen.dart`: Spreadsheet configuration and parent Drive folder setup.
@@ -86,17 +87,18 @@ Key V5 capabilities:
 ## Data & Control Flow
 
 ### 1. Canonical Patient Identity & Deduplication
-- Primary key is an immutable UUID v4 (`Patient.id`).
+- Primary key is an immutable UUID v4 (`Patient.id`). External sheet IDs (e.g. `1000001`) are NEVER used as `patients.id`.
 - Business identity is the tuple `(normalized_name, normalized_phone)`.
 - When a doctor creates a patient in-app (`+ New Patient`), the patient is saved locally in SQLite (`syncStatus: pending_cloud`) and pushed to Supabase when online.
 - When Google Sheets is imported or synchronized:
-  1. `PatientSyncService.reconcileSheetPatients` processes incoming sheet rows.
-  2. For each row, it checks Supabase/SQLite for existing match by:
-     - External source mapping (`source_system: 'clinic_sheet'`, `source_patient_id: legacyPatientId`).
+  1. Rows without a usable patient name are ignored; placeholder "Name unavailable" patients are NEVER created.
+  2. `PatientSyncService.reconcileSheetPatients` processes valid incoming sheet rows.
+  3. For each row, it checks Supabase/SQLite for existing match by:
+     - External source mapping (`source: 'google_sheets'`, `external_id: legacyPatientId`).
      - Business identity `(normalized_name, normalized_phone)`.
-  3. If matched, the canonical UUID is preserved, legacy ID is linked, and `source` updates to `merged`.
-  4. If new, a new canonical UUID is assigned.
-  5. **Hard Invariant**: Google Sheets sync NEVER deletes doctor-created patients or patients absent from the sheet.
+  4. If matched, the canonical UUID is preserved, legacy ID is linked via `patient_sources`, and `source` updates to `merged`.
+  5. If new, a canonical UUID is generated and `patient_sources` record is linked.
+  6. **Hard Invariant**: Google Sheets sync NEVER deletes doctor-created patients or patients absent from the sheet.
 
 ### 2. Offline-First Photo Capture & Asynchronous Upload
 - Shutter click immediately writes image file to private app storage:

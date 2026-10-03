@@ -169,10 +169,10 @@ void main() {
       expect(retrieved.length, 3);
       expect(retrieved[0].id, '1000001');
       expect(retrieved[0].name, 'Anil Jain');
-      expect(retrieved[1].id, '1000002');
-      expect(retrieved[1].name, 'Shilpa Kalbhor');
-      expect(retrieved[2].id, '1000003');
-      expect(retrieved[2].name, 'Pragati Waghaji');
+      expect(retrieved[1].id, '1000003');
+      expect(retrieved[1].name, 'Pragati Waghaji');
+      expect(retrieved[2].id, '1000002');
+      expect(retrieved[2].name, 'Shilpa Kalbhor');
 
       // Search by ID
       final searchById = await db.searchPatients('1000002');

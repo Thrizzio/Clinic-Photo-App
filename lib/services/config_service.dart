@@ -81,6 +81,15 @@ class ConfigService {
     }
   }
 
+  static const String _keyDoctorEmail = 'doctorEmail';
+  static const String _keyDoctorPassword = 'doctorPassword';
+
+  String? getDoctorEmail() => _prefs.getString(_keyDoctorEmail);
+  Future<void> setDoctorEmail(String email) => _prefs.setString(_keyDoctorEmail, email);
+
+  String? getDoctorPassword() => _prefs.getString(_keyDoctorPassword);
+  Future<void> setDoctorPassword(String password) => _prefs.setString(_keyDoctorPassword, password);
+
   Future<void> clearConfig() async {
     await _prefs.remove(_keyHasCompletedSetup);
     await _prefs.remove(_keySpreadsheetId);
@@ -90,5 +99,7 @@ class ConfigService {
     await _prefs.remove(_keyLastPatientSync);
     await _prefs.remove(_keyLastSyncedRow);
     await _prefs.remove(_keyLastFullSync);
+    await _prefs.remove(_keyDoctorEmail);
+    await _prefs.remove(_keyDoctorPassword);
   }
 }

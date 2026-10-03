@@ -34,10 +34,35 @@ abstract final class AppConfig {
   /// Configurable via compile-time `--dart-define` or app settings.
   static const String defaultSupabaseUrl = String.fromEnvironment(
     'SUPABASE_URL',
-    defaultValue: 'https://xyzcompany.supabase.co',
+    defaultValue: 'https://ovqlmuulpfvdhollnfne.supabase.co',
   );
   static const String defaultSupabaseAnonKey = String.fromEnvironment(
     'SUPABASE_ANON_KEY',
-    defaultValue: 'public-anon-key-placeholder',
+    defaultValue: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im92cWxtdXVscGZ2ZGhvbGxuZm5lIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTEwMTk5MTAsImV4cCI6MjEwNjU5NTkxMH0.12UB-H8YnewC_kGGuxB9cns6Gz_DlGnGYsGX-JSAH-Q',
   );
+
+  /// Default clinic doctor credentials for Supabase authenticated session.
+  /// Configurable via compile-time `--dart-define` or in-app account manager.
+  static const String defaultDoctorEmail = String.fromEnvironment(
+    'DOCTOR_EMAIL',
+    defaultValue: 'doctor2@clinic.com',
+  );
+  static const String defaultDoctorPassword = String.fromEnvironment(
+    'DOCTOR_PASSWORD',
+    defaultValue: 'ClinicSecurePassword2026!',
+  );
+
+  /// Returns the HTTPS REST URL for Supabase.
+  /// If a postgresql:// connection string was provided, automatically extracts
+  /// the project ref and converts it to `https://<project-ref>.supabase.co`.
+  static String get supabaseUrl {
+    final raw = defaultSupabaseUrl.trim();
+    if (raw.startsWith('postgresql://') || raw.startsWith('postgres://')) {
+      final match = RegExp(r'db\.([a-z0-9]+)\.supabase\.co').firstMatch(raw);
+      if (match != null) {
+        return 'https://${match.group(1)}.supabase.co';
+      }
+    }
+    return raw;
+  }
 }

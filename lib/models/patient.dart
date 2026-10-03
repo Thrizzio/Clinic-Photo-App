@@ -118,15 +118,47 @@ class Patient {
       driveFolderId != null &&
       driveFolderId!.isNotEmpty;
 
-  /// Whether a genuine clinical name is recorded for this patient.
-  bool get hasValidName {
-    final trimmed = _name.trim();
-    return trimmed.isNotEmpty &&
-        trimmed != 'Name unavailable' &&
-        trimmed != 'Patient $id' &&
-        (legacyPatientId == null || trimmed != 'Patient $legacyPatientId') &&
-        trimmed != 'Patient';
+  static final RegExp _uuidRegex = RegExp(
+    r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$',
+  );
+
+  /// Checks whether a given string is a valid standard UUID (v4) format.
+  static bool isValidUuid(String? id) => id != null && _uuidRegex.hasMatch(id.trim());
+
+  /// Checks whether a name represents a genuine clinical patient name
+  /// and is not a missing, placeholder, or synthetic token (e.g. 'Name unavailable', 'Patient 1000001').
+  static bool isUsableName(String? name, [String? id, String? legacyId]) {
+    if (name == null) return false;
+    final trimmed = name.trim();
+    if (trimmed.isEmpty) return false;
+    final lower = trimmed.toLowerCase();
+    if (lower == 'name unavailable' ||
+        lower == 'none' ||
+        lower == 'null' ||
+        lower == 'na' ||
+        lower == 'n/a' ||
+        lower == 'nil' ||
+        lower == 'unknown' ||
+        lower == '-' ||
+        lower == '--' ||
+        lower == 'patient' ||
+        lower.startsWith('#')) {
+      return false;
+    }
+    if (RegExp(r'^patient\s*(\d+)?$', caseSensitive: false).hasMatch(trimmed)) {
+      return false;
+    }
+    if (id != null && (trimmed == 'Patient $id' || lower == 'patient ${id.toLowerCase()}')) {
+      return false;
+    }
+    if (legacyId != null && (trimmed == 'Patient $legacyId' || lower == 'patient ${legacyId.toLowerCase()}')) {
+      return false;
+    }
+    return true;
   }
+
+  /// Whether a genuine clinical name is recorded for this patient.
+  bool get hasValidName => isUsableName(_name, id, legacyPatientId);
 
   /// Normalizes a name string: trims, lowercases, collapses multi-spaces.
   static String normalizeName(String raw) {
@@ -300,7 +332,7 @@ class Patient {
     final rawFolder = rowMap[folderCol]?.toString().trim() ?? '';
     final rawPhone = phoneCol != null ? rowMap[phoneCol]?.toString() : null;
 
-    if (rawId.isEmpty || rawName.isEmpty) {
+    if (rawId.isEmpty || !isUsableName(rawName, rawId)) {
       return null;
     }
 
