@@ -84,10 +84,14 @@ class ConfigService {
   static const String _keyDoctorEmail = 'doctorEmail';
   static const String _keyDoctorPassword = 'doctorPassword';
 
+  @Deprecated('Obsolete doctor password configuration.')
   String? getDoctorEmail() => _prefs.getString(_keyDoctorEmail);
+  @Deprecated('Obsolete doctor password configuration.')
   Future<void> setDoctorEmail(String email) => _prefs.setString(_keyDoctorEmail, email);
 
+  @Deprecated('Obsolete doctor password configuration.')
   String? getDoctorPassword() => _prefs.getString(_keyDoctorPassword);
+  @Deprecated('Obsolete doctor password configuration.')
   Future<void> setDoctorPassword(String password) => _prefs.setString(_keyDoctorPassword, password);
 
   Future<void> clearConfig() async {

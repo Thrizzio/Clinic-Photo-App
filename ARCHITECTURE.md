@@ -2,7 +2,7 @@
 
 ## Status
 Version 5 (V5) — Flutter Android single-doctor clinical photo capture app. V5 establishes a robust four-component architecture separating canonical cloud identity, offline-first local working storage, external operational imports, and cloud photo storage:
-1. **Supabase**: Canonical cloud store for patient identity and external source mappings (`patients` and `patient_sources`).
+1. **Supabase**: Canonical cloud store for patient identity and external source mappings (`patients` and `patient_sources`). Configured for single-clinic direct access using the anon key with `clinic_id NOT NULL DEFAULT 'c0000000-0000-0000-0000-000000000001'` (no Supabase Auth or email/password login required for MVP).
 2. **SQLite**: Offline working store, local patient cache, and persistent photo capture & upload queue.
 3. **Google Sheets**: External operational import stream (read-only clinic spreadsheet).
 4. **Google Drive**: Clinical photo storage organized by patient folders (`<Patient Name> - <Phone Number>` or legacy `<Legacy Patient ID> - <Patient Name>`).
@@ -62,7 +62,7 @@ Key V5 capabilities:
   - `upload_item.dart`: Persistent photo capture & upload queue record (`id`, `sessionId`, `patientId`, `driveFolderId`, `localPath`, `fileName`, `status: pending | waiting | uploading | uploaded | failed | unassigned`, `retryCount`, `lastError`, `driveFileId`, `capturedAt`, `sequenceNumber`).
   - `clinic_config.dart`: Settings model (`spreadsheetId`, `spreadsheetUrl`, `sheetTabName`, `parentDriveFolderId`, `hasCompletedSetup`, `lastPatientSync`, `lastSyncedRow`, `lastFullSync`).
 - `lib/services/`:
-  - `supabase_auth_service.dart`: Manages Supabase authentication for clinic staff / doctor, persisting sessions across app restarts using `FlutterAuthStorage`. Ensures all reads and writes satisfy PostgreSQL Row-Level Security (RLS `TO authenticated`).
+  - `supabase_auth_service.dart`: (Deprecated for MVP single-clinic architecture). In the single-clinic MVP, patient cloud sync directly utilizes the Supabase client with the project anon key and default clinic ID (`c0000000-0000-0000-0000-000000000001`). No user password or Supabase Auth session is required. Google Sign-In is preserved solely for Google Drive and Google Sheets access.
   - `supabase_patient_service.dart`: Supabase client managing canonical `patients` and `patient_sources` tables, remote business identity lookup, and cross-source reconciliation.
   - `patient_sync_service.dart`: Reconciles external Google Sheets rows with Supabase canonical patients and updates SQLite local cache with truthful sync reporting (detects RLS 42501 violations).
   - `database.dart`: SQLite database (schema v8) with `patients`, `patient_sources`, `capture_sessions`, and `uploads` tables. `replacePatients()` is deprecated with zero production callers; Sheet sync strictly uses `upsertPatients()`. Patient list is ordered alphabetically (`display_name COLLATE NOCASE ASC, name COLLATE NOCASE ASC`). Crash recovery resets `uploading` to `waiting`.
@@ -122,3 +122,18 @@ Key V5 capabilities:
 ### 3. Viewer Actions & Unassigned Session Synchronization
 - Multi-Select Move: Doctor can select photos in patient gallery and move them to an unassigned session. Drive file is moved server-side; local cached file is moved to unassigned directory; SQLite record is updated atomically.
 - Session Assignment: Unassigned sessions can be assigned to existing or offline patients. If target patient lacks a Drive folder, local photos transition to `pending` and upload when online.
+
+### 4. Patient Deletion, Offline Queue & Cross-Device Sync
+- **Patient Deletion Invariants**:
+  - Anyone using the app is permitted to delete patients in the single-clinic architecture.
+  - **Drive Safety Invariant**: Deleting a patient strictly NEVER deletes, moves, or touches their Google Drive folders or photos. Drive deletion APIs are never called during patient deletion.
+  - Deleting a patient removes the patient locally from SQLite, removes local source mappings, and deletes the patient and `patient_sources` from Supabase (handled in foreign-key order: source mappings first, then patient row).
+- **Offline Deletion Queue**:
+  - If the device is offline when a user deletes a patient, the patient is removed from local SQLite immediately and queued in the `pending_deletions` table.
+  - When connectivity is restored, `PatientSyncService.syncLocalWithSupabase()` retries all queued cloud deletions and removes them upon successful Supabase response.
+- **Cross-Device Deletion Propagation**:
+  - When Device A deletes a patient in Supabase, Device B learns of this deletion during its next `syncLocalWithSupabase()` pass.
+  - If a local patient has `syncStatus == 'synced'` but is absent from Supabase, Device B recognizes it as a remote deletion, deletes the patient locally from SQLite, and records tombstones. Device B does NOT recreate the patient in Supabase.
+- **Google Sheets Resurrection Prevention (Tombstones)**:
+  - When a patient is deleted, their canonical UUID and external source mappings (e.g. `(google_sheets, legacyPatientId)`) are recorded in `deleted_patient_tombstones`.
+  - Normal Sheets reconciliation checks `isSourceDeleted` and ignores rows matching tombstoned patients, preventing accidental delete → sync → resurrect loops.

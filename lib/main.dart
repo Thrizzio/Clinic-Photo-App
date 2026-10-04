@@ -11,7 +11,6 @@ import 'services/sheets.dart';
 import 'services/upload_queue.dart';
 import 'services/patient_folder_service.dart';
 import 'services/supabase_patient_service.dart';
-import 'services/supabase_auth_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -23,7 +22,6 @@ void main() async {
   final driveService = DriveService();
 
   SupabasePatientService? supabaseService;
-  SupabaseAuthService? supabaseAuthService;
   try {
     final url = AppConfig.supabaseUrl;
     final key = AppConfig.defaultSupabaseAnonKey;
@@ -39,10 +37,6 @@ void main() async {
         ),
       );
       final client = Supabase.instance.client;
-      supabaseAuthService = SupabaseAuthService(
-        client: client,
-        configService: configService,
-      );
       supabaseService = SupabasePatientService.live(client);
     }
   } catch (e) {
@@ -68,18 +62,7 @@ void main() async {
 
   // If already set up, attempt silent sign-in and resume pending uploads
   if (config.hasCompletedSetup) {
-    final account = await authService.signInSilently();
-    if (account != null && supabaseAuthService != null && !supabaseAuthService.isAuthenticated) {
-      final auth = account.authentication;
-      final idToken = auth.idToken;
-      if (idToken != null && idToken.isNotEmpty) {
-        try {
-          await supabaseAuthService.signInWithGoogle(idToken: idToken);
-        } catch (e) {
-          debugPrint('Silent Supabase auth notice: $e');
-        }
-      }
-    }
+    await authService.signInSilently();
     // Wake up queue processor in background to resume any pending uploads
     queueService.processQueue();
   }
@@ -92,7 +75,6 @@ void main() async {
     driveService: driveService,
     queueService: queueService,
     supabaseService: supabaseService,
-    supabaseAuthService: supabaseAuthService,
     hasCompletedSetup: config.hasCompletedSetup,
   ));
 }
@@ -105,7 +87,6 @@ class ClinicPhotosApp extends StatelessWidget {
   final DriveService driveService;
   final UploadQueueService queueService;
   final SupabasePatientService? supabaseService;
-  final SupabaseAuthService? supabaseAuthService;
   final bool hasCompletedSetup;
 
   const ClinicPhotosApp({
@@ -117,7 +98,6 @@ class ClinicPhotosApp extends StatelessWidget {
     required this.driveService,
     required this.queueService,
     this.supabaseService,
-    this.supabaseAuthService,
     required this.hasCompletedSetup,
   });
 

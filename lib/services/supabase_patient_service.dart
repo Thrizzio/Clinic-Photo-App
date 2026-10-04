@@ -37,6 +37,9 @@ abstract class SupabasePatientService {
   /// Gets all source mappings for a patient UUID.
   Future<List<Map<String, String>>> getSourcesForPatient(String patientId);
 
+  /// Deletes a canonical patient and associated source mappings from Supabase.
+  Future<void> deletePatient(String patientId);
+
   /// Factory constructor to create in-memory service for testing or offline mocking.
   factory SupabasePatientService.inMemory({
     Map<String, Patient>? initialPatients,
@@ -249,6 +252,22 @@ class RemoteSupabasePatientService implements SupabasePatientService {
     }
   }
 
+  @override
+  Future<void> deletePatient(String patientId) async {
+    if (!Patient.isValidUuid(patientId)) {
+      return;
+    }
+    try {
+      // Delete source mappings first to satisfy foreign key ordering
+      await client.from('patient_sources').delete().eq('patient_id', patientId);
+      // Delete patient record
+      await client.from('patients').delete().eq('id', patientId);
+    } catch (e) {
+      debugPrint('Supabase deletePatient error: $e');
+      rethrow;
+    }
+  }
+
   Patient _patientFromSupabaseRow(Map<String, dynamic> row) {
     final rawName = row['display_name']?.toString() ?? '';
     final rawPhone = row['phone_display']?.toString();
@@ -367,5 +386,16 @@ class InMemorySupabasePatientService implements SupabasePatientService {
     if (!Patient.isValidUuid(patientId)) return [];
     final list = _patientSources[patientId] ?? [];
     return list.map((s) => {'source': s.source, 'external_id': s.externalId}).toList();
+  }
+
+  @override
+  Future<void> deletePatient(String patientId) async {
+    _patients.remove(patientId);
+    final sources = _patientSources.remove(patientId);
+    if (sources != null) {
+      for (final s in sources) {
+        _sourceToPatientId.remove('${s.source}:${s.externalId}');
+      }
+    }
   }
 }

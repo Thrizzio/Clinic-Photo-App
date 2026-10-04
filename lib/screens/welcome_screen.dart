@@ -6,7 +6,6 @@ import '../services/google_auth.dart';
 import '../services/sheets.dart';
 import '../services/upload_queue.dart';
 import '../services/supabase_patient_service.dart';
-import '../services/supabase_auth_service.dart';
 import 'clinic_setup_screen.dart';
 import 'patients_screen.dart';
 
@@ -18,7 +17,6 @@ class WelcomeScreen extends StatefulWidget {
   final UploadQueueService queueService;
   final DriveService? driveService;
   final SupabasePatientService? supabaseService;
-  final SupabaseAuthService? supabaseAuthService;
 
   const WelcomeScreen({
     super.key,
@@ -29,7 +27,6 @@ class WelcomeScreen extends StatefulWidget {
     required this.queueService,
     this.driveService,
     this.supabaseService,
-    this.supabaseAuthService,
   });
 
   @override
@@ -58,17 +55,6 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
         return;
       }
 
-      // Establish authenticated Supabase session using the Google ID token
-      if (widget.supabaseAuthService != null) {
-        final auth = account.authentication;
-        final idToken = auth.idToken;
-        if (idToken == null || idToken.isEmpty) {
-          throw Exception('Google Sign-In succeeded, but no Google ID token was provided.');
-        }
-
-        await widget.supabaseAuthService!.signInWithGoogle(idToken: idToken);
-      }
-
       if (!mounted) return;
 
       final config = widget.configService.loadConfig();
@@ -84,7 +70,6 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
               queueService: widget.queueService,
               driveService: driveService,
               supabaseService: widget.supabaseService,
-              supabaseAuthService: widget.supabaseAuthService,
             ),
           ),
         );
@@ -99,7 +84,6 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
               queueService: widget.queueService,
               driveService: driveService,
               supabaseService: widget.supabaseService,
-              supabaseAuthService: widget.supabaseAuthService,
             ),
           ),
         );

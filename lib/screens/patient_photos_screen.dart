@@ -13,6 +13,7 @@ import '../services/drive.dart';
 import '../services/google_auth.dart';
 import '../services/patient_folder_service.dart';
 import '../services/upload_queue.dart';
+import '../services/patient_sync_service.dart';
 import 'camera_screen.dart';
 
 class PatientPhotosScreen extends StatefulWidget {
@@ -21,6 +22,7 @@ class PatientPhotosScreen extends StatefulWidget {
   final DriveService driveService;
   final PatientFolderService? folderService;
   final UploadQueueService queueService;
+  final PatientSyncService? patientSyncService;
 
   const PatientPhotosScreen({
     super.key,
@@ -29,6 +31,7 @@ class PatientPhotosScreen extends StatefulWidget {
     required this.driveService,
     this.folderService,
     required this.queueService,
+    this.patientSyncService,
   });
 
   /// Authoritative IST timestamp parser from filename (e.g. YYYYMMDD_HHMMSS_SSS) or Drive createdTime.
@@ -697,6 +700,63 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
   }
 
 
+  Future<void> _confirmAndDeletePatient() async {
+    if (widget.patientSyncService == null) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete Patient?'),
+        content: const Text(
+          'Delete this patient? The patient record will be removed from this app and other clinic devices. Their Google Drive photos will NOT be deleted.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: Colors.red,
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    try {
+      final result = await widget.patientSyncService!.deletePatient(_currentPatient.id);
+      if (!mounted) return;
+
+      Navigator.of(context).pop(true);
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            result.cloudDeleted
+                ? '${_currentPatient.displayName} deleted permanently.'
+                : '${_currentPatient.displayName} deleted locally. Cloud deletion pending sync.',
+          ),
+          backgroundColor: result.cloudDeleted ? Colors.green.shade800 : Colors.orange.shade800,
+        ),
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error deleting patient: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
   void _openFullScreenViewer(int initialIndex) {
     Navigator.of(context).push(
       MaterialPageRoute(
@@ -789,6 +849,28 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
                   tooltip: 'Refresh',
                   onPressed: _loadPhotos,
                 ),
+                if (widget.patientSyncService != null)
+                  PopupMenuButton<String>(
+                    icon: const Icon(Icons.more_vert),
+                    tooltip: 'More options',
+                    onSelected: (val) {
+                      if (val == 'delete_patient') {
+                        _confirmAndDeletePatient();
+                      }
+                    },
+                    itemBuilder: (ctx) => [
+                      const PopupMenuItem<String>(
+                        value: 'delete_patient',
+                        child: Row(
+                          children: [
+                            Icon(Icons.delete_outline, color: Colors.red),
+                            SizedBox(width: 8),
+                            Text('Delete Patient', style: TextStyle(color: Colors.red)),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
               ],
             ),
       body: RefreshIndicator(

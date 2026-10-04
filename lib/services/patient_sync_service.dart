@@ -26,6 +26,21 @@ class ReconciliationResult {
   });
 }
 
+class DeletePatientResult {
+  final bool localSuccess;
+  final bool cloudSuccess;
+  final String? cloudError;
+
+  const DeletePatientResult({
+    required this.localSuccess,
+    required this.cloudSuccess,
+    this.cloudError,
+  });
+
+  bool get isFullyDeleted => localSuccess && cloudSuccess;
+  bool get cloudDeleted => cloudSuccess;
+}
+
 /// Orchestrates reconciliation of external Google Sheets clinic patients
 /// into the canonical Supabase patient store and local SQLite cache.
 ///
@@ -44,13 +59,12 @@ class PatientSyncService {
   }) : supabaseService = supabaseService ?? InMemorySupabasePatientService();
 
   /// Formats raw Supabase errors into human-actionable diagnostic messages.
-  /// Explicitly identifies RLS 42501 (Unauthorized: role mismatch).
   static String formatSupabaseError(dynamic e) {
     final str = e.toString();
     if (str.contains('42501') ||
         str.contains('row-level security') ||
         str.contains('Unauthorized')) {
-      return "Supabase RLS Error (42501 Unauthorized): Row-Level Security policies on 'patients'/'patient_sources' require the 'authenticated' role, but the app connects with the 'anon' role without a Supabase Auth session.";
+      return "Supabase Permission Error (42501): $str";
     }
     return str;
   }
@@ -87,6 +101,12 @@ class PatientSyncService {
       final sheetPatientId = (incoming.legacyPatientId != null && incoming.legacyPatientId!.isNotEmpty)
           ? incoming.legacyPatientId!
           : incoming.id;
+
+      // 0b. Skip deliberately deleted patients (tombstones) to prevent accidental resurrection loop
+      if (await database.isSourceDeleted(source: 'google_sheets', externalId: sheetPatientId)) {
+        continue;
+      }
+
       final normName = incoming.normalizedName;
       final normPhone = incoming.normalizedPhone;
 
@@ -241,27 +261,132 @@ class PatientSyncService {
     return reconcileSheetPatients(sheetResult.patients);
   }
 
+  /// Deletes a patient locally from SQLite and synchronizes the deletion to Supabase.
+  /// If offline or if Supabase deletion fails, the deletion is persisted locally
+  /// and queued in pending_deletions to retry when connectivity returns.
+  /// Also records tombstones for all external source mappings to prevent Google Sheets
+  /// from resurrecting the deleted patient.
+  Future<DeletePatientResult> deletePatient(String patientId) async {
+    final patient = await database.getPatient(patientId);
+    final sources = await database.getSourcesForPatient(patientId);
+
+    // 1. Record tombstones locally so Sheets reconciliation will never resurrect this patient
+    for (final s in sources) {
+      final src = s['source'];
+      final ext = s['external_id'];
+      if (src != null && ext != null) {
+        await database.recordDeletedTombstone(
+          patientId: patientId,
+          source: src,
+          externalId: ext,
+        );
+      }
+    }
+    if (patient?.legacyPatientId != null && patient!.legacyPatientId!.isNotEmpty) {
+      await database.recordDeletedTombstone(
+        patientId: patientId,
+        source: 'google_sheets',
+        externalId: patient.legacyPatientId!,
+      );
+    }
+    await database.recordDeletedTombstone(
+      patientId: patientId,
+    );
+
+    // 2. Record pending deletion in SQLite queue
+    await database.addPendingDeletion(patientId);
+
+    // 3. Delete locally from SQLite
+    await database.deletePatient(patientId);
+
+    // 4. Attempt to delete from Supabase
+    bool cloudSuccess = false;
+    String? cloudError;
+    try {
+      await supabaseService.deletePatient(patientId);
+      cloudSuccess = true;
+      await database.removePendingDeletion(patientId);
+    } catch (e) {
+      cloudError = formatSupabaseError(e);
+      debugPrint('Supabase cloud delete deferred: $cloudError');
+    }
+
+    return DeletePatientResult(
+      localSuccess: true,
+      cloudSuccess: cloudSuccess,
+      cloudError: cloudError,
+    );
+  }
+
   /// Synchronizes canonical patients between Supabase and local SQLite cache:
-  /// 1. Pushes any locally created/updated patients marked 'pending_cloud' to Supabase.
-  ///    (If Supabase is completely empty, bootstraps all valid local patients to cloud).
-  /// 2. Pulls all canonical patients from Supabase and caches them in SQLite.
+  /// 1. Retries any pending deletions from offline operations.
+  /// 2. Pulls all canonical patients from Supabase and propagates cross-device deletions to SQLite.
+  /// 3. Pushes any locally created/updated patients marked 'pending_cloud' to Supabase.
+  /// 4. Caches all active canonical cloud patients in SQLite.
   Future<void> syncLocalWithSupabase() async {
+    // 0. Retry any pending cloud deletions first
+    final pendingDeletions = await database.getPendingDeletions();
+    for (final pendingId in pendingDeletions) {
+      try {
+        await supabaseService.deletePatient(pendingId);
+        await database.removePendingDeletion(pendingId);
+      } catch (e) {
+        debugPrint('Retry deletion of $pendingId deferred: $e');
+      }
+    }
+
     List<Patient> cloudPatients = const [];
     try {
       cloudPatients = await supabaseService.fetchAllPatients();
     } catch (e) {
       debugPrint('Supabase fetchAllPatients notice: $e');
+      rethrow;
     }
 
     final localPatients = await database.getPatients();
+    final cloudIds = cloudPatients.map((p) => p.id).toSet();
 
+    // 1. Cross-device deletion propagation:
+    // When Supabase has active patients (cloudPatients.isNotEmpty), any local patient
+    // that was previously 'synced' but is now absent from cloudPatients was deleted
+    // from Supabase by another device.
+    if (cloudPatients.isNotEmpty) {
+      for (final local in localPatients) {
+        if (local.syncStatus == 'synced' && !cloudIds.contains(local.id)) {
+          final sources = await database.getSourcesForPatient(local.id);
+          for (final s in sources) {
+            final src = s['source'];
+            final ext = s['external_id'];
+            if (src != null && ext != null) {
+              await database.recordDeletedTombstone(
+                patientId: local.id,
+                source: src,
+                externalId: ext,
+              );
+            }
+          }
+          if (local.legacyPatientId != null && local.legacyPatientId!.isNotEmpty) {
+            await database.recordDeletedTombstone(
+              patientId: local.id,
+              source: 'google_sheets',
+              externalId: local.legacyPatientId!,
+            );
+          }
+          await database.recordDeletedTombstone(patientId: local.id);
+          await database.deletePatient(local.id);
+        }
+      }
+    }
+
+    // 2. Push any local patients pending cloud push
     // If Supabase is empty but we have local patients (initial cloud migration / bootstrap),
     // treat all valid local patients as pending cloud push!
+    final currentLocalPatients = await database.getPatients();
     final List<Patient> toPush;
-    if (cloudPatients.isEmpty && localPatients.isNotEmpty) {
-      toPush = localPatients.where((p) => Patient.isValidUuid(p.id) && p.hasValidName).toList();
+    if (cloudPatients.isEmpty && currentLocalPatients.isNotEmpty) {
+      toPush = currentLocalPatients.where((p) => Patient.isValidUuid(p.id) && p.hasValidName).toList();
     } else {
-      toPush = localPatients.where((p) => p.syncStatus == 'pending_cloud' && Patient.isValidUuid(p.id)).toList();
+      toPush = currentLocalPatients.where((p) => p.syncStatus == 'pending_cloud' && Patient.isValidUuid(p.id)).toList();
     }
 
     String? lastPushError;

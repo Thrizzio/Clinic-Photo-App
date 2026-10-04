@@ -114,6 +114,36 @@ abstract class AppDatabase {
     Map<String, ({String fileName, String localPath})>? renamedPhotos,
   });
 
+  /// Deletes a patient locally from SQLite along with local source mappings,
+  /// sessions, and upload queue items. Does NOT touch Google Drive.
+  Future<void> deletePatient(String id);
+
+  /// Adds a pending cloud deletion for a patient ID.
+  Future<void> addPendingDeletion(String patientId);
+
+  /// Retrieves all pending patient IDs waiting for cloud deletion.
+  Future<List<String>> getPendingDeletions();
+
+  /// Removes a resolved pending deletion.
+  Future<void> removePendingDeletion(String patientId);
+
+  /// Records a tombstone for a deleted patient and their external source mappings
+  /// to prevent Sheets sync from resurrecting the patient.
+  Future<void> recordDeletedTombstone({
+    required String patientId,
+    String? source,
+    String? externalId,
+  });
+
+  /// Checks if an external source mapping was previously deleted.
+  Future<bool> isSourceDeleted({
+    required String source,
+    required String externalId,
+  });
+
+  /// Checks if a patient UUID was previously deleted.
+  Future<bool> isPatientDeleted(String patientId);
+
   // --- Upload Queue Operations ---
 
   /// Inserts a new upload item.
@@ -182,7 +212,7 @@ abstract class AppDatabase {
 /// SQLite-backed production database implementation for Android.
 class SqliteAppDatabase implements AppDatabase {
   static const String _dbName = 'clinic_photos.db';
-  static const int _dbVersion = 8;
+  static const int _dbVersion = 9;
 
   final Database db;
 
@@ -284,6 +314,28 @@ class SqliteAppDatabase implements AppDatabase {
           await db.execute(
             'CREATE INDEX IF NOT EXISTS idx_patient_sources_source_ext ON patient_sources(source, external_id)',
           );
+
+          await db.execute('''
+            CREATE TABLE IF NOT EXISTS pending_deletions (
+              patient_id TEXT PRIMARY KEY,
+              deleted_at TEXT NOT NULL
+            )
+          ''');
+          await db.execute('''
+            CREATE TABLE IF NOT EXISTS deleted_patient_tombstones (
+              id TEXT PRIMARY KEY,
+              patient_id TEXT NOT NULL,
+              source TEXT,
+              external_id TEXT,
+              deleted_at TEXT NOT NULL
+            )
+          ''');
+          await db.execute(
+            'CREATE INDEX IF NOT EXISTS idx_deleted_tombstones_source_ext ON deleted_patient_tombstones(source, external_id)',
+          );
+          await db.execute(
+            'CREATE INDEX IF NOT EXISTS idx_deleted_tombstones_patient_id ON deleted_patient_tombstones(patient_id)',
+          );
         },
         onUpgrade: (db, oldVersion, newVersion) async {
           if (oldVersion < 2) {
@@ -304,11 +356,16 @@ class SqliteAppDatabase implements AppDatabase {
           if (oldVersion < 8) {
             await _migrateToV8(db);
           }
+
+          if (oldVersion < 9) {
+            await _migrateToV9(db);
+          }
         },
         onOpen: (db) async {
           // Ensure schema compatibility on existing databases
           await _migrateToV7(db);
           await _migrateToV8(db);
+          await _migrateToV9(db);
           await _migrateLegacyNonUuidPatients(db);
           await _reconcileStalePlaceholderPatients(db);
           await _ensureUploadsTableSchema(db);
@@ -664,6 +721,33 @@ class SqliteAppDatabase implements AppDatabase {
         }
       }
     }
+  }
+
+  /// Migrates older database versions to Schema v9:
+  /// - Creates pending_deletions table for offline deletion queue
+  /// - Creates deleted_patient_tombstones table for Sheets reconciliation resurrection prevention
+  static Future<void> _migrateToV9(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS pending_deletions (
+        patient_id TEXT PRIMARY KEY,
+        deleted_at TEXT NOT NULL
+      )
+    ''');
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS deleted_patient_tombstones (
+        id TEXT PRIMARY KEY,
+        patient_id TEXT NOT NULL,
+        source TEXT,
+        external_id TEXT,
+        deleted_at TEXT NOT NULL
+      )
+    ''');
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_deleted_tombstones_source_ext ON deleted_patient_tombstones(source, external_id)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_deleted_tombstones_patient_id ON deleted_patient_tombstones(patient_id)',
+    );
   }
 
   /// Migrates any legacy patients that have non-UUID primary keys (e.g. numeric Sheet IDs like '1000001')
@@ -1235,6 +1319,83 @@ class SqliteAppDatabase implements AppDatabase {
   }
 
   @override
+  Future<void> deletePatient(String id) async {
+    await db.transaction((txn) async {
+      await txn.delete('uploads', where: 'patient_id = ?', whereArgs: [id]);
+      await txn.delete('capture_sessions', where: 'patient_id = ?', whereArgs: [id]);
+      await txn.delete('patient_sources', where: 'patient_id = ?', whereArgs: [id]);
+      await txn.delete('patients', where: 'id = ?', whereArgs: [id]);
+    });
+  }
+
+  @override
+  Future<void> addPendingDeletion(String patientId) async {
+    await db.insert(
+      'pending_deletions',
+      {
+        'patient_id': patientId,
+        'deleted_at': DateTime.now().toUtc().toIso8601String(),
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  @override
+  Future<List<String>> getPendingDeletions() async {
+    final rows = await db.query('pending_deletions');
+    return rows.map((r) => r['patient_id'].toString()).toList();
+  }
+
+  @override
+  Future<void> removePendingDeletion(String patientId) async {
+    await db.delete(
+      'pending_deletions',
+      where: 'patient_id = ?',
+      whereArgs: [patientId],
+    );
+  }
+
+  @override
+  Future<void> recordDeletedTombstone({
+    required String patientId,
+    String? source,
+    String? externalId,
+  }) async {
+    await db.insert('deleted_patient_tombstones', {
+      'id': const Uuid().v4(),
+      'patient_id': patientId,
+      'source': source,
+      'external_id': externalId,
+      'deleted_at': DateTime.now().toUtc().toIso8601String(),
+    });
+  }
+
+  @override
+  Future<bool> isSourceDeleted({
+    required String source,
+    required String externalId,
+  }) async {
+    final rows = await db.query(
+      'deleted_patient_tombstones',
+      where: 'source = ? AND external_id = ?',
+      whereArgs: [source, externalId],
+      limit: 1,
+    );
+    return rows.isNotEmpty;
+  }
+
+  @override
+  Future<bool> isPatientDeleted(String patientId) async {
+    final rows = await db.query(
+      'deleted_patient_tombstones',
+      where: 'patient_id = ?',
+      whereArgs: [patientId],
+      limit: 1,
+    );
+    return rows.isNotEmpty;
+  }
+
+  @override
   Future<void> assignSessionToPatient({
     required String sessionId,
     required String patientId,
@@ -1426,6 +1587,8 @@ class InMemoryAppDatabase implements AppDatabase {
   final Map<String, UploadItem> _uploads = {};
   final Map<String, String> _sourceToPatientId = {};
   final Map<String, List<({String source, String externalId})>> _patientSources = {};
+  final Set<String> _pendingDeletions = {};
+  final List<({String patientId, String? source, String? externalId, DateTime deletedAt})> _deletedTombstones = [];
 
   InMemoryAppDatabase({
     Map<String, Patient>? initialPatients,
@@ -1772,6 +1935,61 @@ class InMemoryAppDatabase implements AppDatabase {
         );
       }
     }
+  }
+
+  @override
+  Future<void> deletePatient(String id) async {
+    _patients.remove(id);
+    final sources = _patientSources.remove(id);
+    if (sources != null) {
+      for (final s in sources) {
+        _sourceToPatientId.remove('${s.source}:${s.externalId}');
+      }
+    }
+    _sessions.removeWhere((_, s) => s.patientId == id);
+    _uploads.removeWhere((_, u) => u.patientId == id);
+  }
+
+  @override
+  Future<void> addPendingDeletion(String patientId) async {
+    _pendingDeletions.add(patientId);
+  }
+
+  @override
+  Future<List<String>> getPendingDeletions() async {
+    return List.from(_pendingDeletions);
+  }
+
+  @override
+  Future<void> removePendingDeletion(String patientId) async {
+    _pendingDeletions.remove(patientId);
+  }
+
+  @override
+  Future<void> recordDeletedTombstone({
+    required String patientId,
+    String? source,
+    String? externalId,
+  }) async {
+    _deletedTombstones.add((
+      patientId: patientId,
+      source: source,
+      externalId: externalId,
+      deletedAt: DateTime.now(),
+    ));
+  }
+
+  @override
+  Future<bool> isSourceDeleted({
+    required String source,
+    required String externalId,
+  }) async {
+    return _deletedTombstones.any((t) => t.source == source && t.externalId == externalId);
+  }
+
+  @override
+  Future<bool> isPatientDeleted(String patientId) async {
+    return _deletedTombstones.any((t) => t.patientId == patientId);
   }
 
   // --- Upload Queue Operations ---

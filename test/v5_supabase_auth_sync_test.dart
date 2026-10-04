@@ -14,42 +14,38 @@ void main() {
     const supabaseUrl = AppConfig.defaultSupabaseUrl;
     const anonKey = AppConfig.defaultSupabaseAnonKey;
 
-    test('1. Unauthenticated client (anon role) is rejected by RLS with 42501 Unauthorized', () async {
-      final unauthClient = SupabaseClient(
+    test('1. Direct client (anon role) can access patients and patient_sources under single-clinic MVP', () async {
+      final anonClient = SupabaseClient(
         supabaseUrl,
         anonKey,
         authOptions: const AuthClientOptions(authFlowType: AuthFlowType.implicit),
       );
 
-      expect(unauthClient.auth.currentUser, isNull);
-      expect(unauthClient.auth.currentSession, isNull);
+      expect(anonClient.auth.currentUser, isNull);
+      expect(anonClient.auth.currentSession, isNull);
 
       final testUuid = const Uuid().v4();
-      expect(
-        () async => await unauthClient.from('patients').upsert({
-          'id': testUuid,
-          'display_name': 'Unauthorized Test',
-          'normalized_name': 'unauthorized test',
-        }),
-        throwsA(isA<PostgrestException>().having(
-          (e) => e.code,
-          'Postgres error code',
-          '42501',
-        )),
-      );
+      final insertedPatient = await anonClient.from('patients').upsert({
+        'id': testUuid,
+        'display_name': 'Single Clinic Test Patient',
+        'normalized_name': 'single clinic test patient',
+      }).select().single();
 
-      expect(
-        () async => await unauthClient.from('patient_sources').upsert({
-          'patient_id': testUuid,
-          'source': 'google_sheets',
-          'external_id': '999999',
-        }),
-        throwsA(isA<PostgrestException>().having(
-          (e) => e.code,
-          'Postgres error code',
-          '42501',
-        )),
-      );
+      expect(insertedPatient['id'], testUuid);
+      expect(insertedPatient['clinic_id'], 'c0000000-0000-0000-0000-000000000001');
+
+      final externalId = 'anon_${testUuid.substring(0, 8)}';
+      final insertedSource = await anonClient.from('patient_sources').upsert({
+        'patient_id': testUuid,
+        'source': 'google_sheets',
+        'external_id': externalId,
+      }).select().single();
+
+      expect(insertedSource['patient_id'], testUuid);
+
+      // Clean up test data
+      await anonClient.from('patient_sources').delete().eq('patient_id', testUuid);
+      await anonClient.from('patients').delete().eq('id', testUuid);
     });
 
     test('2. Authenticate clinic doctor and verify patient + patient_sources writes and multi-device retrieval', () async {
@@ -73,17 +69,21 @@ void main() {
         sheetsService: SheetsService(),
       );
 
-      // Create a test patient with external Sheet ID
+      // Create a test patient with unique external Sheet ID and phone
       final testPatientUuid = const Uuid().v4();
+      final uniqueSuffix = DateTime.now().microsecondsSinceEpoch.toString();
+      final uniqueExternalId = 'sheet_${uniqueSuffix.substring(uniqueSuffix.length - 8)}';
+      final uniquePhone = '9${uniqueSuffix.substring(uniqueSuffix.length - 9)}';
+
       final localPatient = Patient(
         id: testPatientUuid,
-        name: 'Dr Sync Test Patient',
-        displayName: 'Dr Sync Test Patient',
-        normalizedName: 'dr sync test patient',
-        phoneNumber: '9876543210',
-        phoneDisplay: '9876543210',
-        normalizedPhone: '9876543210',
-        legacyPatientId: '1000999',
+        name: 'Dr Sync Test Patient $uniqueSuffix',
+        displayName: 'Dr Sync Test Patient $uniqueSuffix',
+        normalizedName: 'dr sync test patient $uniqueSuffix',
+        phoneNumber: uniquePhone,
+        phoneDisplay: uniquePhone,
+        normalizedPhone: uniquePhone,
+        legacyPatientId: uniqueExternalId,
         source: PatientSource.clinicSheet,
         syncStatus: 'pending_cloud',
       );
@@ -96,12 +96,12 @@ void main() {
       // Verify patient in Supabase
       final cloudPatient = await supabaseService1.getPatientById(testPatientUuid);
       expect(cloudPatient, isNotNull);
-      expect(cloudPatient!.displayName, 'Dr Sync Test Patient');
+      expect(cloudPatient!.displayName, 'Dr Sync Test Patient $uniqueSuffix');
 
       // Verify patient_sources mapping in Supabase
       final mappedUuid = await supabaseService1.getPatientIdBySource(
         source: 'google_sheets',
-        externalId: '1000999',
+        externalId: uniqueExternalId,
       );
       expect(mappedUuid, testPatientUuid);
 

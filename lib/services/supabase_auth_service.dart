@@ -52,6 +52,7 @@ class SupabaseAuthService {
   }
 
   /// Signs in an existing clinic doctor account with email and password.
+  @Deprecated('Obsolete password-based authentication. Use signInWithGoogle().')
   Future<AuthResponse> signIn({
     required String email,
     required String password,
@@ -62,7 +63,9 @@ class SupabaseAuthService {
     );
 
     if (response.session != null && configService != null) {
+      // ignore: deprecated_member_use_from_same_package
       await configService!.setDoctorEmail(email.trim());
+      // ignore: deprecated_member_use_from_same_package
       await configService!.setDoctorPassword(password);
     }
 
@@ -71,6 +74,7 @@ class SupabaseAuthService {
 
   /// Registers a new clinic doctor account with email and password.
   /// (Supabase PostgreSQL auto-confirms the email immediately).
+  @Deprecated('Obsolete password-based authentication. Use signInWithGoogle().')
   Future<AuthResponse> signUp({
     required String email,
     required String password,
@@ -82,7 +86,9 @@ class SupabaseAuthService {
 
     // If session is already created by signup
     if (response.session != null && configService != null) {
+      // ignore: deprecated_member_use_from_same_package
       await configService!.setDoctorEmail(email.trim());
+      // ignore: deprecated_member_use_from_same_package
       await configService!.setDoctorPassword(password);
       return response;
     }
@@ -101,6 +107,7 @@ class SupabaseAuthService {
   /// 1. If an active session is already loaded by FlutterAuthStorage, returns true.
   /// 2. If stored credentials exist in ConfigService, attempts sign-in with those.
   /// 3. Otherwise, signs in or registers using default clinic credentials from AppConfig.
+  @Deprecated('Obsolete password-based authentication. Use signInWithGoogle().')
   Future<bool> ensureAuthenticated() async {
     if (isAuthenticated) {
       return true;

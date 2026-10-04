@@ -569,7 +569,7 @@ void main() {
       expect(result.reconciledPatients.length, 1);
       // But cloud sync must report false with descriptive RLS error
       expect(result.isSupabaseSynced, isFalse);
-      expect(result.supabaseError, contains("require the 'authenticated' role, but the app connects with the 'anon' role"));
+      expect(result.supabaseError, contains("Supabase Permission Error (42501)"));
 
       // Local patient must NOT be marked synced; it must remain pending_cloud!
       final local = (await db.getPatients()).first;

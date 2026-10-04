@@ -17,7 +17,6 @@ import 'unassigned_photos_screen.dart';
 import '../widgets/new_patient_dialog.dart';
 import '../services/patient_sync_service.dart';
 import '../services/supabase_patient_service.dart';
-import '../services/supabase_auth_service.dart';
 
 class PatientsScreen extends StatefulWidget {
   final GoogleAuthService authService;
@@ -27,7 +26,6 @@ class PatientsScreen extends StatefulWidget {
   final UploadQueueService queueService;
   final DriveService? driveService;
   final SupabasePatientService? supabaseService;
-  final SupabaseAuthService? supabaseAuthService;
 
   const PatientsScreen({
     super.key,
@@ -38,7 +36,6 @@ class PatientsScreen extends StatefulWidget {
     required this.queueService,
     this.driveService,
     this.supabaseService,
-    this.supabaseAuthService,
   });
 
   @override
@@ -149,6 +146,14 @@ class _PatientsScreenState extends State<PatientsScreen> {
 
       final now = DateTime.now();
 
+      // 1. Reconcile and push/pull any cloud updates with Supabase first
+      // (pushes pending deletions, pulls cross-device deletions and tombstones)
+      try {
+        await _patientSyncService.syncLocalWithSupabase();
+      } catch (e) {
+        debugPrint('Offline/error during initial Supabase sync: $e');
+      }
+
       if (!forceFullSync && config.lastSyncedRow > 1) {
         // Incremental sync
         final incResult = await widget.sheetsService.fetchIncrementalPatients(
@@ -198,9 +203,6 @@ class _PatientsScreenState extends State<PatientsScreen> {
 
       // Reconcile and push/pull any cloud updates with Supabase
       try {
-        if (widget.supabaseAuthService != null) {
-          await widget.supabaseAuthService!.ensureAuthenticated();
-        }
         await _patientSyncService.syncLocalWithSupabase();
       } catch (e) {
         debugPrint('Offline/error during Supabase sync: $e');
@@ -245,8 +247,8 @@ class _PatientsScreenState extends State<PatientsScreen> {
     }
   }
 
-  void _openPatientPhotos(Patient patient) {
-    Navigator.of(context).push(
+  Future<void> _openPatientPhotos(Patient patient) async {
+    final deleted = await Navigator.of(context).push<bool>(
       MaterialPageRoute(
         builder: (_) => PatientPhotosScreen(
           patient: patient,
@@ -254,9 +256,81 @@ class _PatientsScreenState extends State<PatientsScreen> {
           driveService: widget.driveService ?? DriveService(),
           folderService: _patientFolderService,
           queueService: widget.queueService,
+          patientSyncService: _patientSyncService,
         ),
       ),
     );
+    if (deleted == true) {
+      await _loadCachedPatients();
+      await _refreshAll();
+    }
+  }
+
+  Future<void> _confirmAndDeletePatient(Patient patient) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete Patient?'),
+        content: const Text(
+          'Delete this patient? The patient record will be removed from this app and other clinic devices. Their Google Drive photos will NOT be deleted.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: Colors.red,
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    // Immediately remove from visible patient list
+    setState(() {
+      _patients.removeWhere((p) => p.id == patient.id);
+    });
+
+    try {
+      final result = await _patientSyncService.deletePatient(patient.id);
+      await _loadCachedPatients();
+      await _refreshAll();
+
+      if (!mounted) return;
+      if (result.cloudDeleted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('${patient.displayName} deleted permanently.'),
+            backgroundColor: Colors.green.shade800,
+          ),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              '${patient.displayName} deleted locally. Cloud deletion pending sync.',
+            ),
+            backgroundColor: Colors.orange.shade800,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error deleting patient: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
   }
 
   Future<void> _handleTakePhotosForPatient(Patient patient) async {
@@ -321,9 +395,10 @@ class _PatientsScreenState extends State<PatientsScreen> {
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
       builder: (ctx) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 20, horizontal: 16),
-          child: Column(
+        child: SingleChildScrollView(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 16),
+            child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -393,11 +468,21 @@ class _PatientsScreenState extends State<PatientsScreen> {
                   _openPatientPhotos(patient);
                 },
               ),
+              ListTile(
+                leading: const Icon(Icons.delete_outline, color: Colors.red),
+                title: const Text('Delete Patient', style: TextStyle(color: Colors.red)),
+                subtitle: const Text('Remove from app and sync to clinic devices'),
+                onTap: () {
+                  Navigator.of(ctx).pop();
+                  _confirmAndDeletePatient(patient);
+                },
+              ),
             ],
           ),
         ),
       ),
-    );
+    ),
+  );
   }
 
   /// Opens the list of unassigned capture sessions.
@@ -556,7 +641,6 @@ class _PatientsScreenState extends State<PatientsScreen> {
           queueService: widget.queueService,
           driveService: widget.driveService,
           supabaseService: widget.supabaseService,
-          supabaseAuthService: widget.supabaseAuthService,
         ),
       ),
     )
