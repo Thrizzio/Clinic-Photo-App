@@ -137,3 +137,17 @@ Key V5 capabilities:
 - **Google Sheets Resurrection Prevention (Tombstones)**:
   - When a patient is deleted, their canonical UUID and external source mappings (e.g. `(google_sheets, legacyPatientId)`) are recorded in `deleted_patient_tombstones`.
   - Normal Sheets reconciliation checks `isSourceDeleted` and ignores rows matching tombstoned patients, preventing accidental delete → sync → resurrect loops.
+
+### 5. High-Performance Batch Sync & Cross-Device Drive Folder Propagation
+- **Separation of Sync Lifecycles**:
+  - **Normal Patient Database Sync (`SQLite ↔ Supabase`)**: Runs automatically in the background on startup (`_syncPatientDatabaseInBackground()`). It exchanges records solely between SQLite and Supabase. It strictly NEVER queries Google Drive API and NEVER queries Google Sheets.
+  - **Google Sheets Sync**: Isolated to explicit user requests (manual "Refresh") or settings reconfiguration (`_syncSheetInBackground()`).
+  - **Google Drive Operations**: Isolated to photo capture, upload, and patient folder resolution on demand. Drive API is never hit during normal patient list or background database syncs.
+- **Batching & In-Memory Indexing**:
+  - Eliminates N+1 per-patient HTTP queries by pre-fetching cloud patients and source mappings once upfront, indexing them in memory by source ID and normalized business identity `(normalized_name, normalized_phone)`.
+  - Commits updates in bulk via `upsertPatients()` and `linkPatientSources()` in both Supabase and SQLite. Network round-trips for 77 patients dropped from ~385 sequential calls down to ~2–4 bulk requests.
+- **Cross-Device Drive Folder Preservation**:
+  - `RemoteSupabasePatientService.upsertPatient` and `upsertPatients` omit `'drive_folder_id'` when null/empty, guaranteeing that PostgREST `onConflict: 'id'` never overwrites an existing cloud Drive folder with `NULL`.
+  - `Patient.merge` authoritatively preserves valid existing folders against incoming null values, and flags `FolderStatus.conflict` only when two different non-empty folder IDs exist.
+  - When Phone A creates a Drive folder (`patientFolderService.getOrCreatePatientFolder`), it marks the patient `pending_cloud` and immediately syncs the folder ID to Supabase if online.
+  - When Phone B syncs from Supabase, its UI immediately derives folder status from `patient.driveFolderId != null && patient.driveFolderId!.isNotEmpty`, enabling immediate direct photo capture without requiring the user to recreate the folder.

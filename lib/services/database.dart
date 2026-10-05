@@ -55,6 +55,11 @@ abstract class AppDatabase {
     required String externalId,
   });
 
+  /// Links multiple external source mappings in a single batch.
+  Future<void> linkPatientSources(
+    List<({String patientId, String source, String externalId})> sources,
+  );
+
   /// Resolves a patient UUID given an external source identifier.
   Future<String?> getPatientIdBySource({
     required String source,
@@ -63,6 +68,9 @@ abstract class AppDatabase {
 
   /// Gets all source mappings for a patient UUID.
   Future<List<Map<String, String>>> getSourcesForPatient(String patientId);
+
+  /// Retrieves all external source mappings in the local database.
+  Future<List<Map<String, String>>> getAllPatientSources();
 
   /// Gets all uploads (local photo records) belonging to a given patient.
   Future<List<UploadItem>> getUploadsForPatient(String patientId);
@@ -143,6 +151,9 @@ abstract class AppDatabase {
 
   /// Checks if a patient UUID was previously deleted.
   Future<bool> isPatientDeleted(String patientId);
+
+  /// Retrieves all deleted tombstone source keys ("$source:$externalId") for fast in-memory checking.
+  Future<Set<String>> getAllDeletedTombstoneSources();
 
   // --- Upload Queue Operations ---
 
@@ -1131,6 +1142,56 @@ class SqliteAppDatabase implements AppDatabase {
   }
 
   @override
+  Future<void> linkPatientSources(
+    List<({String patientId, String source, String externalId})> sources,
+  ) async {
+    if (sources.isEmpty) return;
+    const uuidGen = Uuid();
+    final nowIso = DateTime.now().toIso8601String();
+
+    await db.transaction((txn) async {
+      for (final s in sources) {
+        final existing = await txn.query(
+          'patient_sources',
+          columns: ['id'],
+          where: 'source = ? AND external_id = ?',
+          whereArgs: [s.source, s.externalId],
+          limit: 1,
+        );
+        if (existing.isNotEmpty) {
+          await txn.update(
+            'patient_sources',
+            {'patient_id': s.patientId},
+            where: 'source = ? AND external_id = ?',
+            whereArgs: [s.source, s.externalId],
+          );
+        } else {
+          await txn.insert('patient_sources', {
+            'id': uuidGen.v4(),
+            'patient_id': s.patientId,
+            'source': s.source,
+            'external_id': s.externalId,
+            'created_at': nowIso,
+          });
+        }
+      }
+    });
+  }
+
+  @override
+  Future<List<Map<String, String>>> getAllPatientSources() async {
+    final rows = await db.query(
+      'patient_sources',
+      columns: ['patient_id', 'source', 'external_id'],
+    );
+    return rows.map((r) => {
+      'patient_id': r['patient_id']?.toString() ?? '',
+      'source': r['source']?.toString() ?? '',
+      'external_id': r['external_id']?.toString() ?? '',
+    }).toList();
+  }
+
+  @override
   Future<List<UploadItem>> getUploadsForPatient(String patientId) async {
     final rows = await db.query(
       'uploads',
@@ -1382,6 +1443,18 @@ class SqliteAppDatabase implements AppDatabase {
       limit: 1,
     );
     return rows.isNotEmpty;
+  }
+
+  @override
+  Future<Set<String>> getAllDeletedTombstoneSources() async {
+    final rows = await db.query(
+      'deleted_patient_tombstones',
+      columns: ['source', 'external_id'],
+    );
+    return rows
+        .where((r) => r['source'] != null && r['external_id'] != null)
+        .map((r) => '${r['source']}:${r['external_id']}')
+        .toSet();
   }
 
   @override
@@ -1725,6 +1798,34 @@ class InMemoryAppDatabase implements AppDatabase {
   }
 
   @override
+  Future<void> linkPatientSources(
+    List<({String patientId, String source, String externalId})> sources,
+  ) async {
+    for (final s in sources) {
+      await linkPatientSource(
+        patientId: s.patientId,
+        source: s.source,
+        externalId: s.externalId,
+      );
+    }
+  }
+
+  @override
+  Future<List<Map<String, String>>> getAllPatientSources() async {
+    final list = <Map<String, String>>[];
+    for (final entry in _patientSources.entries) {
+      for (final s in entry.value) {
+        list.add({
+          'patient_id': entry.key,
+          'source': s.source,
+          'external_id': s.externalId,
+        });
+      }
+    }
+    return list;
+  }
+
+  @override
   Future<List<Map<String, String>>> getSourcesForPatient(String patientId) async {
     final list = _patientSources[patientId] ?? [];
     return list.map((s) => {'source': s.source, 'external_id': s.externalId}).toList();
@@ -1990,6 +2091,17 @@ class InMemoryAppDatabase implements AppDatabase {
   @override
   Future<bool> isPatientDeleted(String patientId) async {
     return _deletedTombstones.any((t) => t.patientId == patientId);
+  }
+
+  @override
+  Future<Set<String>> getAllDeletedTombstoneSources() async {
+    final set = <String>{};
+    for (final t in _deletedTombstones) {
+      if (t.source != null && t.externalId != null) {
+        set.add('${t.source}:${t.externalId}');
+      }
+    }
+    return set;
   }
 
   // --- Upload Queue Operations ---

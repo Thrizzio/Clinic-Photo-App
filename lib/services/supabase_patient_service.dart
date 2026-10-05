@@ -21,12 +21,23 @@ abstract class SupabasePatientService {
   /// Upserts a canonical patient record in Supabase.
   Future<Patient> upsertPatient(Patient patient);
 
+  /// Upserts multiple canonical patient records in Supabase (batched).
+  Future<void> upsertPatients(List<Patient> patients);
+
   /// Links an external source ID (e.g. 'google_sheets' -> '1000048') to a canonical patient UUID.
   Future<void> linkPatientSource({
     required String patientId,
     required String source,
     required String externalId,
   });
+
+  /// Links multiple external source mappings in Supabase (batched).
+  Future<void> linkPatientSources(
+    List<({String patientId, String source, String externalId})> sources,
+  );
+
+  /// Fetches all external source mappings from Supabase.
+  Future<List<Map<String, String>>> fetchAllPatientSources();
 
   /// Resolves a canonical patient UUID given an external source identifier.
   Future<String?> getPatientIdBySource({
@@ -135,15 +146,19 @@ class RemoteSupabasePatientService implements SupabasePatientService {
     }
 
     final nowIso = DateTime.now().toUtc().toIso8601String();
-    final rowData = {
+    final rowData = <String, dynamic>{
       'id': patient.id,
       'display_name': patient.displayName,
       'normalized_name': patient.normalizedName,
       'phone_display': patient.phoneDisplay,
       'normalized_phone': patient.normalizedPhone,
-      'drive_folder_id': patient.driveFolderId,
       'updated_at': nowIso,
     };
+    // CRITICAL: Only include drive_folder_id if non-empty, so PostgREST conflict update
+    // never overwrites an existing valid cloud drive_folder_id with null.
+    if (patient.driveFolderId != null && patient.driveFolderId!.trim().isNotEmpty) {
+      rowData['drive_folder_id'] = patient.driveFolderId!.trim();
+    }
 
     try {
       final response = await client
@@ -166,6 +181,47 @@ class RemoteSupabasePatientService implements SupabasePatientService {
     } catch (e) {
       debugPrint('Supabase upsertPatient error: $e');
       rethrow;
+    }
+  }
+
+  @override
+  Future<void> upsertPatients(List<Patient> patients) async {
+    if (patients.isEmpty) return;
+    for (final p in patients) {
+      if (!Patient.isValidUuid(p.id)) {
+        throw ArgumentError(
+          'Cannot upsert patient with non-UUID id: "${p.id}". Supabase requires a valid UUID primary key.',
+        );
+      }
+    }
+
+    final nowIso = DateTime.now().toUtc().toIso8601String();
+    final rowsData = patients.map((patient) {
+      final map = <String, dynamic>{
+        'id': patient.id,
+        'display_name': patient.displayName,
+        'normalized_name': patient.normalizedName,
+        'phone_display': patient.phoneDisplay,
+        'normalized_phone': patient.normalizedPhone,
+        'updated_at': nowIso,
+      };
+      if (patient.driveFolderId != null && patient.driveFolderId!.trim().isNotEmpty) {
+        map['drive_folder_id'] = patient.driveFolderId!.trim();
+      }
+      return map;
+    }).toList();
+
+    for (var i = 0; i < rowsData.length; i += 50) {
+      final chunk = rowsData.sublist(i, (i + 50 > rowsData.length) ? rowsData.length : i + 50);
+      try {
+        await client.from('patients').upsert(
+          chunk,
+          onConflict: 'id',
+        );
+      } catch (e) {
+        debugPrint('Supabase upsertPatients batch error: $e');
+        rethrow;
+      }
     }
   }
 
@@ -197,6 +253,57 @@ class RemoteSupabasePatientService implements SupabasePatientService {
     } catch (e) {
       debugPrint('Supabase linkPatientSource error: $e');
       rethrow;
+    }
+  }
+
+  @override
+  Future<void> linkPatientSources(
+    List<({String patientId, String source, String externalId})> sources,
+  ) async {
+    if (sources.isEmpty) return;
+    const uuidGen = Uuid();
+    final nowIso = DateTime.now().toUtc().toIso8601String();
+    final rowsData = sources.map((s) => {
+      'id': uuidGen.v4(),
+      'patient_id': s.patientId,
+      'source': s.source,
+      'external_id': s.externalId,
+      'created_at': nowIso,
+    }).toList();
+
+    for (var i = 0; i < rowsData.length; i += 50) {
+      final chunk = rowsData.sublist(i, (i + 50 > rowsData.length) ? rowsData.length : i + 50);
+      try {
+        await client.from('patient_sources').upsert(
+          chunk,
+          onConflict: 'source,external_id',
+        );
+      } catch (e) {
+        debugPrint('Supabase linkPatientSources batch error: $e');
+        rethrow;
+      }
+    }
+  }
+
+  @override
+  Future<List<Map<String, String>>> fetchAllPatientSources() async {
+    try {
+      final response = await client
+          .from('patient_sources')
+          .select('patient_id, source, external_id');
+      final list = <Map<String, String>>[];
+      for (final row in (response as List<dynamic>)) {
+        final m = row as Map<String, dynamic>;
+        list.add({
+          'patient_id': m['patient_id']?.toString() ?? '',
+          'source': m['source']?.toString() ?? '',
+          'external_id': m['external_id']?.toString() ?? '',
+        });
+      }
+      return list;
+    } catch (e) {
+      debugPrint('Supabase fetchAllPatientSources error: $e');
+      return [];
     }
   }
 
@@ -348,8 +455,52 @@ class InMemorySupabasePatientService implements SupabasePatientService {
         'Cannot upsert patient with non-UUID id: "${patient.id}". Supabase requires a valid UUID primary key.',
       );
     }
-    _patients[patient.id] = patient;
-    return patient;
+    final existing = _patients[patient.id];
+    final existingFolder = (existing?.driveFolderId != null && existing!.driveFolderId!.isNotEmpty)
+        ? existing.driveFolderId
+        : null;
+    final incomingFolder = (patient.driveFolderId != null && patient.driveFolderId!.isNotEmpty)
+        ? patient.driveFolderId
+        : null;
+
+    String? effectiveFolderId;
+    FolderStatus effectiveStatus;
+
+    if (existing?.folderStatus == FolderStatus.conflict || patient.folderStatus == FolderStatus.conflict) {
+      effectiveStatus = FolderStatus.conflict;
+      effectiveFolderId = null;
+    } else if (existingFolder != null && incomingFolder != null) {
+      if (existingFolder != incomingFolder) {
+        effectiveStatus = FolderStatus.conflict;
+        effectiveFolderId = null;
+      } else {
+        effectiveFolderId = existingFolder;
+        effectiveStatus = FolderStatus.available;
+      }
+    } else if (existingFolder != null) {
+      effectiveFolderId = existingFolder;
+      effectiveStatus = FolderStatus.available;
+    } else if (incomingFolder != null) {
+      effectiveFolderId = incomingFolder;
+      effectiveStatus = FolderStatus.available;
+    } else {
+      effectiveFolderId = null;
+      effectiveStatus = FolderStatus.missing;
+    }
+
+    final merged = patient.copyWith(
+      driveFolderId: effectiveFolderId,
+      folderStatus: effectiveStatus,
+    );
+    _patients[patient.id] = merged;
+    return merged;
+  }
+
+  @override
+  Future<void> upsertPatients(List<Patient> patients) async {
+    for (final p in patients) {
+      await upsertPatient(p);
+    }
   }
 
   @override
@@ -367,6 +518,34 @@ class InMemorySupabasePatientService implements SupabasePatientService {
     final list = _patientSources.putIfAbsent(patientId, () => []);
     list.removeWhere((item) => item.source == source && item.externalId == externalId);
     list.add((source: source, externalId: externalId));
+  }
+
+  @override
+  Future<void> linkPatientSources(
+    List<({String patientId, String source, String externalId})> sources,
+  ) async {
+    for (final s in sources) {
+      await linkPatientSource(
+        patientId: s.patientId,
+        source: s.source,
+        externalId: s.externalId,
+      );
+    }
+  }
+
+  @override
+  Future<List<Map<String, String>>> fetchAllPatientSources() async {
+    final list = <Map<String, String>>[];
+    for (final entry in _patientSources.entries) {
+      for (final s in entry.value) {
+        list.add({
+          'patient_id': entry.key,
+          'source': s.source,
+          'external_id': s.externalId,
+        });
+      }
+    }
+    return list;
   }
 
   @override

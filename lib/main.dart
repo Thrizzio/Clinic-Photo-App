@@ -49,6 +49,7 @@ void main() async {
     authService: authService,
     configService: configService,
     database: database,
+    supabaseService: supabaseService,
   );
 
   final queueService = UploadQueueService(

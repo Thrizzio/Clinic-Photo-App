@@ -53,7 +53,7 @@ class Patient {
   final String? driveFolderId;
 
   /// Status of the patient's Google Drive folder.
-  final FolderStatus folderStatus;
+  final FolderStatus _folderStatus;
 
   /// Record creation timestamp.
   final DateTime? createdAt;
@@ -76,7 +76,7 @@ class Patient {
     this.legacyPatientId,
     this.source = PatientSource.clinicSheet,
     this.driveFolderId,
-    this.folderStatus = FolderStatus.available,
+    FolderStatus folderStatus = FolderStatus.missing,
     this.createdAt,
     this.updatedAt,
     this.syncStatus = 'synced',
@@ -84,7 +84,21 @@ class Patient {
         // ignore: prefer_initializing_formals
         _normalizedName = normalizedName,
         _phoneDisplay = phoneDisplay ?? phoneNumber,
-        _normalizedPhone = normalizedPhone ?? phoneNumberNormalized;
+        _normalizedPhone = normalizedPhone ?? phoneNumberNormalized,
+        // ignore: prefer_initializing_formals
+        _folderStatus = folderStatus;
+
+  /// Folder status with authoritative derivation:
+  /// - conflict if marked conflict
+  /// - available if driveFolderId is valid and non-empty
+  /// - otherwise fallback to _folderStatus (default missing)
+  FolderStatus get folderStatus {
+    if (_folderStatus == FolderStatus.conflict) return FolderStatus.conflict;
+    if (driveFolderId != null && driveFolderId!.trim().isNotEmpty) {
+      return FolderStatus.available;
+    }
+    return _folderStatus;
+  }
 
   /// Raw or stored name value (empty if unpopulated).
   String get name => _name;
@@ -114,9 +128,9 @@ class Patient {
 
   /// True if photos can be captured and uploaded for this patient.
   bool get isUploadable =>
-      folderStatus == FolderStatus.available &&
+      folderStatus != FolderStatus.conflict &&
       driveFolderId != null &&
-      driveFolderId!.isNotEmpty;
+      driveFolderId!.trim().isNotEmpty;
 
   static final RegExp _uuidRegex = RegExp(
     r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$',
@@ -250,35 +264,35 @@ class Patient {
   /// Hard Invariant: If doctor-created patient matches an incoming Sheet patient,
   /// retains existing UUID, Drive folder, and sets legacyPatientId with source = merged.
   static Patient merge(Patient existing, Patient incoming) {
-    FolderStatus mergedStatus = incoming.folderStatus;
-    String? mergedFolderId = incoming.driveFolderId;
+    FolderStatus mergedStatus;
+    String? mergedFolderId;
+
+    final existingHasFolder = existing.driveFolderId != null && existing.driveFolderId!.trim().isNotEmpty;
+    final incomingHasFolder = incoming.driveFolderId != null && incoming.driveFolderId!.trim().isNotEmpty;
 
     if (existing.folderStatus == FolderStatus.conflict ||
         incoming.folderStatus == FolderStatus.conflict) {
       mergedStatus = FolderStatus.conflict;
       mergedFolderId = null;
-    } else if (existing.folderStatus == FolderStatus.available &&
-        incoming.folderStatus == FolderStatus.available) {
-      if (existing.driveFolderId != incoming.driveFolderId &&
-          existing.driveFolderId != null &&
-          incoming.driveFolderId != null) {
+    } else if (existingHasFolder && incomingHasFolder) {
+      if (existing.driveFolderId!.trim() != incoming.driveFolderId!.trim()) {
         mergedStatus = FolderStatus.conflict;
         mergedFolderId = null;
       } else {
-        mergedFolderId = existing.driveFolderId ?? incoming.driveFolderId;
+        mergedFolderId = existing.driveFolderId!.trim();
         mergedStatus = FolderStatus.available;
       }
-    } else if (existing.folderStatus == FolderStatus.available &&
-        incoming.folderStatus == FolderStatus.missing) {
+    } else if (existingHasFolder) {
+      // Preserve existing valid folder ID (null/empty incoming cannot overwrite)
+      mergedFolderId = existing.driveFolderId!.trim();
       mergedStatus = FolderStatus.available;
-      mergedFolderId = existing.driveFolderId;
-    } else if (existing.folderStatus == FolderStatus.missing &&
-        incoming.folderStatus == FolderStatus.available) {
+    } else if (incomingHasFolder) {
+      // Use incoming valid folder ID (null/empty existing cannot block valid incoming)
+      mergedFolderId = incoming.driveFolderId!.trim();
       mergedStatus = FolderStatus.available;
-      mergedFolderId = incoming.driveFolderId;
     } else {
-      mergedStatus = existing.driveFolderId != null ? existing.folderStatus : incoming.folderStatus;
-      mergedFolderId = existing.driveFolderId ?? incoming.driveFolderId;
+      mergedFolderId = null;
+      mergedStatus = FolderStatus.missing;
     }
 
     // Preserve valid clinical name: incoming name overwrites only if genuine.
@@ -302,6 +316,10 @@ class Patient {
 
     final mergedLegacyId = incoming.legacyPatientId ?? existing.legacyPatientId;
 
+    final mergedSyncStatus = (existing.syncStatus == 'pending_cloud' && incoming.source == PatientSource.clinicSheet)
+        ? 'pending_cloud'
+        : incoming.syncStatus;
+
     return Patient(
       id: existing.id, // Always retain existing local UUID
       name: mergedName,
@@ -315,6 +333,7 @@ class Patient {
       folderStatus: mergedStatus,
       createdAt: existing.createdAt,
       updatedAt: DateTime.now(),
+      syncStatus: mergedSyncStatus,
     );
   }
 

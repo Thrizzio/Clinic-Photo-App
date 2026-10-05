@@ -6,6 +6,7 @@ import 'database.dart';
 import 'drive.dart';
 import 'google_auth.dart';
 import 'sheets.dart';
+import 'supabase_patient_service.dart';
 
 class ConflictFolderException implements Exception {
   final String message;
@@ -34,6 +35,7 @@ class PatientFolderService {
   final AppDatabase database;
   final ConfigService configService;
   final GoogleAuthService authService;
+  final SupabasePatientService? supabaseService;
 
   PatientFolderService({
     required this.driveService,
@@ -41,6 +43,7 @@ class PatientFolderService {
     required this.database,
     required this.configService,
     required this.authService,
+    this.supabaseService,
   });
 
   /// Deterministically gets or creates a patient's Drive folder under the configured parent.
@@ -78,10 +81,18 @@ class PatientFolderService {
 
     // 2. Check if a valid folder ID is already set on the patient model
     if (patient.driveFolderId != null && patient.driveFolderId!.isNotEmpty) {
-      final updatedPatient = patient.copyWith(
+      Patient updatedPatient = patient.copyWith(
         folderStatus: FolderStatus.available,
         updatedAt: DateTime.now(),
       );
+      if (updatedPatient.syncStatus == 'pending_cloud' &&
+          supabaseService != null &&
+          Patient.isValidUuid(updatedPatient.id)) {
+        try {
+          await supabaseService!.upsertPatient(updatedPatient);
+          updatedPatient = updatedPatient.copyWith(syncStatus: 'synced');
+        } catch (_) {}
+      }
       await database.updatePatient(updatedPatient);
       return PatientFolderResult(
         patient: updatedPatient,
@@ -163,19 +174,32 @@ class PatientFolderService {
       debugPrint('Created new Drive folder "$canonicalName" under parent $parentFolderId: $resolvedFolderId');
     }
 
-    // 6. Persist folder ID locally
-    final availablePatient = patient.copyWith(
+    // 6. Persist folder ID locally marked pending_cloud
+    final pendingPatient = patient.copyWith(
       driveFolderId: resolvedFolderId,
       folderStatus: FolderStatus.available,
+      syncStatus: 'pending_cloud',
       updatedAt: DateTime.now(),
     );
-    await database.updatePatient(availablePatient);
+    await database.updatePatient(pendingPatient);
 
-    // 7. Note: V4 ceases writing folder URLs back to Google Sheets (Sheets is import-only).
+    Patient effectivePatient = pendingPatient;
+
+    // 7. Push to Supabase immediately if service is available
+    if (supabaseService != null && Patient.isValidUuid(effectivePatient.id)) {
+      try {
+        await supabaseService!.upsertPatient(effectivePatient);
+        effectivePatient = effectivePatient.copyWith(syncStatus: 'synced');
+        await database.updatePatient(effectivePatient);
+        debugPrint('Propagated drive_folder_id to Supabase for ${effectivePatient.displayName}: $resolvedFolderId');
+      } catch (e) {
+        debugPrint('Notice: Could not push resolved folder to Supabase immediately (queued for sync): $e');
+      }
+    }
 
     // 8. Mark available
     return PatientFolderResult(
-      patient: availablePatient,
+      patient: effectivePatient,
       driveFolderId: resolvedFolderId,
       createdNew: createdNew,
     );
