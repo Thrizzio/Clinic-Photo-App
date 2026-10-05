@@ -384,16 +384,19 @@ void main() {
       // Verify patient is shown in list
       expect(find.text('Delete Target'), findsOneWidget);
 
-      // Tap on the patient tile to open bottom sheet
+      // Tap on the patient tile to directly open PatientPhotosScreen
       await tester.tap(find.text('Delete Target'));
       await tester.pumpAndSettle();
 
-      // Find "Delete Patient" in bottom sheet
-      final deleteTile = find.widgetWithText(ListTile, 'Delete Patient');
-      expect(deleteTile, findsOneWidget);
+      // Find "Delete Patient" in More options menu
+      await tester.tap(find.byTooltip('More options'));
+      await tester.pumpAndSettle();
+
+      final deleteOption = find.text('Delete Patient');
+      expect(deleteOption, findsOneWidget);
 
       // Tap "Delete Patient"
-      await tester.tap(deleteTile);
+      await tester.tap(deleteOption);
       await tester.pumpAndSettle();
 
       // Verify confirmation dialog text
@@ -413,11 +416,11 @@ void main() {
       expect(await database.getPatient(patientId), isNotNull);
       expect(await supabaseService.getPatientById(patientId), isNotNull);
 
-      // 2. Tap again and test Delete button
-      await tester.tap(find.text('Delete Target'));
+      // 2. Open menu again and test Delete button
+      await tester.tap(find.byTooltip('More options'));
       await tester.pumpAndSettle();
 
-      await tester.tap(find.widgetWithText(ListTile, 'Delete Patient'));
+      await tester.tap(find.text('Delete Patient'));
       await tester.pumpAndSettle();
 
       await tester.tap(find.widgetWithText(FilledButton, 'Delete'));

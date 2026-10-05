@@ -7,11 +7,15 @@ import '../services/supabase_patient_service.dart';
 class NewPatientDialog extends StatefulWidget {
   final AppDatabase database;
   final SupabasePatientService? supabaseService;
+  final String? initialName;
+  final String? initialPhone;
 
   const NewPatientDialog({
     super.key,
     required this.database,
     this.supabaseService,
+    this.initialName,
+    this.initialPhone,
   });
 
   /// Displays the dialog and returns the created or selected existing [Patient], or null if cancelled.
@@ -19,6 +23,8 @@ class NewPatientDialog extends StatefulWidget {
     BuildContext context, {
     required AppDatabase database,
     SupabasePatientService? supabaseService,
+    String? initialName,
+    String? initialPhone,
   }) {
     return showDialog<Patient>(
       context: context,
@@ -26,6 +32,8 @@ class NewPatientDialog extends StatefulWidget {
       builder: (_) => NewPatientDialog(
         database: database,
         supabaseService: supabaseService,
+        initialName: initialName,
+        initialPhone: initialPhone,
       ),
     );
   }
@@ -36,10 +44,17 @@ class NewPatientDialog extends StatefulWidget {
 
 class _NewPatientDialogState extends State<NewPatientDialog> {
   final _formKey = GlobalKey<FormState>();
-  final _nameController = TextEditingController();
-  final _phoneController = TextEditingController();
+  late final TextEditingController _nameController;
+  late final TextEditingController _phoneController;
   bool _isChecking = false;
   String? _errorMessage;
+
+  @override
+  void initState() {
+    super.initState();
+    _nameController = TextEditingController(text: widget.initialName ?? '');
+    _phoneController = TextEditingController(text: widget.initialPhone ?? '');
+  }
 
   @override
   void dispose() {
@@ -172,7 +187,7 @@ class _NewPatientDialogState extends State<NewPatientDialog> {
               const SizedBox(height: 16),
               TextFormField(
                 controller: _nameController,
-                autofocus: true,
+                autofocus: (widget.initialName == null || widget.initialName!.trim().isEmpty),
                 textCapitalization: TextCapitalization.words,
                 decoration: const InputDecoration(
                   labelText: 'Patient Name *',
@@ -193,6 +208,7 @@ class _NewPatientDialogState extends State<NewPatientDialog> {
               const SizedBox(height: 14),
               TextFormField(
                 controller: _phoneController,
+                autofocus: (widget.initialName != null && widget.initialName!.trim().isNotEmpty && (widget.initialPhone == null || widget.initialPhone!.trim().isEmpty)),
                 keyboardType: TextInputType.phone,
                 decoration: const InputDecoration(
                   labelText: 'Phone Number *',

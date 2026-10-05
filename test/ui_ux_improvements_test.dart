@@ -145,10 +145,10 @@ void main() {
 
       await tester.pumpAndSettle();
 
-      // Top-right AppBar icons: person_add_outlined (New patient) and settings_outlined
+      // Top-right AppBar icons: settings_outlined (New patient is not shown on empty search)
       final newPatientBtn = find.byTooltip('New patient');
-      expect(newPatientBtn, findsOneWidget);
-      expect(find.byIcon(Icons.person_add_outlined), findsOneWidget);
+      expect(newPatientBtn, findsNothing);
+      expect(find.byIcon(Icons.person_add_outlined), findsNothing);
 
       final settingsBtn = find.byTooltip('Settings');
       expect(settingsBtn, findsOneWidget);

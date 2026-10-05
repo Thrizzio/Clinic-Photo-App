@@ -53,12 +53,14 @@ class _PatientsScreenState extends State<PatientsScreen> {
   bool _isSyncing = false;
   String? _syncStatusMessage;
   bool _isOffline = false;
+  bool _isOpeningCamera = false;
   late final PatientFolderService _patientFolderService = PatientFolderService(
     driveService: widget.driveService ?? DriveService(),
     sheetsService: widget.sheetsService,
     authService: widget.authService,
     configService: widget.configService,
     database: widget.database,
+    supabaseService: widget.supabaseService,
   );
   late final PatientSyncService _patientSyncService = PatientSyncService(
     database: widget.database,
@@ -72,7 +74,7 @@ class _PatientsScreenState extends State<PatientsScreen> {
     widget.queueService.addListener(_onQueueUpdated);
     _loadCachedPatients();
     _updateQueueStatus();
-    _syncSheetInBackground(forceFullSync: true);
+    _syncPatientDatabaseInBackground();
   }
 
   @override
@@ -99,8 +101,12 @@ class _PatientsScreenState extends State<PatientsScreen> {
   }
 
   /// Loads cached patients and unassigned sessions count immediately from SQLite.
+  /// Preserves the active search query and filter mode if present.
   Future<void> _loadCachedPatients() async {
-    final cached = await widget.database.getPatients();
+    final query = _searchController.text.trim();
+    final cached = query.isNotEmpty
+        ? await widget.database.searchPatients(query, mode: _selectedSearchMode)
+        : await widget.database.getPatients();
     final unassignedCount = await widget.database.getUnassignedSessionsCount();
     if (mounted) {
       setState(() {
@@ -125,9 +131,45 @@ class _PatientsScreenState extends State<PatientsScreen> {
     }
   }
 
+  /// Fast background patient database sync (SQLite <-> Supabase).
+  /// Normal patient-list sync should primarily be SQLite <-> Supabase.
+  /// Does NOT query Google Sheets or Google Drive.
+  Future<void> _syncPatientDatabaseInBackground() async {
+    if (mounted) {
+      setState(() {
+        _isSyncing = true;
+      });
+    }
+
+    try {
+      await _patientSyncService.syncLocalWithSupabase();
+      await _refreshAll();
+
+      if (mounted) {
+        final now = DateTime.now();
+        final timeStr = DateFormat('h:mm a').format(now);
+        setState(() {
+          _isSyncing = false;
+          _isOffline = false;
+          _syncStatusMessage = '✓ Synced $timeStr';
+        });
+      }
+    } catch (e) {
+      debugPrint('Background database sync notice: $e');
+      if (mounted) {
+        setState(() {
+          _isSyncing = false;
+          _isOffline = true;
+          _syncStatusMessage = 'Offline · Showing cached list';
+        });
+      }
+    }
+  }
+
   /// Background sync with Google Sheet.
   /// If [forceFullSync] is true, or if no full sync has occurred, or if incremental sync fails:
   /// performs a complete reconciliation using validateAndFetchPatients + reconcileSheetPatients.
+  /// Triggered only when explicitly requested (e.g. manual Refresh or after settings reconfiguration).
   Future<void> _syncSheetInBackground({bool forceFullSync = false}) async {
     final config = widget.configService.loadConfig();
     if (!config.hasCompletedSetup || config.spreadsheetId.isEmpty) return;
@@ -145,14 +187,6 @@ class _PatientsScreenState extends State<PatientsScreen> {
       }
 
       final now = DateTime.now();
-
-      // 1. Reconcile and push/pull any cloud updates with Supabase first
-      // (pushes pending deletions, pulls cross-device deletions and tombstones)
-      try {
-        await _patientSyncService.syncLocalWithSupabase();
-      } catch (e) {
-        debugPrint('Offline/error during initial Supabase sync: $e');
-      }
 
       if (!forceFullSync && config.lastSyncedRow > 1) {
         // Incremental sync
@@ -199,19 +233,6 @@ class _PatientsScreenState extends State<PatientsScreen> {
           lastSyncedRow: fullResult.totalRows,
           isFullSync: true,
         );
-      }
-
-      // Reconcile and push/pull any cloud updates with Supabase
-      try {
-        await _patientSyncService.syncLocalWithSupabase();
-      } catch (e) {
-        debugPrint('Offline/error during Supabase sync: $e');
-      }
-
-      final dbPatients = await widget.database.getPatients();
-      debugPrint('DIRECT DB QUERY AFTER SYNC (total ${dbPatients.length}):');
-      for (final p in dbPatients.take(5)) {
-        debugPrint('DB PATIENT: id=${p.id}, name="${p.name}", displayName="${p.displayName}"');
       }
 
       await _refreshAll();
@@ -266,224 +287,73 @@ class _PatientsScreenState extends State<PatientsScreen> {
     }
   }
 
-  Future<void> _confirmAndDeletePatient(Patient patient) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Delete Patient?'),
-        content: const Text(
-          'Delete this patient? The patient record will be removed from this app and other clinic devices. Their Google Drive photos will NOT be deleted.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            style: FilledButton.styleFrom(
-              backgroundColor: Colors.red,
-              foregroundColor: Colors.white,
-            ),
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('Delete'),
-          ),
-        ],
-      ),
-    );
-
-    if (confirmed != true || !mounted) return;
-
-    // Immediately remove from visible patient list
-    setState(() {
-      _patients.removeWhere((p) => p.id == patient.id);
-    });
+  Future<void> _handleTakePhotosForPatient(Patient patient) async {
+    if (_isOpeningCamera) return;
+    _isOpeningCamera = true;
 
     try {
-      final result = await _patientSyncService.deletePatient(patient.id);
-      await _loadCachedPatients();
-      await _refreshAll();
+      if (patient.folderStatus == FolderStatus.conflict) {
+        showDialog(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Row(
+              children: [
+                Icon(Icons.warning_amber_rounded, color: Colors.red),
+                SizedBox(width: 8),
+                Expanded(child: Text('Conflicting Drive Folders', style: TextStyle(fontSize: 18))),
+              ],
+            ),
+            content: Text(
+              'Cannot capture photos for ${patient.displayName}.\n\n'
+              'Multiple distinct Google Drive folders were found across visits for this patient. '
+              'Please ensure only one consistent Drive folder is assigned in the Visits sheet and refresh.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                child: const Text('OK'),
+              ),
+            ],
+          ),
+        );
+        return;
+      }
+
+      Patient targetPatient = patient;
+
+      if (patient.folderStatus == FolderStatus.missing) {
+        try {
+          final res = await _patientFolderService.getOrCreatePatientFolder(patient);
+          if (res.patient.isUploadable) {
+            targetPatient = res.patient;
+            await widget.database.updatePatient(targetPatient);
+            await _refreshAll();
+          }
+        } catch (e) {
+          debugPrint('Drive folder setup deferred while offline: $e');
+        }
+      }
 
       if (!mounted) return;
-      if (result.cloudDeleted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('${patient.displayName} deleted permanently.'),
-            backgroundColor: Colors.green.shade800,
-          ),
-        );
-      } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              '${patient.displayName} deleted locally. Cloud deletion pending sync.',
-            ),
-            backgroundColor: Colors.orange.shade800,
-          ),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Error deleting patient: $e'),
-            backgroundColor: Colors.red,
-          ),
-        );
-      }
-    }
-  }
 
-  Future<void> _handleTakePhotosForPatient(Patient patient) async {
-    if (patient.folderStatus == FolderStatus.conflict) {
-      showDialog(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          title: const Row(
-            children: [
-              Icon(Icons.warning_amber_rounded, color: Colors.red),
-              SizedBox(width: 8),
-              Expanded(child: Text('Conflicting Drive Folders', style: TextStyle(fontSize: 18))),
-            ],
+      await Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => CameraScreen(
+            patient: targetPatient,
+            queueService: widget.queueService,
           ),
-          content: Text(
-            'Cannot capture photos for ${patient.displayName}.\n\n'
-            'Multiple distinct Google Drive folders were found across visits for this patient. '
-            'Please ensure only one consistent Drive folder is assigned in the Visits sheet and refresh.',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(ctx).pop(),
-              child: const Text('OK'),
-            ),
-          ],
         ),
       );
-      return;
+    } finally {
+      _isOpeningCamera = false;
     }
 
-    Patient targetPatient = patient;
-
-    if (patient.folderStatus == FolderStatus.missing) {
-      try {
-        final res = await _patientFolderService.getOrCreatePatientFolder(patient);
-        if (res.patient.isUploadable) {
-          targetPatient = res.patient;
-          await widget.database.updatePatient(targetPatient);
-          await _loadCachedPatients();
-        }
-      } catch (e) {
-        debugPrint('Drive folder setup deferred while offline: $e');
-      }
+    if (mounted) {
+      await _refreshAll();
     }
-
-    if (!mounted) return;
-
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => CameraScreen(
-          patient: targetPatient,
-          queueService: widget.queueService,
-        ),
-      ),
-    );
   }
 
-  void _onPatientTapped(Patient patient) {
-    showModalBottomSheet(
-      context: context,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (ctx) => SafeArea(
-        child: SingleChildScrollView(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 16),
-            child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  CircleAvatar(
-                    radius: 22,
-                    backgroundColor: Theme.of(ctx).colorScheme.primaryContainer,
-                    child: Text(
-                      patient.displayName.isNotEmpty ? patient.displayName[0].toUpperCase() : '?',
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 16,
-                        color: Theme.of(ctx).colorScheme.onPrimaryContainer,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          patient.displayName,
-                          style: TextStyle(
-                            fontSize: 18,
-                            fontWeight: FontWeight.bold,
-                            fontStyle: patient.hasValidName ? FontStyle.normal : FontStyle.italic,
-                            color: patient.hasValidName ? null : Theme.of(ctx).colorScheme.onSurfaceVariant,
-                          ),
-                        ),
-                        if ((patient.phoneDisplay ?? patient.phoneNumber) != null &&
-                            (patient.phoneDisplay ?? patient.phoneNumber)!.isNotEmpty)
-                          Text(
-                            patient.phoneDisplay ?? patient.phoneNumber!,
-                            style: TextStyle(
-                              fontSize: 13,
-                              color: Theme.of(ctx).colorScheme.onSurfaceVariant,
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 16),
-              const Divider(),
-              ListTile(
-                leading: const Icon(Icons.camera_alt_outlined),
-                title: const Text('Take Photos'),
-                subtitle: Text(
-                  patient.folderStatus == FolderStatus.missing
-                      ? 'Creates Drive folder automatically'
-                      : 'Capture clinical photos directly for this patient',
-                ),
-                onTap: () {
-                  Navigator.of(ctx).pop();
-                  _handleTakePhotosForPatient(patient);
-                },
-              ),
-              ListTile(
-                leading: const Icon(Icons.photo_library_outlined),
-                title: const Text('View Photos'),
-                subtitle: const Text('Browse chronological photo gallery from Drive'),
-                onTap: () {
-                  Navigator.of(ctx).pop();
-                  _openPatientPhotos(patient);
-                },
-              ),
-              ListTile(
-                leading: const Icon(Icons.delete_outline, color: Colors.red),
-                title: const Text('Delete Patient', style: TextStyle(color: Colors.red)),
-                subtitle: const Text('Remove from app and sync to clinic devices'),
-                onTap: () {
-                  Navigator.of(ctx).pop();
-                  _confirmAndDeletePatient(patient);
-                },
-              ),
-            ],
-          ),
-        ),
-      ),
-    ),
-  );
-  }
+
 
   /// Opens the list of unassigned capture sessions.
   Future<void> _openUnassignedPhotos() async {
@@ -501,6 +371,8 @@ class _PatientsScreenState extends State<PatientsScreen> {
 
   /// Starts Workflow B: creates a new unassigned session and opens camera immediately.
   Future<void> _startUnassignedSession() async {
+    if (_isOpeningCamera) return;
+    _isOpeningCamera = true;
     try {
       final session = await widget.queueService.createUnassignedSession();
       if (!mounted) return;
@@ -513,14 +385,18 @@ class _PatientsScreenState extends State<PatientsScreen> {
           ),
         ),
       );
-
-      _refreshAll();
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Could not start unassigned capture: $e')),
         );
       }
+    } finally {
+      _isOpeningCamera = false;
+    }
+
+    if (mounted) {
+      await _refreshAll();
     }
   }
 
@@ -650,14 +526,35 @@ class _PatientsScreenState extends State<PatientsScreen> {
     });
   }
 
-  Future<void> _openNewPatientDialog() async {
+  bool _isQueryPhoneNumber(String query) {
+    if (_selectedSearchMode == SearchFilterMode.phone) return true;
+    if (_selectedSearchMode == SearchFilterMode.name) return false;
+    final cleaned = query.replaceAll(RegExp(r'[\s\-()+]'), '');
+    return cleaned.isNotEmpty && RegExp(r'^\d+$').hasMatch(cleaned);
+  }
+
+  Future<void> _openNewPatientDialog({String? initialQuery}) async {
+    String? initialName;
+    String? initialPhone;
+    if (initialQuery != null && initialQuery.trim().isNotEmpty) {
+      final trimmed = initialQuery.trim();
+      if (_isQueryPhoneNumber(trimmed)) {
+        initialPhone = trimmed;
+      } else {
+        initialName = trimmed;
+      }
+    }
+
     final patient = await NewPatientDialog.show(
       context,
       database: widget.database,
       supabaseService: widget.supabaseService,
+      initialName: initialName,
+      initialPhone: initialPhone,
     );
     if (patient != null && mounted) {
       await _loadCachedPatients();
+      await _refreshAll();
       _handleTakePhotosForPatient(patient);
     }
   }
@@ -671,11 +568,6 @@ class _PatientsScreenState extends State<PatientsScreen> {
       appBar: AppBar(
         title: const Text('Patients', style: TextStyle(fontWeight: FontWeight.bold)),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.person_add_outlined),
-            tooltip: 'New patient',
-            onPressed: _openNewPatientDialog,
-          ),
           IconButton(
             icon: const Icon(Icons.settings_outlined),
             tooltip: 'Settings',
@@ -909,13 +801,40 @@ class _PatientsScreenState extends State<PatientsScreen> {
                       ? Center(
                           child: SingleChildScrollView(
                             padding: const EdgeInsets.fromLTRB(32, 32, 32, 88),
-                            child: Text(
-                              _searchController.text.isNotEmpty
-                                  ? 'No patients match "${_searchController.text}"'
-                                  : 'No patients found in sheet.\nTap Refresh to sync.',
-                              textAlign: TextAlign.center,
-                              style: TextStyle(color: theme.colorScheme.onSurfaceVariant),
-                            ),
+                            child: _searchController.text.trim().isNotEmpty
+                                ? Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Icon(
+                                        Icons.person_search_outlined,
+                                        size: 48,
+                                        color: theme.colorScheme.outline,
+                                      ),
+                                      const SizedBox(height: 12),
+                                      Text(
+                                        'No patients match "${_searchController.text.trim()}"',
+                                        textAlign: TextAlign.center,
+                                        style: TextStyle(
+                                          color: theme.colorScheme.onSurfaceVariant,
+                                          fontSize: 15,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 16),
+                                      FilledButton.icon(
+                                        key: const Key('create_new_patient_button'),
+                                        icon: const Icon(Icons.person_add_outlined),
+                                        label: const Text('Create New Patient'),
+                                        onPressed: () => _openNewPatientDialog(
+                                          initialQuery: _searchController.text.trim(),
+                                        ),
+                                      ),
+                                    ],
+                                  )
+                                : Text(
+                                    'No patients found in sheet.\nTap Refresh to sync.',
+                                    textAlign: TextAlign.center,
+                                    style: TextStyle(color: theme.colorScheme.onSurfaceVariant),
+                                  ),
                           ),
                         )
                       : RefreshIndicator(
@@ -927,7 +846,7 @@ class _PatientsScreenState extends State<PatientsScreen> {
                               final patient = _patients[index];
                               return PatientTile(
                                 patient: patient,
-                                onTap: () => _onPatientTapped(patient),
+                                onTap: () => _openPatientPhotos(patient),
                                 onViewPhotos: () => _openPatientPhotos(patient),
                                 onTakePhotos: () => _handleTakePhotosForPatient(patient),
                               );
