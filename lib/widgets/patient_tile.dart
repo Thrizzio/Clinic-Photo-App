@@ -83,27 +83,7 @@ class PatientTile extends StatelessWidget {
                       ),
                     ),
                   ],
-                  if (patient.folderStatus == FolderStatus.missing) ...[
-                    const SizedBox(height: 2),
-                    Row(
-                      children: [
-                        Icon(Icons.auto_awesome, size: 12, color: theme.colorScheme.primary),
-                        const SizedBox(width: 4),
-                        Expanded(
-                          child: Text(
-                            'Folder auto-creates on photo capture',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              fontSize: 11,
-                              color: theme.colorScheme.primary,
-                              fontWeight: FontWeight.w500,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ] else if (patient.folderStatus == FolderStatus.conflict) ...[
+                  if (patient.folderStatus == FolderStatus.conflict) ...[
                     const SizedBox(height: 2),
                     Row(
                       children: [
@@ -118,6 +98,26 @@ class PatientTile extends StatelessWidget {
                               fontSize: 11,
                               color: theme.colorScheme.error,
                               fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ] else if (patient.driveFolderId == null || patient.driveFolderId!.trim().isEmpty) ...[
+                    const SizedBox(height: 2),
+                    Row(
+                      children: [
+                        Icon(Icons.auto_awesome, size: 12, color: theme.colorScheme.primary),
+                        const SizedBox(width: 4),
+                        Expanded(
+                          child: Text(
+                            'Folder auto-creates on photo capture',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: theme.colorScheme.primary,
+                              fontWeight: FontWeight.w500,
                             ),
                           ),
                         ),

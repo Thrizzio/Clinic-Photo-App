@@ -78,6 +78,7 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
   List<drive.File> _photos = [];
   bool _isLoading = true;
   String? _errorMessage;
+  bool _isOpeningCamera = false;
   final Map<String, Uint8List> _thumbnailCache = {};
   final Map<String, UploadItem> _localUploadsByFileId = {};
   final Map<String, UploadItem> _localUploadsByFileName = {};
@@ -286,46 +287,55 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
   }
 
   Future<void> _handleTakePhotos() async {
-    Patient patientToCapture = _currentPatient;
+    if (_isOpeningCamera) return;
+    _isOpeningCamera = true;
 
-    if (patientToCapture.folderStatus == FolderStatus.conflict) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Cannot capture photos: conflicting Drive folders in Visits sheet.'),
-          backgroundColor: Colors.red,
+    try {
+      Patient patientToCapture = _currentPatient;
+
+      if (patientToCapture.folderStatus == FolderStatus.conflict) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Cannot capture photos: conflicting Drive folders in Visits sheet.'),
+            backgroundColor: Colors.red,
+          ),
+        );
+        return;
+      }
+
+      if (patientToCapture.folderStatus == FolderStatus.missing && widget.folderService != null) {
+        try {
+          final res = await widget.folderService!.getOrCreatePatientFolder(patientToCapture);
+          if (res.patient.isUploadable) {
+            patientToCapture = res.patient;
+            if (mounted) {
+              setState(() {
+                _currentPatient = patientToCapture;
+              });
+            }
+          }
+        } catch (e) {
+          debugPrint('Drive folder setup deferred while offline: $e');
+        }
+      }
+
+      if (!mounted) return;
+
+      await Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => CameraScreen(
+            patient: patientToCapture,
+            queueService: widget.queueService,
+          ),
         ),
       );
-      return;
+    } finally {
+      _isOpeningCamera = false;
     }
 
-    if (patientToCapture.folderStatus == FolderStatus.missing && widget.folderService != null) {
-      try {
-        final res = await widget.folderService!.getOrCreatePatientFolder(patientToCapture);
-        if (res.patient.isUploadable) {
-          patientToCapture = res.patient;
-          if (mounted) {
-            setState(() {
-              _currentPatient = patientToCapture;
-            });
-          }
-        }
-      } catch (e) {
-        debugPrint('Drive folder setup deferred while offline: $e');
-      }
+    if (mounted) {
+      _loadPhotos();
     }
-
-    if (!mounted) return;
-
-    await Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => CameraScreen(
-          patient: patientToCapture,
-          queueService: widget.queueService,
-        ),
-      ),
-    );
-
-    _loadPhotos();
   }
 
   Future<Uint8List?> _fetchThumbnailBytes(String fileId, [String? fileName]) async {

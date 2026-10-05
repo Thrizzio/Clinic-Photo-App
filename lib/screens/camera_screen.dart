@@ -28,8 +28,15 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
   int _sequenceNumber = 0;
   FlashMode _flashMode = FlashMode.auto;
   String? _errorMessage;
+  bool _isPopping = false;
 
   bool get _isUnassigned => widget.sessionId != null;
+
+  void _handleExit() {
+    if (_isPopping) return;
+    _isPopping = true;
+    Navigator.of(context).pop(_sessionPhotoCount);
+  }
 
   @override
   void initState() {
@@ -53,6 +60,8 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
     }
 
     if (state == AppLifecycleState.inactive) {
+      _isCameraInitialized = false;
+      _controller = null;
       cameraController.dispose();
     } else if (state == AppLifecycleState.resumed) {
       _initializeCamera();
@@ -240,7 +249,7 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
         children: [
           IconButton(
             icon: const Icon(Icons.arrow_back, color: Colors.white),
-            onPressed: () => Navigator.of(context).pop(_sessionPhotoCount),
+            onPressed: _handleExit,
           ),
           const SizedBox(width: 8),
           Expanded(
@@ -265,6 +274,27 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
                     fontWeight: FontWeight.w500,
                   ),
                 ),
+                if (!_isUnassigned &&
+                    widget.patient != null &&
+                    (widget.patient!.driveFolderId == null ||
+                        widget.patient!.driveFolderId!.trim().isEmpty)) ...[
+                  const SizedBox(height: 2),
+                  const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.auto_awesome, size: 12, color: Colors.lightBlueAccent),
+                      SizedBox(width: 4),
+                      Text(
+                        'Folder auto-creates on photo capture',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: Colors.lightBlueAccent,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
               ],
             ),
           ),
@@ -390,7 +420,7 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
 
               // Done Button
               TextButton(
-                onPressed: () => Navigator.of(context).pop(_sessionPhotoCount),
+                onPressed: _handleExit,
                 style: TextButton.styleFrom(
                   backgroundColor: Colors.white12,
                   padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
