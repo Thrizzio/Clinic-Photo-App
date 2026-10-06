@@ -128,6 +128,7 @@ class FakeV4DriveService extends DriveService {
   Future<void> deleteFile({
     required AuthClient client,
     required String fileId,
+    String? parentFolderId,
   }) async {
     if (failNextDelete || (failDeleteFileId != null && failDeleteFileId == fileId)) {
       throw StateError('Simulated Drive deleteFile failure for $fileId');

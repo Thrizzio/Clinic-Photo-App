@@ -155,6 +155,39 @@ abstract class AppDatabase {
   /// Retrieves all deleted tombstone source keys ("$source:$externalId") for fast in-memory checking.
   Future<Set<String>> getAllDeletedTombstoneSources();
 
+  // --- Photo Deletion & Tombstone Operations ---
+
+  /// Records a tombstone for a deleted photo to prevent cross-device resurrection.
+  Future<void> recordDeletedPhotoTombstone({
+    String? driveFileId,
+    String? fileName,
+    String? patientId,
+  });
+
+  /// Checks if a photo has been marked as deleted/tombstoned.
+  Future<bool> isPhotoDeletedTombstoned({
+    String? driveFileId,
+    String? fileName,
+  });
+
+  /// Retrieves all deleted photo tombstone keys (drive_file_id or file_name) for fast checking.
+  Future<Set<String>> getAllDeletedPhotoTombstoneKeys();
+
+  /// Queues a pending photo deletion when offline.
+  Future<void> addPendingPhotoDeletion({
+    required String id,
+    String? driveFileId,
+    String? fileName,
+    String? patientId,
+    String? driveFolderId,
+  });
+
+  /// Retrieves all pending photo deletions.
+  Future<List<Map<String, dynamic>>> getPendingPhotoDeletions();
+
+  /// Removes a resolved pending photo deletion.
+  Future<void> removePendingPhotoDeletion(String id);
+
   // --- Upload Queue Operations ---
 
   /// Inserts a new upload item.
@@ -177,6 +210,9 @@ abstract class AppDatabase {
 
   /// Gets count of failed uploads.
   Future<int> getFailedUploadsCount();
+
+  /// Gets count of uploaded photos (optionally filtered by patient ID).
+  Future<int> getUploadedPhotosCount({String? patientId});
 
   /// Resets all failed uploads back to waiting for manual retry.
   Future<void> resetFailedToWaiting();
@@ -347,6 +383,8 @@ class SqliteAppDatabase implements AppDatabase {
           await db.execute(
             'CREATE INDEX IF NOT EXISTS idx_deleted_tombstones_patient_id ON deleted_patient_tombstones(patient_id)',
           );
+
+          await _ensurePhotoDeletionTables(db);
         },
         onUpgrade: (db, oldVersion, newVersion) async {
           if (oldVersion < 2) {
@@ -380,6 +418,7 @@ class SqliteAppDatabase implements AppDatabase {
           await _migrateLegacyNonUuidPatients(db);
           await _reconcileStalePlaceholderPatients(db);
           await _ensureUploadsTableSchema(db);
+          await _ensurePhotoDeletionTables(db);
 
           // Crash recovery: Any upload that was interrupted in 'uploading'
           // status is reset to 'waiting' so processing will resume cleanly.
@@ -758,6 +797,38 @@ class SqliteAppDatabase implements AppDatabase {
     );
     await db.execute(
       'CREATE INDEX IF NOT EXISTS idx_deleted_tombstones_patient_id ON deleted_patient_tombstones(patient_id)',
+    );
+  }
+
+  /// Ensures photo deletion and tombstone tables exist on new and existing databases.
+  static Future<void> _ensurePhotoDeletionTables(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS pending_photo_deletions (
+        id TEXT PRIMARY KEY,
+        drive_file_id TEXT,
+        file_name TEXT,
+        patient_id TEXT,
+        drive_folder_id TEXT,
+        deleted_at TEXT NOT NULL
+      )
+    ''');
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_pending_photo_deletions_drive_id ON pending_photo_deletions(drive_file_id)',
+    );
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS deleted_photo_tombstones (
+        id TEXT PRIMARY KEY,
+        drive_file_id TEXT,
+        file_name TEXT,
+        patient_id TEXT,
+        deleted_at TEXT NOT NULL
+      )
+    ''');
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_deleted_photo_tombstones_drive_id ON deleted_photo_tombstones(drive_file_id)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_deleted_photo_tombstones_file_name ON deleted_photo_tombstones(file_name)',
     );
   }
 
@@ -1469,6 +1540,99 @@ class SqliteAppDatabase implements AppDatabase {
   }
 
   @override
+  Future<void> recordDeletedPhotoTombstone({
+    String? driveFileId,
+    String? fileName,
+    String? patientId,
+  }) async {
+    await db.insert('deleted_photo_tombstones', {
+      'id': const Uuid().v4(),
+      'drive_file_id': driveFileId,
+      'file_name': fileName,
+      'patient_id': patientId,
+      'deleted_at': DateTime.now().toUtc().toIso8601String(),
+    });
+  }
+
+  @override
+  Future<bool> isPhotoDeletedTombstoned({
+    String? driveFileId,
+    String? fileName,
+  }) async {
+    if (driveFileId != null && driveFileId.isNotEmpty) {
+      final rows = await db.query(
+        'deleted_photo_tombstones',
+        where: 'drive_file_id = ?',
+        whereArgs: [driveFileId],
+        limit: 1,
+      );
+      if (rows.isNotEmpty) return true;
+    }
+    if (fileName != null && fileName.isNotEmpty) {
+      final rows = await db.query(
+        'deleted_photo_tombstones',
+        where: 'file_name = ?',
+        whereArgs: [fileName],
+        limit: 1,
+      );
+      if (rows.isNotEmpty) return true;
+    }
+    return false;
+  }
+
+  @override
+  Future<Set<String>> getAllDeletedPhotoTombstoneKeys() async {
+    final rows = await db.query(
+      'deleted_photo_tombstones',
+      columns: ['drive_file_id', 'file_name'],
+    );
+    final set = <String>{};
+    for (final r in rows) {
+      final dfId = r['drive_file_id'] as String?;
+      final fn = r['file_name'] as String?;
+      if (dfId != null && dfId.isNotEmpty) set.add(dfId);
+      if (fn != null && fn.isNotEmpty) set.add(fn);
+    }
+    return set;
+  }
+
+  @override
+  Future<void> addPendingPhotoDeletion({
+    required String id,
+    String? driveFileId,
+    String? fileName,
+    String? patientId,
+    String? driveFolderId,
+  }) async {
+    await db.insert(
+      'pending_photo_deletions',
+      {
+        'id': id,
+        'drive_file_id': driveFileId,
+        'file_name': fileName,
+        'patient_id': patientId,
+        'drive_folder_id': driveFolderId,
+        'deleted_at': DateTime.now().toUtc().toIso8601String(),
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  @override
+  Future<List<Map<String, dynamic>>> getPendingPhotoDeletions() async {
+    return await db.query('pending_photo_deletions');
+  }
+
+  @override
+  Future<void> removePendingPhotoDeletion(String id) async {
+    await db.delete(
+      'pending_photo_deletions',
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
+  @override
   Future<void> assignSessionToPatient({
     required String sessionId,
     required String patientId,
@@ -1604,6 +1768,21 @@ class SqliteAppDatabase implements AppDatabase {
   }
 
   @override
+  Future<int> getUploadedPhotosCount({String? patientId}) async {
+    if (patientId != null && patientId.isNotEmpty) {
+      final count = Sqflite.firstIntValue(await db.rawQuery(
+        "SELECT COUNT(*) FROM uploads WHERE status = 'uploaded' AND patient_id = ?",
+        [patientId],
+      ));
+      return count ?? 0;
+    }
+    final count = Sqflite.firstIntValue(await db.rawQuery(
+      "SELECT COUNT(*) FROM uploads WHERE status = 'uploaded'",
+    ));
+    return count ?? 0;
+  }
+
+  @override
   Future<void> resetFailedToWaiting() async {
     await db.update(
       'uploads',
@@ -1662,6 +1841,8 @@ class InMemoryAppDatabase implements AppDatabase {
   final Map<String, List<({String source, String externalId})>> _patientSources = {};
   final Set<String> _pendingDeletions = {};
   final List<({String patientId, String? source, String? externalId, DateTime deletedAt})> _deletedTombstones = [];
+  final List<Map<String, dynamic>> _pendingPhotoDeletions = [];
+  final List<({String? driveFileId, String? fileName, String? patientId, DateTime deletedAt})> _deletedPhotoTombstones = [];
 
   InMemoryAppDatabase({
     Map<String, Patient>? initialPatients,
@@ -2104,6 +2285,71 @@ class InMemoryAppDatabase implements AppDatabase {
     return set;
   }
 
+  // --- Photo Deletion & Tombstone Operations ---
+
+  @override
+  Future<void> recordDeletedPhotoTombstone({
+    String? driveFileId,
+    String? fileName,
+    String? patientId,
+  }) async {
+    _deletedPhotoTombstones.add((
+      driveFileId: driveFileId,
+      fileName: fileName,
+      patientId: patientId,
+      deletedAt: DateTime.now(),
+    ));
+  }
+
+  @override
+  Future<bool> isPhotoDeletedTombstoned({
+    String? driveFileId,
+    String? fileName,
+  }) async {
+    return _deletedPhotoTombstones.any((t) =>
+        (driveFileId != null && driveFileId.isNotEmpty && t.driveFileId == driveFileId) ||
+        (fileName != null && fileName.isNotEmpty && t.fileName == fileName));
+  }
+
+  @override
+  Future<Set<String>> getAllDeletedPhotoTombstoneKeys() async {
+    final set = <String>{};
+    for (final t in _deletedPhotoTombstones) {
+      if (t.driveFileId != null && t.driveFileId!.isNotEmpty) set.add(t.driveFileId!);
+      if (t.fileName != null && t.fileName!.isNotEmpty) set.add(t.fileName!);
+    }
+    return set;
+  }
+
+  @override
+  Future<void> addPendingPhotoDeletion({
+    required String id,
+    String? driveFileId,
+    String? fileName,
+    String? patientId,
+    String? driveFolderId,
+  }) async {
+    _pendingPhotoDeletions.removeWhere((p) => p['id'] == id);
+    _pendingPhotoDeletions.add({
+      'id': id,
+      'drive_file_id': driveFileId,
+      'file_name': fileName,
+      'patient_id': patientId,
+      'drive_folder_id': driveFolderId,
+      'deleted_at': DateTime.now().toUtc().toIso8601String(),
+    });
+  }
+
+  @override
+  Future<List<Map<String, dynamic>>> getPendingPhotoDeletions() async {
+    return List.from(_pendingPhotoDeletions);
+  }
+
+  @override
+  Future<void> removePendingPhotoDeletion(String id) async {
+    _pendingPhotoDeletions.removeWhere((p) => p['id'] == id);
+  }
+
   // --- Upload Queue Operations ---
 
   @override
@@ -2153,6 +2399,15 @@ class InMemoryAppDatabase implements AppDatabase {
   @override
   Future<int> getFailedUploadsCount() async {
     return _uploads.values.where((u) => u.status == UploadStatus.failed).length;
+  }
+
+  @override
+  Future<int> getUploadedPhotosCount({String? patientId}) async {
+    return _uploads.values.where((u) {
+      if (u.status != UploadStatus.uploaded) return false;
+      if (patientId != null && patientId.isNotEmpty && u.patientId != patientId) return false;
+      return true;
+    }).length;
   }
 
   @override

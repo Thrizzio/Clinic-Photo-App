@@ -19,15 +19,21 @@ import 'patient_folder_service.dart';
 class QueueStatus {
   final int activeCount;
   final int failedCount;
+  final int uploadedCount;
+  final int totalCount;
 
   const QueueStatus({
     required this.activeCount,
     required this.failedCount,
+    this.uploadedCount = 0,
+    this.totalCount = 0,
   });
 
   bool get hasFailures => failedCount > 0;
   bool get hasWork => activeCount > 0 || failedCount > 0;
   bool get isIdle => activeCount == 0 && failedCount == 0;
+  bool get allPhotosUploaded =>
+      totalCount > 0 && activeCount == 0 && failedCount == 0 && uploadedCount == totalCount;
 }
 
 class UploadQueueService extends ChangeNotifier {
@@ -56,6 +62,20 @@ class UploadQueueService extends ChangeNotifier {
   }) : connectivity = connectivity ?? Connectivity() {
     _initConnectivityListener();
     recoverOrphanedUnassignedPhotos();
+    _bindFolderServiceListener();
+  }
+
+  void _bindFolderServiceListener() {
+    if (patientFolderService != null) {
+      patientFolderService!.onFolderCreated = (patient) {
+        _safeNotifyListeners();
+      };
+    }
+  }
+
+  void setPatientFolderService(PatientFolderService service) {
+    patientFolderService = service;
+    _bindFolderServiceListener();
   }
 
   void _initConnectivityListener() {
@@ -65,6 +85,7 @@ class UploadQueueService extends ChangeNotifier {
             results.contains(ConnectivityResult.none) && results.length == 1;
         if (!isDisconnected) {
           processQueue();
+          processPendingPhotoDeletions();
         }
       });
     } catch (_) {
@@ -85,11 +106,33 @@ class UploadQueueService extends ChangeNotifier {
     super.dispose();
   }
 
-  /// Gets current queue status counts.
-  Future<QueueStatus> getStatus() async {
+  /// Gets current queue status counts (optionally filtered by patientId).
+  Future<QueueStatus> getStatus({String? patientId}) async {
+    if (patientId != null && patientId.isNotEmpty) {
+      final uploads = await database.getUploadsForPatient(patientId);
+      final active = uploads.where((u) =>
+        u.status == UploadStatus.waiting ||
+        u.status == UploadStatus.uploading ||
+        u.status == UploadStatus.pending,
+      ).length;
+      final failed = uploads.where((u) => u.status == UploadStatus.failed).length;
+      final uploaded = uploads.where((u) => u.status == UploadStatus.uploaded).length;
+      return QueueStatus(
+        activeCount: active,
+        failedCount: failed,
+        uploadedCount: uploaded,
+        totalCount: uploads.length,
+      );
+    }
     final active = await database.getActiveUploadsCount();
     final failed = await database.getFailedUploadsCount();
-    return QueueStatus(activeCount: active, failedCount: failed);
+    final uploaded = await database.getUploadedPhotosCount();
+    return QueueStatus(
+      activeCount: active,
+      failedCount: failed,
+      uploadedCount: uploaded,
+      totalCount: active + failed + uploaded,
+    );
   }
 
   Future<String> _getBasePath() async {
@@ -595,6 +638,7 @@ class UploadQueueService extends ChangeNotifier {
                         status: UploadStatus.waiting,
                       );
                       await database.updateUpload(currentItem);
+                      _safeNotifyListeners();
                     }
                   }
                 } catch (e) {
@@ -660,6 +704,38 @@ class UploadQueueService extends ChangeNotifier {
     } finally {
       _isProcessing = false;
       _safeNotifyListeners();
+      await processPendingPhotoDeletions();
+    }
+  }
+
+  /// Processes any offline photo deletions that were pending network/Drive sync.
+  Future<void> processPendingPhotoDeletions() async {
+    final pendingDeletions = await database.getPendingPhotoDeletions();
+    if (pendingDeletions.isEmpty) return;
+
+    final client = await authService.getAuthenticatedClient();
+    if (client == null) return;
+
+    for (final deletion in pendingDeletions) {
+      final id = deletion['id'] as String;
+      final fileId = deletion['drive_file_id'] as String?;
+      final folderId = deletion['drive_folder_id'] as String?;
+
+      if (fileId != null && fileId.isNotEmpty) {
+        try {
+          await driveService.deleteFile(
+            client: client,
+            fileId: fileId,
+            parentFolderId: folderId,
+          );
+          await database.removePendingPhotoDeletion(id);
+          debugPrint('Processed pending photo deletion on Drive for $fileId');
+        } catch (e) {
+          debugPrint('Retry pending photo deletion deferred: $e');
+        }
+      } else {
+        await database.removePendingPhotoDeletion(id);
+      }
     }
   }
 

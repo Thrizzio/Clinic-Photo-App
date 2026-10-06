@@ -131,7 +131,11 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
         try {
           final client = await widget.queueService.authService.getAuthenticatedClient();
           if (client != null) {
-            await widget.queueService.driveService.deleteFile(client: client, fileId: photo.driveFileId!);
+            await widget.queueService.driveService.deleteFile(
+              client: client,
+              fileId: photo.driveFileId!,
+              parentFolderId: widget.session.driveFolderId,
+            );
             deleted = true;
           }
         } catch (e) {
@@ -153,9 +157,13 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
         }
       }
 
-      // 3. Delete database record only after deletion
+      // 3. Delete database record only after deletion and record tombstone
       if (deleted) {
         await widget.database.deleteUpload(photo.id);
+        await widget.database.recordDeletedPhotoTombstone(
+          driveFileId: photo.driveFileId,
+          fileName: photo.fileName,
+        );
         if (photo.driveFileId != null) {
           _thumbnailCache.remove(photo.driveFileId!);
         }

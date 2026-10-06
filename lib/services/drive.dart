@@ -121,13 +121,68 @@ class DriveService {
   }
 
   /// Deletes a file permanently from Google Drive.
+  /// If permanent deletion fails (e.g. 403 because the current user is an editor
+  /// but not the owner of a file in personal Drive), falls back to removing the
+  /// file from the patient's parent folder, ensuring the photo is completely
+  /// removed from the clinic patient folder for all clinic users.
   Future<void> deleteFile({
     required AuthClient client,
     required String fileId,
+    String? parentFolderId,
   }) async {
     final driveApi = drive.DriveApi(client);
-    await driveApi.files.delete(fileId);
-    debugPrint('Deleted Drive file $fileId');
+    try {
+      await driveApi.files.delete(fileId, supportsAllDrives: true);
+      debugPrint('Deleted Drive file $fileId permanently');
+      return;
+    } catch (e) {
+      if (e is drive.DetailedApiRequestError && e.status == 404) {
+        debugPrint('Drive file $fileId was already deleted/not found');
+        return;
+      }
+      debugPrint('Permanent delete failed for $fileId ($e), attempting removal from parent folder');
+    }
+
+    try {
+      String? folderToRemove = parentFolderId;
+      if (folderToRemove == null || folderToRemove.isEmpty) {
+        final fileMeta = await driveApi.files.get(
+          fileId,
+          $fields: 'parents',
+          supportsAllDrives: true,
+        ) as drive.File;
+        final parents = fileMeta.parents;
+        if (parents != null && parents.isNotEmpty) {
+          folderToRemove = parents.join(',');
+        }
+      }
+
+      if (folderToRemove != null && folderToRemove.isNotEmpty) {
+        await driveApi.files.update(
+          drive.File(),
+          fileId,
+          removeParents: folderToRemove,
+          supportsAllDrives: true,
+        );
+        debugPrint('Removed Drive file $fileId from parent folder(s) $folderToRemove');
+      }
+
+      // Also attempt to move to trash if allowed
+      try {
+        await driveApi.files.update(
+          drive.File()..trashed = true,
+          fileId,
+          supportsAllDrives: true,
+        );
+      } catch (_) {}
+    } catch (e) {
+      if (e is drive.DetailedApiRequestError && e.status == 404) {
+        debugPrint('Drive file $fileId was already deleted/not found');
+        return;
+      }
+      debugPrint('Fallback removal from parent folder failed for $fileId: $e');
+      rethrow;
+    }
   }
 
   /// Gets or creates the "Unassigned Photos" root folder under [parentFolderId].

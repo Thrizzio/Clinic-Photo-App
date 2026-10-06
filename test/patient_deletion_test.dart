@@ -23,6 +23,7 @@ class TrackingDriveService extends DriveService {
   Future<void> deleteFile({
     required dynamic client,
     required String fileId,
+    String? parentFolderId,
   }) async {
     deleteCallsCount++;
     deletedFileIds.add(fileId);

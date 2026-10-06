@@ -151,3 +151,17 @@ Key V5 capabilities:
   - `Patient.merge` authoritatively preserves valid existing folders against incoming null values, and flags `FolderStatus.conflict` only when two different non-empty folder IDs exist.
   - When Phone A creates a Drive folder (`patientFolderService.getOrCreatePatientFolder`), it marks the patient `pending_cloud` and immediately syncs the folder ID to Supabase if online.
   - When Phone B syncs from Supabase, its UI immediately derives folder status from `patient.driveFolderId != null && patient.driveFolderId!.isNotEmpty`, enabling immediate direct photo capture without requiring the user to recreate the folder.
+
+### 6. Photo Deletion Permission Model & Anti-Resurrection Architecture
+- **Clinic-Wide Authorization**:
+  - In this single-clinic MVP, photo ownership does NOT determine deletion permissions. Any user of the clinic app can delete any clinical photo belonging to a patient in the clinic.
+  - No per-user uploader check (`uploadedBy == currentUser`) is enforced for deletion authorization. Useful uploader metadata in Drive/auditing is preserved without restricting deletion.
+- **Drive Permission Handling**:
+  - In Shared Drives (Google Workspace), deletion executes via `files.delete(fileId, supportsAllDrives: true)`.
+  - In personal Google Drive (where non-owners get 403 Forbidden on `files.delete`), the service executes a fallback that removes the file from the patient parent folder via `files.update(removeParents: parentFolderId, supportsAllDrives: true)`. This disconnects the photo from the patient folder so it never appears in patient photo listings again.
+- **Folder Protection Invariant**:
+  - Photo deletion deletes ONLY the specific photo. It strictly NEVER deletes or alters the patient's Google Drive folder or other photos.
+- **Offline Deletion & Anti-Resurrection**:
+  - When a user deletes a photo offline, the UI removes it immediately, local file cache and SQLite records are cleaned up, a tombstone is recorded in `deleted_photo_tombstones`, and a record is added to `pending_photo_deletions`.
+  - Background worker `UploadQueueService.processPendingPhotoDeletions` syncs pending deletions to Drive upon reconnecting.
+  - When Device A synchronizes with Drive, if an uploaded photo is absent from the Drive folder, Device A reconciles the deletion, removes its local upload record and disk cache, and records a tombstone, ensuring Device A never resurrects the deleted photo.

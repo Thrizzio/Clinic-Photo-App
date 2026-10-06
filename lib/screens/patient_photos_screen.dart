@@ -103,20 +103,73 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
 
   void _onQueueUpdated() {
     if (mounted) {
+      _checkAndUpdatePatientFolder();
       _refreshLocalUploads();
+    }
+  }
+
+  Future<void> _checkAndUpdatePatientFolder() async {
+    if (_currentPatient.driveFolderId != null &&
+        _currentPatient.driveFolderId!.trim().isNotEmpty) {
+      return;
+    }
+    final updated = await widget.queueService.database.getPatient(_currentPatient.id);
+    if (updated != null &&
+        updated.driveFolderId != null &&
+        updated.driveFolderId!.trim().isNotEmpty &&
+        mounted) {
+      setState(() {
+        _currentPatient = updated;
+      });
     }
   }
 
   Future<void> _refreshLocalUploads() async {
     final localUploads = await widget.queueService.database.getUploadsForPatient(_currentPatient.id);
+    final tombstones = await widget.queueService.database.getAllDeletedPhotoTombstoneKeys();
     if (!mounted) return;
     setState(() {
       for (final u in localUploads) {
+        if (tombstones.contains(u.id) ||
+            (u.driveFileId != null && tombstones.contains(u.driveFileId)) ||
+            tombstones.contains(u.fileName)) {
+          continue;
+        }
         _localUploadsByFileId[u.id] = u;
         if (u.driveFileId != null && u.driveFileId!.isNotEmpty) {
           _localUploadsByFileId[u.driveFileId!] = u;
         }
         _localUploadsByFileName[u.fileName] = u;
+      }
+
+      // Ensure any newly enqueued or updated local uploads are represented in _photos immediately
+      final existingNamesAndIds = <String>{};
+      for (final p in _photos) {
+        if (p.name != null && p.name!.isNotEmpty) existingNamesAndIds.add(p.name!);
+        if (p.id != null && p.id!.isNotEmpty) existingNamesAndIds.add(p.id!);
+      }
+
+      bool photosChanged = false;
+      for (final u in localUploads) {
+        if (tombstones.contains(u.id) ||
+            (u.driveFileId != null && tombstones.contains(u.driveFileId)) ||
+            tombstones.contains(u.fileName)) {
+          continue;
+        }
+        if (!existingNamesAndIds.contains(u.fileName) && !existingNamesAndIds.contains(u.id)) {
+          _photos.add(drive.File(
+            id: u.driveFileId ?? u.id,
+            name: u.fileName,
+            createdTime: u.capturedAt,
+          ));
+          existingNamesAndIds.add(u.fileName);
+          existingNamesAndIds.add(u.driveFileId ?? u.id);
+          photosChanged = true;
+        }
+      }
+      if (photosChanged) {
+        _sortPhotos(_photos);
+        _isLoading = false;
       }
     });
   }
@@ -178,9 +231,16 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
       _errorMessage = null;
     });
 
-    // 1. Immediately load local uploads from SQLite cache
+    // 1. Immediately load local uploads from SQLite cache, filtering out tombstones
     final localUploads = await widget.queueService.database.getUploadsForPatient(_currentPatient.id);
+    final tombstones = await widget.queueService.database.getAllDeletedPhotoTombstoneKeys();
+
     for (final u in localUploads) {
+      if (tombstones.contains(u.id) ||
+          (u.driveFileId != null && tombstones.contains(u.driveFileId)) ||
+          tombstones.contains(u.fileName)) {
+        continue;
+      }
       _localUploadsByFileId[u.id] = u;
       if (u.driveFileId != null && u.driveFileId!.isNotEmpty) {
         _localUploadsByFileId[u.driveFileId!] = u;
@@ -188,11 +248,17 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
       _localUploadsByFileName[u.fileName] = u;
     }
 
-    final localPhotos = localUploads.map((u) => drive.File(
-      id: u.driveFileId ?? u.id,
-      name: u.fileName,
-      createdTime: u.capturedAt,
-    )).toList();
+    final localPhotos = localUploads
+        .where((u) =>
+            !tombstones.contains(u.id) &&
+            !(u.driveFileId != null && tombstones.contains(u.driveFileId)) &&
+            !tombstones.contains(u.fileName))
+        .map((u) => drive.File(
+              id: u.driveFileId ?? u.id,
+              name: u.fileName,
+              createdTime: u.capturedAt,
+            ))
+        .toList();
 
     _sortPhotos(localPhotos);
 
@@ -226,7 +292,7 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
       return;
     }
 
-    // 2. Fetch remote photos from Google Drive in background and reconcile
+    // 2. Fetch remote photos from Google Drive in background and reconcile cross-device deletions
     try {
       final client = await widget.authService.getAuthenticatedClient();
       if (client == null) {
@@ -246,14 +312,63 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
         folderId: _currentPatient.driveFolderId!,
       );
 
+      final remoteFileIds = <String>{};
+      final remoteFileNames = <String>{};
+      for (final p in remotePhotos) {
+        if (p.id != null) remoteFileIds.add(p.id!);
+        if (p.name != null) remoteFileNames.add(p.name!);
+      }
+
+      // Cross-device deletion check: If a local upload was confirmed uploaded (or has driveFileId),
+      // but is NO LONGER present in Google Drive, another device/user deleted it.
+      final hasActiveUploadsInProgress = localUploads.any(
+        (u) => u.status == UploadStatus.pending || u.status == UploadStatus.uploading,
+      );
+      final shouldReconcileEmptyDrive = remotePhotos.isEmpty && !hasActiveUploadsInProgress;
+      final shouldReconcileMissing = remotePhotos.isNotEmpty || shouldReconcileEmptyDrive;
+
+      if (shouldReconcileMissing) {
+        for (final u in localUploads) {
+          final isUploaded = u.status == UploadStatus.uploaded ||
+              (u.driveFileId != null && u.driveFileId!.isNotEmpty);
+          if (isUploaded) {
+            final presentInDrive = (u.driveFileId != null && remoteFileIds.contains(u.driveFileId)) ||
+                remoteFileNames.contains(u.fileName);
+            if (!presentInDrive) {
+              // Deleted on Drive by another device! Clean up local cache and record tombstone.
+              await widget.queueService.database.deleteUpload(u.id);
+              final f = File(u.localPath);
+              if (f.existsSync()) {
+                try {
+                  f.deleteSync();
+                } catch (_) {}
+              }
+              await widget.queueService.database.recordDeletedPhotoTombstone(
+                driveFileId: u.driveFileId,
+                fileName: u.fileName,
+                patientId: _currentPatient.id,
+              );
+              tombstones.add(u.fileName);
+              if (u.driveFileId != null) tombstones.add(u.driveFileId!);
+            }
+          }
+        }
+      }
+
       final mergedMap = <String, drive.File>{};
       for (final p in localPhotos) {
         final key = p.name ?? p.id ?? '';
-        if (key.isNotEmpty) mergedMap[key] = p;
+        if (key.isNotEmpty &&
+            !tombstones.contains(p.id) &&
+            !tombstones.contains(p.name)) {
+          mergedMap[key] = p;
+        }
       }
       for (final p in remotePhotos) {
         final key = p.name ?? p.id ?? '';
-        if (key.isNotEmpty) {
+        if (key.isNotEmpty &&
+            !tombstones.contains(p.id) &&
+            !tombstones.contains(p.name)) {
           mergedMap[key] = p;
           if (p.id != null) {
             final local = _localUploadsByFileName[p.name];
@@ -303,22 +418,6 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
         return;
       }
 
-      if (patientToCapture.folderStatus == FolderStatus.missing && widget.folderService != null) {
-        try {
-          final res = await widget.folderService!.getOrCreatePatientFolder(patientToCapture);
-          if (res.patient.isUploadable) {
-            patientToCapture = res.patient;
-            if (mounted) {
-              setState(() {
-                _currentPatient = patientToCapture;
-              });
-            }
-          }
-        } catch (e) {
-          debugPrint('Drive folder setup deferred while offline: $e');
-        }
-      }
-
       if (!mounted) return;
 
       await Navigator.of(context).push(
@@ -334,6 +433,12 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
     }
 
     if (mounted) {
+      final updated = await widget.queueService.database.getPatient(_currentPatient.id);
+      if (updated != null && mounted) {
+        setState(() {
+          _currentPatient = updated;
+        });
+      }
       _loadPhotos();
     }
   }
@@ -636,34 +741,76 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
     );
 
     final successfullyDeletedIds = <String>{};
+    int offlineDeletedCount = 0;
     String? lastError;
 
     try {
       final client = await widget.authService.getAuthenticatedClient();
-      if (client == null) throw StateError('Not signed in to Google account');
 
       for (final photo in photosToDelete) {
         final fileId = photo.id;
         if (fileId == null) continue;
 
-        try {
-          // 1. Delete on Google Drive first
-          await widget.driveService.deleteFile(client: client, fileId: fileId);
-
-          // 2. Only remove local database record after Drive confirmed deletion
-          final existingUpload = await widget.queueService.database.getUploadByDriveFileId(fileId) ??
-              await widget.queueService.database.getUploadByFileName(photo.name ?? '');
-          if (existingUpload != null) {
-            await widget.queueService.database.deleteUpload(existingUpload.id);
+        bool driveDeleteSucceeded = false;
+        if (client != null) {
+          try {
+            await widget.driveService.deleteFile(
+              client: client,
+              fileId: fileId,
+              parentFolderId: _currentPatient.driveFolderId,
+            );
+            driveDeleteSucceeded = true;
+          } catch (e) {
+            lastError = e.toString();
+            debugPrint('Online delete failed for photo $fileId: $e');
+            final errStr = e.toString().toLowerCase();
+            final isOffline = e is SocketException ||
+                errStr.contains('socketexception') ||
+                errStr.contains('network') ||
+                errStr.contains('connection');
+            if (!isOffline) {
+              // Explicit online API error: Keep photo visible and retryable in gallery
+              continue;
+            }
           }
-
-          // Clear thumbnail cache
-          _thumbnailCache.remove(fileId);
-          successfullyDeletedIds.add(fileId);
-        } catch (e) {
-          lastError = e.toString();
-          debugPrint('Failed to delete photo $fileId from Drive: $e');
         }
+
+        // Clean up local DB & local cached file
+        final existingUpload = await widget.queueService.database.getUploadByDriveFileId(fileId) ??
+            await widget.queueService.database.getUploadByFileName(photo.name ?? '');
+        if (existingUpload != null) {
+          await widget.queueService.database.deleteUpload(existingUpload.id);
+          final localFile = File(existingUpload.localPath);
+          if (localFile.existsSync()) {
+            try {
+              localFile.deleteSync();
+            } catch (_) {}
+          }
+        }
+
+        // Clear thumbnail cache
+        _thumbnailCache.remove(fileId);
+
+        // Always record tombstone so this device and others never resurrect it
+        await widget.queueService.database.recordDeletedPhotoTombstone(
+          driveFileId: fileId,
+          fileName: photo.name,
+          patientId: _currentPatient.id,
+        );
+
+        if (!driveDeleteSucceeded) {
+          // Record pending photo deletion for background retry when back online
+          offlineDeletedCount++;
+          await widget.queueService.database.addPendingPhotoDeletion(
+            id: const Uuid().v4(),
+            driveFileId: fileId,
+            fileName: photo.name,
+            patientId: _currentPatient.id,
+            driveFolderId: _currentPatient.driveFolderId,
+          );
+        }
+
+        successfullyDeletedIds.add(fileId);
       }
     } catch (e) {
       lastError = e.toString();
@@ -678,14 +825,27 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
           });
 
           if (successfullyDeletedIds.length == count) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text(
-                  'Deleted $count ${count == 1 ? 'photo' : 'photos'} permanently',
+            if (offlineDeletedCount > 0) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(
+                    offlineDeletedCount == count
+                        ? 'Deleted $count ${count == 1 ? 'photo' : 'photos'} locally. Will delete from Google Drive when back online.'
+                        : 'Deleted $count photos ($offlineDeletedCount pending Drive sync).',
+                  ),
+                  backgroundColor: Colors.orange.shade800,
                 ),
-                backgroundColor: Colors.green.shade800,
-              ),
-            );
+              );
+            } else {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(
+                    'Deleted $count ${count == 1 ? 'photo' : 'photos'} permanently',
+                  ),
+                  backgroundColor: Colors.green.shade800,
+                ),
+              );
+            }
           } else {
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(

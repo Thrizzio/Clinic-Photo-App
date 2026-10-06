@@ -775,6 +775,7 @@ class MockV4DriveService extends DriveService {
   Future<void> deleteFile({
     required AuthClient client,
     required String fileId,
+    String? parentFolderId,
   }) async {
     if (failDelete) throw StateError('Drive deletion error');
     deletedFiles.add(fileId);
