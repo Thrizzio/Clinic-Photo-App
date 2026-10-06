@@ -29,6 +29,7 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
   FlashMode _flashMode = FlashMode.auto;
   String? _errorMessage;
   bool _isPopping = false;
+  Patient? _currentPatient;
 
   bool get _isUnassigned => widget.sessionId != null;
 
@@ -41,15 +42,35 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
   @override
   void initState() {
     super.initState();
+    _currentPatient = widget.patient;
+    widget.queueService.addListener(_onQueueUpdated);
     WidgetsBinding.instance.addObserver(this);
     _initializeCamera();
   }
 
   @override
   void dispose() {
+    widget.queueService.removeListener(_onQueueUpdated);
     WidgetsBinding.instance.removeObserver(this);
     _controller?.dispose();
     super.dispose();
+  }
+
+  Future<void> _onQueueUpdated() async {
+    if (!mounted || _isUnassigned || _currentPatient == null) return;
+    if (_currentPatient!.driveFolderId != null &&
+        _currentPatient!.driveFolderId!.trim().isNotEmpty) {
+      return;
+    }
+    final updated = await widget.queueService.database.getPatient(_currentPatient!.id);
+    if (updated != null &&
+        updated.driveFolderId != null &&
+        updated.driveFolderId!.trim().isNotEmpty &&
+        mounted) {
+      setState(() {
+        _currentPatient = updated;
+      });
+    }
   }
 
   @override
@@ -174,9 +195,10 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
           sequenceNumber: _sequenceNumber,
         );
       } else {
-        debugPrint('CAPTURE: enqueuing photo for patient ${widget.patient!.id}');
+        final target = _currentPatient ?? widget.patient!;
+        debugPrint('CAPTURE: enqueuing photo for patient ${target.id}');
         await widget.queueService.enqueuePhoto(
-          patient: widget.patient!,
+          patient: target,
           capturedTempPath: xFile.path,
           sessionId: widget.sessionId,
           capturedAt: capturedAt,
@@ -235,11 +257,12 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
   }
 
   Widget _buildHeader() {
-    final title = _isUnassigned ? 'Unassigned Session' : widget.patient!.displayName;
+    final effectivePatient = _currentPatient ?? widget.patient;
+    final title = _isUnassigned ? 'Unassigned Session' : (effectivePatient?.displayName ?? 'Patient Photos');
     final subtitle = _isUnassigned
         ? 'Unassigned Photo Session'
-        : (widget.patient!.phoneDisplay != null && widget.patient!.phoneDisplay!.isNotEmpty
-            ? widget.patient!.phoneDisplay!
+        : (effectivePatient?.phoneDisplay != null && effectivePatient!.phoneDisplay!.isNotEmpty
+            ? effectivePatient.phoneDisplay!
             : 'Clinical Photos');
 
     return Container(
@@ -275,9 +298,9 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
                   ),
                 ),
                 if (!_isUnassigned &&
-                    widget.patient != null &&
-                    (widget.patient!.driveFolderId == null ||
-                        widget.patient!.driveFolderId!.trim().isEmpty)) ...[
+                    effectivePatient != null &&
+                    (effectivePatient.driveFolderId == null ||
+                        effectivePatient.driveFolderId!.trim().isEmpty)) ...[
                   const SizedBox(height: 2),
                   const Row(
                     mainAxisSize: MainAxisSize.min,
@@ -363,7 +386,11 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
         mainAxisSize: MainAxisSize.min,
         children: [
           // Minimal non-intrusive upload status pill
-          UploadStatusPill(queueService: widget.queueService, isDarkBackground: true),
+          UploadStatusPill(
+            queueService: widget.queueService,
+            isDarkBackground: true,
+            patientId: _currentPatient?.id ?? widget.patient?.id,
+          ),
           const SizedBox(height: 16),
 
           Row(

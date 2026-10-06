@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:googleapis_auth/googleapis_auth.dart';
 import '../models/patient.dart';
@@ -37,6 +38,9 @@ class PatientFolderService {
   final GoogleAuthService authService;
   final SupabasePatientService? supabaseService;
 
+  /// Optional listener callback invoked immediately upon local Drive folder resolution/creation.
+  void Function(Patient patient)? onFolderCreated;
+
   PatientFolderService({
     required this.driveService,
     required this.sheetsService,
@@ -44,6 +48,7 @@ class PatientFolderService {
     required this.configService,
     required this.authService,
     this.supabaseService,
+    this.onFolderCreated,
   });
 
   /// Deterministically gets or creates a patient's Drive folder under the configured parent.
@@ -81,19 +86,22 @@ class PatientFolderService {
 
     // 2. Check if a valid folder ID is already set on the patient model
     if (patient.driveFolderId != null && patient.driveFolderId!.isNotEmpty) {
-      Patient updatedPatient = patient.copyWith(
+      final updatedPatient = patient.copyWith(
         folderStatus: FolderStatus.available,
         updatedAt: DateTime.now(),
       );
       if (updatedPatient.syncStatus == 'pending_cloud' &&
           supabaseService != null &&
           Patient.isValidUuid(updatedPatient.id)) {
-        try {
-          await supabaseService!.upsertPatient(updatedPatient);
-          updatedPatient = updatedPatient.copyWith(syncStatus: 'synced');
-        } catch (_) {}
+        unawaited(() async {
+          try {
+            await supabaseService!.upsertPatient(updatedPatient);
+            await database.updatePatient(updatedPatient.copyWith(syncStatus: 'synced'));
+          } catch (_) {}
+        }());
       }
       await database.updatePatient(updatedPatient);
+      onFolderCreated?.call(updatedPatient);
       return PatientFolderResult(
         patient: updatedPatient,
         driveFolderId: patient.driveFolderId!,
@@ -183,23 +191,25 @@ class PatientFolderService {
     );
     await database.updatePatient(pendingPatient);
 
-    Patient effectivePatient = pendingPatient;
-
-    // 7. Push to Supabase immediately if service is available
-    if (supabaseService != null && Patient.isValidUuid(effectivePatient.id)) {
-      try {
-        await supabaseService!.upsertPatient(effectivePatient);
-        effectivePatient = effectivePatient.copyWith(syncStatus: 'synced');
-        await database.updatePatient(effectivePatient);
-        debugPrint('Propagated drive_folder_id to Supabase for ${effectivePatient.displayName}: $resolvedFolderId');
-      } catch (e) {
-        debugPrint('Notice: Could not push resolved folder to Supabase immediately (queued for sync): $e');
-      }
+    // 7. Push to Supabase asynchronously in background so local UI doesn't lag
+    if (supabaseService != null && Patient.isValidUuid(pendingPatient.id)) {
+      unawaited(() async {
+        try {
+          await supabaseService!.upsertPatient(pendingPatient);
+          await database.updatePatient(pendingPatient.copyWith(syncStatus: 'synced'));
+          debugPrint('Propagated drive_folder_id to Supabase for ${pendingPatient.displayName}: $resolvedFolderId');
+        } catch (e) {
+          debugPrint('Notice: Could not push resolved folder to Supabase immediately (queued for sync): $e');
+        }
+      }());
     }
 
-    // 8. Mark available
+    // Immediately notify listener callback on local state change
+    onFolderCreated?.call(pendingPatient);
+
+    // 8. Mark available locally and return immediately
     return PatientFolderResult(
-      patient: effectivePatient,
+      patient: pendingPatient,
       driveFolderId: resolvedFolderId,
       createdNew: createdNew,
     );

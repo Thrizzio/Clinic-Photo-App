@@ -160,10 +160,11 @@ void main() {
       expect(find.byTooltip('Unassigned photos'), findsOneWidget);
       expect(find.byIcon(Icons.inbox_outlined), findsOneWidget);
 
-      // Search filters: All, Name, Phone (zero Patient ID)
-      expect(find.widgetWithText(ChoiceChip, 'All'), findsOneWidget);
-      expect(find.widgetWithText(ChoiceChip, 'Name'), findsOneWidget);
-      expect(find.widgetWithText(ChoiceChip, 'Phone'), findsOneWidget);
+      // Search filter pill boxes (ALL, Name, Phone) are cleanly removed
+      expect(find.byType(ChoiceChip), findsNothing);
+      expect(find.widgetWithText(ChoiceChip, 'All'), findsNothing);
+      expect(find.widgetWithText(ChoiceChip, 'Name'), findsNothing);
+      expect(find.widgetWithText(ChoiceChip, 'Phone'), findsNothing);
       expect(find.widgetWithText(ChoiceChip, 'Patient ID'), findsNothing);
 
       // ListView has bottom padding 88.0 to prevent FAB obscuring list content

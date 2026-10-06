@@ -634,26 +634,15 @@ void main() {
       expect(find.text('Anil Jain'), findsOneWidget);
       expect(find.text('Shilpa Kalbhor'), findsOneWidget);
 
-      // Verify filter chips exist: All, Name, Phone (zero Patient ID chip)
-      expect(find.widgetWithText(ChoiceChip, 'All'), findsOneWidget);
-      expect(find.widgetWithText(ChoiceChip, 'Name'), findsOneWidget);
-      expect(find.widgetWithText(ChoiceChip, 'Phone'), findsOneWidget);
-      expect(find.widgetWithText(ChoiceChip, 'Patient ID'), findsNothing);
+      // Verify filter chips are cleanly removed (ALL, Name, Phone, Patient ID)
+      expect(find.byType(ChoiceChip), findsNothing);
 
-      // Enter search query "Anil"
+      // Enter name search query "Anil"
       await tester.enterText(find.byType(TextField), 'Anil');
       await tester.pumpAndSettle();
 
       // Only Anil Jain is shown
       expect(find.text('Anil Jain'), findsOneWidget);
-      expect(find.text('Shilpa Kalbhor'), findsNothing);
-
-      // Switch to Phone filter chip
-      await tester.tap(find.widgetWithText(ChoiceChip, 'Phone'));
-      await tester.pumpAndSettle();
-
-      // "Anil" is not a phone number, so no patients match
-      expect(find.text('Anil Jain'), findsNothing);
       expect(find.text('Shilpa Kalbhor'), findsNothing);
 
       // Enter phone query "32109"
@@ -663,13 +652,6 @@ void main() {
       // Shilpa Kalbhor matches phone number
       expect(find.text('Shilpa Kalbhor'), findsOneWidget);
       expect(find.text('Anil Jain'), findsNothing);
-
-      // Switch back to All filter chip
-      await tester.tap(find.widgetWithText(ChoiceChip, 'All'));
-      await tester.pumpAndSettle();
-
-      // Still matches Shilpa Kalbhor
-      expect(find.text('Shilpa Kalbhor'), findsOneWidget);
 
       // Clear search
       await tester.enterText(find.byType(TextField), '');

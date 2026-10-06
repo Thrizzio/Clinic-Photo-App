@@ -44,7 +44,6 @@ class PatientsScreen extends StatefulWidget {
 
 class _PatientsScreenState extends State<PatientsScreen> {
   final _searchController = TextEditingController();
-  SearchFilterMode _selectedSearchMode = SearchFilterMode.all;
   List<Patient> _patients = [];
   int _unassignedSessionsCount = 0;
   int _activeUploadsCount = 0;
@@ -54,23 +53,34 @@ class _PatientsScreenState extends State<PatientsScreen> {
   String? _syncStatusMessage;
   bool _isOffline = false;
   bool _isOpeningCamera = false;
-  late final PatientFolderService _patientFolderService = PatientFolderService(
-    driveService: widget.driveService ?? DriveService(),
-    sheetsService: widget.sheetsService,
-    authService: widget.authService,
-    configService: widget.configService,
-    database: widget.database,
-    supabaseService: widget.supabaseService,
-  );
+  late final PatientFolderService _patientFolderService =
+      widget.queueService.patientFolderService ??
+          PatientFolderService(
+            driveService: widget.driveService ?? DriveService(),
+            sheetsService: widget.sheetsService,
+            authService: widget.authService,
+            configService: widget.configService,
+            database: widget.database,
+            supabaseService: widget.supabaseService,
+          );
   late final PatientSyncService _patientSyncService = PatientSyncService(
     database: widget.database,
     supabaseService: widget.supabaseService,
     sheetsService: widget.sheetsService,
   );
 
+  void Function(Patient patient)? _previousOnFolderCreated;
+
   @override
   void initState() {
     super.initState();
+    _previousOnFolderCreated = _patientFolderService.onFolderCreated;
+    _patientFolderService.onFolderCreated = (patient) {
+      _previousOnFolderCreated?.call(patient);
+      if (mounted) {
+        _loadCachedPatients();
+      }
+    };
     widget.queueService.addListener(_onQueueUpdated);
     _loadCachedPatients();
     _updateQueueStatus();
@@ -79,6 +89,7 @@ class _PatientsScreenState extends State<PatientsScreen> {
 
   @override
   void dispose() {
+    _patientFolderService.onFolderCreated = _previousOnFolderCreated;
     widget.queueService.removeListener(_onQueueUpdated);
     _searchController.dispose();
     super.dispose();
@@ -86,6 +97,7 @@ class _PatientsScreenState extends State<PatientsScreen> {
 
   void _onQueueUpdated() {
     _updateQueueStatus();
+    _loadCachedPatients();
   }
 
   Future<void> _updateQueueStatus() async {
@@ -101,11 +113,11 @@ class _PatientsScreenState extends State<PatientsScreen> {
   }
 
   /// Loads cached patients and unassigned sessions count immediately from SQLite.
-  /// Preserves the active search query and filter mode if present.
+  /// Preserves the active search query if present.
   Future<void> _loadCachedPatients() async {
     final query = _searchController.text.trim();
     final cached = query.isNotEmpty
-        ? await widget.database.searchPatients(query, mode: _selectedSearchMode)
+        ? await widget.database.searchPatients(query, mode: SearchFilterMode.all)
         : await widget.database.getPatients();
     final unassignedCount = await widget.database.getUnassignedSessionsCount();
     if (mounted) {
@@ -120,7 +132,7 @@ class _PatientsScreenState extends State<PatientsScreen> {
   Future<void> _refreshAll() async {
     final freshPatients = await widget.database.searchPatients(
       _searchController.text,
-      mode: _selectedSearchMode,
+      mode: SearchFilterMode.all,
     );
     final unassignedCount = await widget.database.getUnassignedSessionsCount();
     if (mounted) {
@@ -259,7 +271,7 @@ class _PatientsScreenState extends State<PatientsScreen> {
   Future<void> _handleSearch(String query) async {
     final filtered = await widget.database.searchPatients(
       query,
-      mode: _selectedSearchMode,
+      mode: SearchFilterMode.all,
     );
     if (mounted) {
       setState(() {
@@ -281,9 +293,11 @@ class _PatientsScreenState extends State<PatientsScreen> {
         ),
       ),
     );
-    if (deleted == true) {
+    if (mounted) {
       await _loadCachedPatients();
-      await _refreshAll();
+      if (deleted == true) {
+        await _refreshAll();
+      }
     }
   }
 
@@ -319,27 +333,12 @@ class _PatientsScreenState extends State<PatientsScreen> {
         return;
       }
 
-      Patient targetPatient = patient;
-
-      if (patient.folderStatus == FolderStatus.missing) {
-        try {
-          final res = await _patientFolderService.getOrCreatePatientFolder(patient);
-          if (res.patient.isUploadable) {
-            targetPatient = res.patient;
-            await widget.database.updatePatient(targetPatient);
-            await _refreshAll();
-          }
-        } catch (e) {
-          debugPrint('Drive folder setup deferred while offline: $e');
-        }
-      }
-
       if (!mounted) return;
 
       await Navigator.of(context).push(
         MaterialPageRoute(
           builder: (_) => CameraScreen(
-            patient: targetPatient,
+            patient: patient,
             queueService: widget.queueService,
           ),
         ),
@@ -349,7 +348,7 @@ class _PatientsScreenState extends State<PatientsScreen> {
     }
 
     if (mounted) {
-      await _refreshAll();
+      await _loadCachedPatients();
     }
   }
 
@@ -527,8 +526,6 @@ class _PatientsScreenState extends State<PatientsScreen> {
   }
 
   bool _isQueryPhoneNumber(String query) {
-    if (_selectedSearchMode == SearchFilterMode.phone) return true;
-    if (_selectedSearchMode == SearchFilterMode.name) return false;
     final cleaned = query.replaceAll(RegExp(r'[\s\-()+]'), '');
     return cleaned.isNotEmpty && RegExp(r'^\d+$').hasMatch(cleaned);
   }
@@ -621,17 +618,12 @@ class _PatientsScreenState extends State<PatientsScreen> {
           children: [
             // Search Input
             Padding(
-              padding: const EdgeInsets.fromLTRB(16.0, 8.0, 16.0, 4.0),
+              padding: const EdgeInsets.fromLTRB(16.0, 8.0, 16.0, 8.0),
               child: TextField(
                 controller: _searchController,
                 onChanged: _handleSearch,
                 decoration: InputDecoration(
-                  hintText: switch (_selectedSearchMode) {
-                    SearchFilterMode.all => 'Search patients by name or phone...',
-                    SearchFilterMode.name => 'Search by patient name...',
-                    SearchFilterMode.phone => 'Search by phone number...',
-                    _ => 'Search patients...',
-                  },
+                  hintText: 'Search patients by name or phone...',
                   prefixIcon: const Icon(Icons.search),
                   suffixIcon: _searchController.text.isNotEmpty
                       ? IconButton(
@@ -649,38 +641,6 @@ class _PatientsScreenState extends State<PatientsScreen> {
                     borderRadius: BorderRadius.circular(12),
                     borderSide: BorderSide.none,
                   ),
-                ),
-              ),
-            ),
-
-            // Search Filter Mode Selector
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16.0, 0.0, 16.0, 6.0),
-              child: SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: Row(
-                  children: SearchFilterMode.values
-                      .where((mode) => mode != SearchFilterMode.patientId)
-                      .map((mode) {
-                    final isSelected = _selectedSearchMode == mode;
-                    return Padding(
-                      padding: const EdgeInsets.only(right: 8.0),
-                      child: ChoiceChip(
-                        label: Text(mode.label, style: const TextStyle(fontSize: 12)),
-                        selected: isSelected,
-                        visualDensity: VisualDensity.compact,
-                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                        onSelected: (selected) {
-                          if (selected) {
-                            setState(() {
-                              _selectedSearchMode = mode;
-                            });
-                            _handleSearch(_searchController.text);
-                          }
-                        },
-                      ),
-                    );
-                  }).toList(),
                 ),
               ),
             ),

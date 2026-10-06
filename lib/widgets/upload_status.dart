@@ -4,11 +4,13 @@ import '../services/upload_queue.dart';
 class UploadStatusPill extends StatelessWidget {
   final UploadQueueService queueService;
   final bool isDarkBackground;
+  final String? patientId;
 
   const UploadStatusPill({
     super.key,
     required this.queueService,
     this.isDarkBackground = false,
+    this.patientId,
   });
 
   @override
@@ -17,7 +19,7 @@ class UploadStatusPill extends StatelessWidget {
       listenable: queueService,
       builder: (context, _) {
         return FutureBuilder<QueueStatus>(
-          future: queueService.getStatus(),
+          future: queueService.getStatus(patientId: patientId),
           builder: (context, snapshot) {
             final status = snapshot.data;
             if (status == null) {
@@ -95,36 +97,41 @@ class UploadStatusPill extends StatelessWidget {
               );
             }
 
-            // All photos uploaded / Idle state
-            return Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-              decoration: BoxDecoration(
-                color: isDarkBackground
-                    ? Colors.black38
-                    : Theme.of(context).colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
-                borderRadius: BorderRadius.circular(16),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    Icons.check_circle_outline,
-                    size: 14,
-                    color: isDarkBackground ? Colors.greenAccent : Theme.of(context).colorScheme.primary,
-                  ),
-                  const SizedBox(width: 6),
-                  Text(
-                    'All photos uploaded',
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: isDarkBackground
-                          ? Colors.white70
-                          : Theme.of(context).colorScheme.onSurfaceVariant,
+            // All photos uploaded: ONLY when photos exist and every photo is confirmed uploaded
+            if (status.allPhotosUploaded) {
+              return Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                decoration: BoxDecoration(
+                  color: isDarkBackground
+                      ? Colors.black38
+                      : Theme.of(context).colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      Icons.check_circle_outline,
+                      size: 14,
+                      color: isDarkBackground ? Colors.greenAccent : Theme.of(context).colorScheme.primary,
                     ),
-                  ),
-                ],
-              ),
-            );
+                    const SizedBox(width: 6),
+                    Text(
+                      'All photos uploaded',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: isDarkBackground
+                            ? Colors.white70
+                            : Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }
+
+            // Zero photos or idle with no confirmed uploads: show nothing
+            return const SizedBox.shrink();
           },
         );
       },
