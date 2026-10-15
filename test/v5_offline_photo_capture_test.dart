@@ -242,7 +242,7 @@ void main() {
       expect(localFile.existsSync(), isTrue, reason: 'Local file must be retained as cache');
     });
 
-    testWidgets('PatientPhotosScreen renders local uploads immediately with status badges', (tester) async {
+    testWidgets('PatientPhotosScreen renders local uploads immediately without status badges', (tester) async {
       final patient = Patient(
         id: 'patient_badges_001',
         name: 'Vikas Sharma',
@@ -311,15 +311,15 @@ void main() {
         ),
       ));
 
-      // Use pump() rather than pumpAndSettle() because uploading status renders animated CircularProgressIndicator
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 100));
 
-      // Verify all 4 status badges are rendered
-      expect(find.text('PENDING'), findsOneWidget);
-      expect(find.text('UPLOADING'), findsOneWidget);
-      expect(find.text('UPLOADED'), findsOneWidget);
-      expect(find.text('FAILED'), findsOneWidget);
+      // Local photos are visible immediately, but upload state is deliberately
+      // kept out of the doctor-facing gallery UI.
+      expect(find.text('PENDING'), findsNothing);
+      expect(find.text('UPLOADING'), findsNothing);
+      expect(find.text('UPLOADED'), findsNothing);
+      expect(find.text('FAILED'), findsNothing);
     });
 
     test('Assigning unassigned session to patient without Drive folder sets pending status when offline', () async {

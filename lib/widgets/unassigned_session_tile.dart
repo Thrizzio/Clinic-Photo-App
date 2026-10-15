@@ -85,8 +85,6 @@ class UnassignedSessionTile extends StatelessWidget {
                           color: theme.colorScheme.onSurfaceVariant,
                         ),
                       ),
-                      const SizedBox(height: 4),
-                      _buildSyncBadge(theme),
                     ],
                   ),
                 ),
@@ -245,43 +243,5 @@ class UnassignedSessionTile extends StatelessWidget {
     );
   }
 
-  Widget _buildSyncBadge(ThemeData theme) {
-    if (photos.isEmpty) {
-      return const SizedBox.shrink();
-    }
-
-    final hasFailed = photos.any((p) => p.status == UploadStatus.failed);
-    final hasUploading = photos.any((p) => p.status == UploadStatus.uploading);
-    final hasWaiting = photos.any((p) => p.status == UploadStatus.waiting);
-    final allUploaded = photos.every((p) =>
-        p.status == UploadStatus.uploaded ||
-        (p.driveFileId != null && p.driveFileId!.isNotEmpty));
-    final isUnassigned = photos.every((p) => p.status == UploadStatus.unassigned);
-
-    final (String label, Color color, IconData icon) = switch (true) {
-      _ when hasFailed => ('Failed Upload', Colors.red, Icons.error_outline),
-      _ when hasUploading => ('Uploading...', Colors.blue, Icons.sync),
-      _ when hasWaiting => ('Pending Upload', Colors.orange, Icons.schedule),
-      _ when allUploaded => ('Uploaded', Colors.green, Icons.cloud_done_outlined),
-      _ when isUnassigned => ('Local Only', Colors.blueGrey, Icons.phone_android_outlined),
-      _ => ('Ready', theme.colorScheme.primary, Icons.check_circle_outline),
-    };
-
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Icon(icon, size: 12, color: color),
-        const SizedBox(width: 4),
-        Text(
-          label,
-          style: TextStyle(
-            fontSize: 11,
-            fontWeight: FontWeight.w600,
-            color: color,
-          ),
-        ),
-      ],
-    );
-  }
 }
 

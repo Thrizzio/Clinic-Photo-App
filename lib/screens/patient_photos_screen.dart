@@ -745,71 +745,35 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
     String? lastError;
 
     try {
-      final client = await widget.authService.getAuthenticatedClient();
-
       for (final photo in photosToDelete) {
         final fileId = photo.id;
         if (fileId == null) continue;
-
-        bool driveDeleteSucceeded = false;
-        if (client != null) {
-          try {
-            await widget.driveService.deleteFile(
-              client: client,
-              fileId: fileId,
-              parentFolderId: _currentPatient.driveFolderId,
-            );
-            driveDeleteSucceeded = true;
-          } catch (e) {
-            lastError = e.toString();
-            debugPrint('Online delete failed for photo $fileId: $e');
-            final errStr = e.toString().toLowerCase();
-            final isOffline = e is SocketException ||
-                errStr.contains('socketexception') ||
-                errStr.contains('network') ||
-                errStr.contains('connection');
-            if (!isOffline) {
-              // Explicit online API error: Keep photo visible and retryable in gallery
-              continue;
-            }
-          }
-        }
-
-        // Clean up local DB & local cached file
         final existingUpload = await widget.queueService.database.getUploadByDriveFileId(fileId) ??
             await widget.queueService.database.getUploadByFileName(photo.name ?? '');
-        if (existingUpload != null) {
-          await widget.queueService.database.deleteUpload(existingUpload.id);
-          final localFile = File(existingUpload.localPath);
-          if (localFile.existsSync()) {
-            try {
-              localFile.deleteSync();
-            } catch (_) {}
-          }
-        }
-
-        // Clear thumbnail cache
-        _thumbnailCache.remove(fileId);
-
-        // Always record tombstone so this device and others never resurrect it
-        await widget.queueService.database.recordDeletedPhotoTombstone(
-          driveFileId: fileId,
-          fileName: photo.name,
+        final item = existingUpload ?? UploadItem(
+          id: 'remote_$fileId',
           patientId: _currentPatient.id,
+          driveFolderId: _currentPatient.driveFolderId,
+          localPath: '',
+          fileName: photo.name ?? 'photo.jpg',
+          driveFileId: fileId,
+          status: UploadStatus.uploaded,
+          createdAt: DateTime.now(),
         );
 
-        if (!driveDeleteSucceeded) {
-          // Record pending photo deletion for background retry when back online
-          offlineDeletedCount++;
-          await widget.queueService.database.addPendingPhotoDeletion(
-            id: const Uuid().v4(),
-            driveFileId: fileId,
-            fileName: photo.name,
+        try {
+          final result = await widget.queueService.deletePhotoSafely(
+            item,
             patientId: _currentPatient.id,
-            driveFolderId: _currentPatient.driveFolderId,
           );
+          if (result.remoteDeletionPending) offlineDeletedCount++;
+        } catch (e) {
+          lastError = e.toString();
+          debugPrint('Photo deletion failed for $fileId: $e');
+          continue;
         }
 
+        _thumbnailCache.remove(fileId);
         successfullyDeletedIds.add(fileId);
       }
     } catch (e) {
@@ -1136,7 +1100,7 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
                 ),
                 const SizedBox(height: 8),
                 Text(
-                  'Photos captured for this patient will appear here once uploaded.',
+                  'Photos captured for this patient appear here as soon as they are saved locally.',
                   textAlign: TextAlign.center,
                   style: TextStyle(fontSize: 14, color: theme.colorScheme.onSurfaceVariant),
                 ),
@@ -1166,8 +1130,6 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
         final fileId = photo.id;
         final dateStr = PatientPhotosScreen.formatPhotoGridTimestamp(photo);
         final isSelected = fileId != null && _selectedPhotoIds.contains(fileId);
-        final upload = (fileId != null ? _localUploadsByFileId[fileId] : null) ??
-            _localUploadsByFileName[photo.name ?? ''];
 
         return InkWell(
           onTap: () {
@@ -1237,33 +1199,6 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
                   ),
                 ),
               ),
-              if (upload != null)
-                Positioned(
-                  top: 6,
-                  left: 6,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-                    decoration: BoxDecoration(
-                      color: switch (upload.status) {
-                        UploadStatus.pending => Colors.amber.shade800,
-                        UploadStatus.uploading => Colors.blue.shade700,
-                        UploadStatus.failed => Colors.red.shade700,
-                        UploadStatus.uploaded => Colors.green.shade700,
-                        _ => Colors.orange.shade700,
-                      }.withValues(alpha: 0.9),
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                    child: Text(
-                      upload.status.name.toUpperCase(),
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 8,
-                        fontWeight: FontWeight.bold,
-                        letterSpacing: 0.5,
-                      ),
-                    ),
-                  ),
-                ),
               if (dateStr.isNotEmpty)
                 Positioned(
                   left: 0,

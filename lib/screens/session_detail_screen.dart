@@ -125,49 +125,17 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
     final successfullyDeletedIds = <String>[];
 
     for (final photo in photosToDelete) {
-      bool deleted = false;
-      // 1. If photo is in Drive, delete from Drive first
-      if (photo.driveFileId != null && photo.driveFileId!.isNotEmpty) {
-        try {
-          final client = await widget.queueService.authService.getAuthenticatedClient();
-          if (client != null) {
-            await widget.queueService.driveService.deleteFile(
-              client: client,
-              fileId: photo.driveFileId!,
-              parentFolderId: widget.session.driveFolderId,
-            );
-            deleted = true;
-          }
-        } catch (e) {
-          debugPrint('Error deleting photo ${photo.driveFileId} from Drive: $e');
-        }
-      } else {
-        deleted = true;
-      }
-
-      // 2. Physically delete local files if any
-      if (photo.localPath.isNotEmpty) {
-        final file = File(photo.localPath);
-        if (file.existsSync()) {
-          try {
-            file.deleteSync();
-          } catch (e) {
-            debugPrint('Error deleting local photo file: $e');
-          }
-        }
-      }
-
-      // 3. Delete database record only after deletion and record tombstone
-      if (deleted) {
-        await widget.database.deleteUpload(photo.id);
-        await widget.database.recordDeletedPhotoTombstone(
-          driveFileId: photo.driveFileId,
-          fileName: photo.fileName,
+      try {
+        await widget.queueService.deletePhotoSafely(
+          photo,
+          patientId: photo.patientId,
         );
         if (photo.driveFileId != null) {
           _thumbnailCache.remove(photo.driveFileId!);
         }
         successfullyDeletedIds.add(photo.id);
+      } catch (e) {
+        debugPrint('Error deleting photo ${photo.driveFileId}: $e');
       }
     }
 

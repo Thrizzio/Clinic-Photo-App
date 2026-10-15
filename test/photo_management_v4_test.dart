@@ -472,7 +472,8 @@ void main() {
 
       // Verify "2 photos" is displayed (NOT "0 photos")
       expect(find.text('2 photos'), findsOneWidget);
-      expect(find.text('Uploaded'), findsOneWidget);
+      // The gallery intentionally does not expose upload-status badges to the doctor.
+      expect(find.text('Uploaded'), findsNothing);
       expect(find.text('View Photos'), findsOneWidget);
       expect(find.text('Assign'), findsOneWidget);
     });

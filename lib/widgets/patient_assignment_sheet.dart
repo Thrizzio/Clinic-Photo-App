@@ -89,27 +89,16 @@ class _PatientAssignmentSheetState extends State<PatientAssignmentSheet> {
           if (resolved.patient.isUploadable) {
             await widget.database.updatePatient(resolved.patient);
             targetPatient = resolved.patient;
-          } else {
-            setState(() {
-              _isLoading = false;
-              _errorMessage =
-                  'Could not resolve Drive folder for ${patient.displayName}. Status: ${resolved.patient.folderStatus.name}';
-            });
-            return;
           }
         } catch (e) {
+          // Assignment is still durable locally. The upload worker will
+          // resolve/create the patient folder when authorization/connectivity
+          // is available.
+          debugPrint('Folder resolution deferred during assignment: $e');
           setState(() {
             _isLoading = false;
-            _errorMessage = 'Failed to create Drive folder: $e';
           });
-          return;
         }
-      } else {
-        setState(() {
-          _errorMessage =
-              'Cannot assign to ${patient.displayName}: This patient does not have a Google Drive folder in the Visits sheet. Photos remain safely saved.';
-        });
-        return;
       }
     }
 
@@ -133,7 +122,7 @@ class _PatientAssignmentSheetState extends State<PatientAssignmentSheet> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              'Session assigned to ${targetPatient.displayName}. Photos queued for upload.',
+              'Session assigned to ${targetPatient.displayName}. Photos queued locally and will upload when ready.',
             ),
             backgroundColor: Colors.green.shade800,
           ),

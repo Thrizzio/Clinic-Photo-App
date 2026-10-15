@@ -1,8 +1,12 @@
+import 'dart:async';
+import 'dart:io';
+import 'dart:typed_data';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import '../models/patient.dart';
+import '../models/upload_item.dart';
 import '../services/upload_queue.dart';
-import '../widgets/upload_status.dart';
+import '../widgets/reference_overlay.dart';
 
 class CameraScreen extends StatefulWidget {
   final Patient? patient;
@@ -29,12 +33,21 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
   FlashMode _flashMode = FlashMode.auto;
   String? _errorMessage;
   bool _isPopping = false;
+  bool _exitRequested = false;
+  bool _isInitializingCamera = false;
+  int _cameraGeneration = 0;
   Patient? _currentPatient;
+  Uint8List? _referenceBytes;
+  double _referenceOpacity = 0.35;
 
   bool get _isUnassigned => widget.sessionId != null;
 
-  void _handleExit() {
+  Future<void> _handleExit() async {
     if (_isPopping) return;
+    if (_isTakingPhoto) {
+      _exitRequested = true;
+      return;
+    }
     _isPopping = true;
     Navigator.of(context).pop(_sessionPhotoCount);
   }
@@ -52,7 +65,10 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
   void dispose() {
     widget.queueService.removeListener(_onQueueUpdated);
     WidgetsBinding.instance.removeObserver(this);
-    _controller?.dispose();
+    _cameraGeneration++;
+    final controller = _controller;
+    _controller = null;
+    unawaited(controller?.dispose());
     super.dispose();
   }
 
@@ -75,21 +91,21 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    final cameraController = _controller;
-    if (cameraController == null || !cameraController.value.isInitialized) {
-      return;
-    }
-
     if (state == AppLifecycleState.inactive) {
+      _cameraGeneration++;
+      final cameraController = _controller;
       _isCameraInitialized = false;
       _controller = null;
-      cameraController.dispose();
+      if (cameraController != null) unawaited(cameraController.dispose());
     } else if (state == AppLifecycleState.resumed) {
-      _initializeCamera();
+      unawaited(_initializeCamera());
     }
   }
 
   Future<void> _initializeCamera() async {
+    if (_isInitializingCamera || _isPopping) return;
+    _isInitializingCamera = true;
+    final generation = ++_cameraGeneration;
     try {
       final cameras = await availableCameras();
       if (cameras.isEmpty) {
@@ -119,12 +135,21 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
         await controller.setFlashMode(_flashMode);
       } catch (_) {}
 
-      if (mounted) {
+       if (!mounted || generation != _cameraGeneration || _isPopping) {
+         await controller.dispose();
+         return;
+       }
+
+       final previous = _controller;
+       if (mounted) {
         setState(() {
           _controller = controller;
           _isCameraInitialized = true;
           _errorMessage = null;
         });
+      }
+      if (previous != null && !identical(previous, controller)) {
+        unawaited(previous.dispose());
       }
     } catch (e) {
       if (mounted) {
@@ -132,6 +157,8 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
           _errorMessage = 'Camera initialization failed: $e';
         });
       }
+    } finally {
+      _isInitializingCamera = false;
     }
   }
 
@@ -151,6 +178,110 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
         _flashMode = nextMode;
       });
     } catch (_) {}
+  }
+
+  Future<void> _openReferencePicker() async {
+    final patient = _currentPatient ?? widget.patient;
+    if (_isUnassigned || patient == null) return;
+
+    final uploads = await widget.queueService.database.getUploadsForPatient(patient.id);
+    final candidates = uploads
+        .where((item) =>
+            (item.localPath.isNotEmpty && File(item.localPath).existsSync()) ||
+            (item.driveFileId != null && item.driveFileId!.isNotEmpty))
+        .toList()
+      ..sort((a, b) => b.capturedAt.compareTo(a.capturedAt));
+
+    if (!mounted) return;
+    if (candidates.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No previous local or Drive photos are available as a reference.')),
+      );
+      return;
+    }
+
+    final selected = await showModalBottomSheet<UploadItem>(
+      context: context,
+      isScrollControlled: true,
+      builder: (sheetContext) => SafeArea(
+        child: SizedBox(
+          height: MediaQuery.of(sheetContext).size.height * 0.7,
+          child: Column(
+            children: [
+              const Padding(
+                padding: EdgeInsets.all(16),
+                child: Text(
+                  'Choose reference photo',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                ),
+              ),
+              Expanded(
+                child: ListView.builder(
+                  itemCount: candidates.length,
+                  itemBuilder: (_, index) {
+                    final item = candidates[index];
+                    final local = item.localPath.isNotEmpty ? File(item.localPath) : null;
+                    return ListTile(
+                      leading: SizedBox(
+                        width: 56,
+                        height: 56,
+                        child: local != null && local.existsSync()
+                            ? Image.file(local, fit: BoxFit.cover)
+                            : const Icon(Icons.cloud_outlined),
+                      ),
+                      title: Text(item.fileName),
+                      subtitle: Text('Captured ${item.capturedAt.toLocal()}'),
+                      onTap: () => Navigator.of(sheetContext).pop(item),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    if (selected != null) await _loadReference(selected);
+  }
+
+  Future<void> _loadReference(UploadItem item) async {
+    Uint8List? bytes;
+    final localFile = item.localPath.isNotEmpty ? File(item.localPath) : null;
+    if (localFile != null && localFile.existsSync()) {
+      bytes = await localFile.readAsBytes();
+    } else if (item.driveFileId != null && item.driveFileId!.isNotEmpty) {
+      final client = await widget.queueService.authService.getAuthenticatedClient();
+      if (client != null) {
+        try {
+          bytes = await widget.queueService.driveService.getFileBytes(
+            client: client,
+            fileId: item.driveFileId!,
+          );
+        } catch (e) {
+          debugPrint('Reference image download failed: $e');
+        }
+      }
+    }
+
+    if (!mounted) return;
+    if (bytes == null || bytes.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('The selected reference photo is no longer available.')),
+      );
+      return;
+    }
+    setState(() {
+      _referenceBytes = bytes;
+      _referenceOpacity = 0.35;
+    });
+  }
+
+  void _clearReference() {
+    if (!mounted) return;
+    setState(() {
+      _referenceBytes = null;
+    });
   }
 
   /// Rapid shutter press operation.
@@ -224,33 +355,43 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
           ),
         );
       }
-    } finally {
-      if (mounted) {
-        setState(() {
-          _isTakingPhoto = false;
-        });
+      } finally {
+        if (mounted) {
+          setState(() {
+            _isTakingPhoto = false;
+          });
+          if (_exitRequested) {
+            _exitRequested = false;
+            unawaited(_handleExit());
+          }
+        }
       }
-    }
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.black,
-      body: SafeArea(
-        child: Column(
-          children: [
-            // Top Header: Patient Context & Controls
-            _buildHeader(),
+    return PopScope<void>(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) unawaited(_handleExit());
+      },
+      child: Scaffold(
+        backgroundColor: Colors.black,
+        body: SafeArea(
+          child: Column(
+            children: [
+              // Top Header: Patient Context & Controls
+              _buildHeader(),
 
-            // Camera Viewport
-            Expanded(
-              child: _buildCameraViewport(),
-            ),
+              // Camera Viewport
+              Expanded(
+                child: _buildCameraViewport(),
+              ),
 
-            // Bottom Shutter & Status Controls
-            _buildBottomControls(),
-          ],
+              // Bottom Shutter & Status Controls
+              _buildBottomControls(),
+            ],
+          ),
         ),
       ),
     );
@@ -322,6 +463,11 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
             ),
           ),
           IconButton(
+            icon: const Icon(Icons.layers_outlined, color: Colors.white),
+            tooltip: 'Reference photo',
+            onPressed: _isUnassigned ? null : _openReferencePicker,
+          ),
+          IconButton(
             icon: Icon(
               switch (_flashMode) {
                 FlashMode.auto => Icons.flash_auto,
@@ -371,9 +517,21 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
     }
 
     return ClipRect(
-      child: AspectRatio(
-        aspectRatio: _controller!.value.aspectRatio,
-        child: CameraPreview(_controller!),
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          AspectRatio(
+            aspectRatio: _controller!.value.aspectRatio,
+            child: CameraPreview(_controller!),
+          ),
+          if (_referenceBytes != null)
+            ReferenceOverlay(
+              imageBytes: _referenceBytes!,
+              opacity: _referenceOpacity,
+              onOpacityChanged: (value) => setState(() => _referenceOpacity = value),
+              onClear: _clearReference,
+            ),
+        ],
       ),
     );
   }
@@ -385,14 +543,6 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // Minimal non-intrusive upload status pill
-          UploadStatusPill(
-            queueService: widget.queueService,
-            isDarkBackground: true,
-            patientId: _currentPatient?.id ?? widget.patient?.id,
-          ),
-          const SizedBox(height: 16),
-
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [

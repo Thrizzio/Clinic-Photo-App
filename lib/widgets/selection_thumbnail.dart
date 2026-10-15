@@ -131,13 +131,6 @@ class SelectionThumbnail extends StatelessWidget {
               ),
             ),
 
-          // Status indicator (e.g. if failed or uploaded)
-          if (!isSelectionMode && photo.status != UploadStatus.unassigned)
-            Positioned(
-              top: 6,
-              right: 6,
-              child: _buildStatusBadge(context),
-            ),
         ],
       ),
     );
@@ -152,32 +145,4 @@ class SelectionThumbnail extends StatelessWidget {
     );
   }
 
-  Widget _buildStatusBadge(BuildContext context) {
-    final color = switch (photo.status) {
-      UploadStatus.pending => Colors.amber.shade800,
-      UploadStatus.uploading => Colors.blue,
-      UploadStatus.failed => Colors.red,
-      UploadStatus.waiting => Colors.orange,
-      UploadStatus.unassigned => Colors.grey,
-      UploadStatus.uploaded => Colors.green,
-    };
-
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.9),
-        borderRadius: BorderRadius.circular(4),
-      ),
-      child: Text(
-        photo.status.name.toUpperCase(),
-        style: const TextStyle(
-          color: Colors.white,
-          fontSize: 8,
-          fontWeight: FontWeight.bold,
-          letterSpacing: 0.5,
-        ),
-      ),
-    );
-  }
 }
-
