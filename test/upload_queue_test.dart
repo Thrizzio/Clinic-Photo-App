@@ -134,5 +134,35 @@ void main() {
       items = await reopenedDb.getAllUploads();
       expect(items.first.status, UploadStatus.waiting);
     });
+
+    test('persisted backoff keeps a future retry out of the worker eligibility query', () async {
+      final futureItem = UploadItem(
+        id: 'backoff_future_006',
+        patientId: 'P006',
+        driveFolderId: 'folder_006',
+        localPath: '/data/future.jpg',
+        fileName: 'future.jpg',
+        status: UploadStatus.waiting,
+        retryCount: 1,
+        nextAttemptAt: DateTime.now().add(const Duration(minutes: 10)),
+        createdAt: DateTime.now(),
+      );
+      final readyItem = futureItem.copyWith(
+        id: 'backoff_ready_007',
+        fileName: 'ready.jpg',
+        nextAttemptAt: DateTime.now().subtract(const Duration(seconds: 1)),
+      );
+
+      await database.insertUpload(futureItem);
+      await database.insertUpload(readyItem);
+
+      final next = await database.getNextPendingUpload();
+      expect(next?.id, readyItem.id);
+
+      await database.resetFailedToWaiting();
+      final persistedFuture = (await database.getAllUploads())
+          .firstWhere((item) => item.id == futureItem.id);
+      expect(persistedFuture.nextAttemptAt, isNotNull);
+    });
   });
 }

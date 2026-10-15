@@ -259,7 +259,7 @@ abstract class AppDatabase {
 /// SQLite-backed production database implementation for Android.
 class SqliteAppDatabase implements AppDatabase {
   static const String _dbName = 'clinic_photos.db';
-  static const int _dbVersion = 9;
+  static const int _dbVersion = 10;
 
   final Database db;
 
@@ -335,7 +335,8 @@ class SqliteAppDatabase implements AppDatabase {
               drive_file_id TEXT,
               created_at TEXT NOT NULL,
               captured_at TEXT NOT NULL,
-              sequence_number INTEGER NOT NULL DEFAULT 1
+              sequence_number INTEGER NOT NULL DEFAULT 1,
+              next_attempt_at TEXT
             )
           ''');
 
@@ -409,12 +410,17 @@ class SqliteAppDatabase implements AppDatabase {
           if (oldVersion < 9) {
             await _migrateToV9(db);
           }
+
+          if (oldVersion < 10) {
+            await _migrateToV10(db);
+          }
         },
         onOpen: (db) async {
           // Ensure schema compatibility on existing databases
           await _migrateToV7(db);
           await _migrateToV8(db);
           await _migrateToV9(db);
+          await _migrateToV10(db);
           await _migrateLegacyNonUuidPatients(db);
           await _reconcileStalePlaceholderPatients(db);
           await _ensureUploadsTableSchema(db);
@@ -658,9 +664,15 @@ class SqliteAppDatabase implements AppDatabase {
     final hasCapturedAt = tableInfo.any((c) => c['name'] == 'captured_at');
     final hasSeq = tableInfo.any((c) => c['name'] == 'sequence_number');
     final hasParentFolder = tableInfo.any((c) => c['name'] == 'drive_parent_folder_id');
+    final hasNextAttemptAt = tableInfo.any((c) => c['name'] == 'next_attempt_at');
 
     final isPatientIdNotNull = patientIdCol['notnull'] == 1;
-    final needsMigration = isPatientIdNotNull || !hasSessionId || !hasCapturedAt || !hasSeq || !hasParentFolder;
+    final needsMigration = isPatientIdNotNull ||
+        !hasSessionId ||
+        !hasCapturedAt ||
+        !hasSeq ||
+        !hasParentFolder ||
+        !hasNextAttemptAt;
 
     if (needsMigration) {
       await db.transaction((txn) async {
@@ -680,7 +692,8 @@ class SqliteAppDatabase implements AppDatabase {
             drive_file_id TEXT,
             created_at TEXT NOT NULL,
             captured_at TEXT NOT NULL,
-            sequence_number INTEGER NOT NULL DEFAULT 1
+            sequence_number INTEGER NOT NULL DEFAULT 1,
+            next_attempt_at TEXT
           )
         ''');
 
@@ -689,15 +702,17 @@ class SqliteAppDatabase implements AppDatabase {
         final oldHasCapturedAt = oldColumns.any((c) => c['name'] == 'captured_at');
         final oldHasSeq = oldColumns.any((c) => c['name'] == 'sequence_number');
         final oldHasParent = oldColumns.any((c) => c['name'] == 'drive_parent_folder_id');
+        final oldHasNextAttemptAt = oldColumns.any((c) => c['name'] == 'next_attempt_at');
 
         final selectSessionId = oldHasSessionId ? "session_id" : "NULL";
         final selectCapturedAt = oldHasCapturedAt ? "captured_at" : "created_at";
         final selectSeq = oldHasSeq ? "sequence_number" : "1";
         final selectParent = oldHasParent ? "drive_parent_folder_id" : "drive_folder_id";
+        final selectNextAttemptAt = oldHasNextAttemptAt ? "next_attempt_at" : "NULL";
 
         await txn.execute('''
-          INSERT INTO uploads (id, session_id, patient_id, drive_folder_id, drive_parent_folder_id, local_path, file_name, status, retry_count, last_error, drive_file_id, created_at, captured_at, sequence_number)
-          SELECT id, $selectSessionId, patient_id, drive_folder_id, $selectParent, local_path, file_name, status, retry_count, last_error, drive_file_id, created_at, $selectCapturedAt, $selectSeq
+          INSERT INTO uploads (id, session_id, patient_id, drive_folder_id, drive_parent_folder_id, local_path, file_name, status, retry_count, last_error, drive_file_id, created_at, captured_at, sequence_number, next_attempt_at)
+          SELECT id, $selectSessionId, patient_id, drive_folder_id, $selectParent, local_path, file_name, status, retry_count, last_error, drive_file_id, created_at, $selectCapturedAt, $selectSeq, $selectNextAttemptAt
           FROM _uploads_old
         ''');
 
@@ -710,6 +725,12 @@ class SqliteAppDatabase implements AppDatabase {
         );
       });
     }
+  }
+
+  static Future<void> _migrateToV10(Database db) async {
+    final info = await db.rawQuery("PRAGMA table_info(uploads)");
+    if (info.isEmpty || info.any((c) => c['name'] == 'next_attempt_at')) return;
+    await db.execute('ALTER TABLE uploads ADD COLUMN next_attempt_at TEXT');
   }
 
   /// Migrates older database versions to Schema v8:
@@ -1384,7 +1405,7 @@ class SqliteAppDatabase implements AppDatabase {
              COUNT(u.id) as photo_count
       FROM capture_sessions s
       LEFT JOIN uploads u ON s.id = u.session_id
-      WHERE s.status = 'unassigned'
+       WHERE s.status IN ('unassigned', 'assignment_pending', 'assignment_failed')
       GROUP BY s.id
       ORDER BY s.created_at DESC
     ''');
@@ -1395,7 +1416,7 @@ class SqliteAppDatabase implements AppDatabase {
   @override
   Future<int> getUnassignedSessionsCount() async {
     final count = Sqflite.firstIntValue(await db.rawQuery(
-      "SELECT COUNT(*) FROM capture_sessions WHERE status = 'unassigned'",
+      "SELECT COUNT(*) FROM capture_sessions WHERE status IN ('unassigned', 'assignment_pending', 'assignment_failed')",
     ));
     return count ?? 0;
   }
@@ -1641,13 +1662,14 @@ class SqliteAppDatabase implements AppDatabase {
   }) async {
     final hasFolder = driveFolderId != null && driveFolderId.isNotEmpty;
     final targetStatus = hasFolder ? UploadStatus.waiting.name : UploadStatus.pending.name;
+    final targetSessionStatus = hasFolder ? 'assigned' : 'assignment_pending';
 
     await db.transaction((txn) async {
       await txn.update(
         'capture_sessions',
         {
           'patient_id': patientId,
-          'status': 'assigned',
+          'status': targetSessionStatus,
         },
         where: 'id = ?',
         whereArgs: [sessionId],
@@ -1681,6 +1703,19 @@ class SqliteAppDatabase implements AppDatabase {
           where: 'session_id = ? AND (drive_file_id IS NULL OR drive_file_id = "")',
           whereArgs: [sessionId],
         );
+
+        // Drive-backed photos still live in the unassigned session folder when
+        // the target folder is unavailable. Preserve that source folder and
+        // let the queue move them after folder resolution succeeds.
+        await txn.update(
+          'uploads',
+          {
+            'patient_id': patientId,
+            'status': targetStatus,
+          },
+          where: 'session_id = ? AND drive_file_id IS NOT NULL AND drive_file_id != ""',
+          whereArgs: [sessionId],
+        );
       }
 
       // Preserve status = 'uploaded' for items that were already moved or uploaded on Drive
@@ -1691,7 +1726,7 @@ class SqliteAppDatabase implements AppDatabase {
             'patient_id': patientId,
             'drive_folder_id': driveFolderId,
             'drive_parent_folder_id': driveFolderId,
-            'status': UploadStatus.uploaded.name,
+           'status': UploadStatus.uploaded.name,
           },
           where: 'session_id = ? AND drive_file_id IS NOT NULL AND drive_file_id != ""',
           whereArgs: [sessionId],
@@ -1745,10 +1780,16 @@ class SqliteAppDatabase implements AppDatabase {
       where: 'status = ? OR status = ?',
       whereArgs: [UploadStatus.waiting.name, UploadStatus.pending.name],
       orderBy: 'created_at ASC',
-      limit: 1,
     );
-    if (rows.isEmpty) return null;
-    return UploadItem.fromMap(rows.first);
+    final now = DateTime.now();
+    for (final row in rows) {
+      final item = UploadItem.fromMap(row);
+      final nextAttemptAt = item.nextAttemptAt;
+      if (nextAttemptAt == null || !nextAttemptAt.isAfter(now)) {
+        return item;
+      }
+    }
+    return null;
   }
 
   @override
@@ -1790,6 +1831,7 @@ class SqliteAppDatabase implements AppDatabase {
         'status': UploadStatus.waiting.name,
         'retry_count': 0,
         'last_error': null,
+        'next_attempt_at': null,
       },
       where: 'status = ?',
       whereArgs: [UploadStatus.failed.name],
@@ -2095,7 +2137,9 @@ class InMemoryAppDatabase implements AppDatabase {
   @override
   Future<List<CaptureSession>> getUnassignedSessions() async {
     final list = _sessions.values
-        .where((s) => s.status == 'unassigned')
+        .where((s) => s.status == 'unassigned' ||
+            s.status == 'assignment_pending' ||
+            s.status == 'assignment_failed')
         .map((s) {
           final count = _uploads.values.where((u) => u.sessionId == s.id).length;
           return s.copyWith(photoCount: count);
@@ -2107,7 +2151,11 @@ class InMemoryAppDatabase implements AppDatabase {
 
   @override
   Future<int> getUnassignedSessionsCount() async {
-    return _sessions.values.where((s) => s.status == 'unassigned').length;
+    return _sessions.values
+        .where((s) => s.status == 'unassigned' ||
+            s.status == 'assignment_pending' ||
+            s.status == 'assignment_failed')
+        .length;
   }
 
   @override
@@ -2195,11 +2243,12 @@ class InMemoryAppDatabase implements AppDatabase {
   }) async {
     final hasFolder = driveFolderId != null && driveFolderId.isNotEmpty;
     final targetStatus = hasFolder ? UploadStatus.waiting : UploadStatus.pending;
+    final targetSessionStatus = hasFolder ? 'assigned' : 'assignment_pending';
     final session = _sessions[sessionId];
     if (session != null) {
       _sessions[sessionId] = session.copyWith(
         patientId: patientId,
-        status: 'assigned',
+        status: targetSessionStatus,
       );
     }
     for (final entry in _uploads.entries.toList()) {
@@ -2209,11 +2258,17 @@ class InMemoryAppDatabase implements AppDatabase {
             entry.value.driveFileId != null && entry.value.driveFileId!.isNotEmpty;
         _uploads[entry.key] = entry.value.copyWith(
           patientId: patientId,
-          driveFolderId: driveFolderId,
-          driveParentFolderId: driveFolderId,
+          driveFolderId: isAlreadyUploaded && !hasFolder
+              ? entry.value.driveFolderId
+              : driveFolderId,
+          driveParentFolderId: isAlreadyUploaded && !hasFolder
+              ? entry.value.driveFolderId
+              : driveFolderId,
           fileName: rename?.fileName,
           localPath: rename?.localPath,
-          status: isAlreadyUploaded ? UploadStatus.uploaded : targetStatus,
+          status: isAlreadyUploaded
+              ? (hasFolder ? UploadStatus.uploaded : UploadStatus.pending)
+              : targetStatus,
         );
       }
     }
@@ -2383,7 +2438,13 @@ class InMemoryAppDatabase implements AppDatabase {
         .toList();
     if (waiting.isEmpty) return null;
     waiting.sort((a, b) => a.createdAt.compareTo(b.createdAt));
-    return waiting.first;
+    final now = DateTime.now();
+    for (final item in waiting) {
+      if (item.nextAttemptAt == null || !item.nextAttemptAt!.isAfter(now)) {
+        return item;
+      }
+    }
+    return null;
   }
 
   @override
@@ -2418,6 +2479,7 @@ class InMemoryAppDatabase implements AppDatabase {
           status: UploadStatus.waiting,
           retryCount: 0,
           clearLastError: true,
+          clearNextAttemptAt: true,
         );
       }
     }

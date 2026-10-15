@@ -425,10 +425,12 @@ void main() {
       // Local file is intact
       expect(File(item.localPath).existsSync(), isTrue);
 
-      // SQLite record is preserved in pending state waiting for network/folder
+      // SQLite record is preserved and remains eligible for a later retry while
+      // the folder/network is unavailable.
       final uploads = await db.getUploadsForPatient(patient.id);
       expect(uploads, hasLength(1));
-      expect(uploads.first.status, UploadStatus.pending);
+      expect(uploads.first.status, anyOf(UploadStatus.pending, UploadStatus.waiting));
+      expect(uploads.first.nextAttemptAt, isNotNull);
       expect(uploads.first.localPath, item.localPath);
 
       // Patient drive_folder_id remains null

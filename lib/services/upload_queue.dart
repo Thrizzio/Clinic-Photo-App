@@ -36,17 +36,29 @@ class QueueStatus {
       totalCount > 0 && activeCount == 0 && failedCount == 0 && uploadedCount == totalCount;
 }
 
+class PhotoDeletionResult {
+  final bool remoteDeletionConfirmed;
+  final bool remoteDeletionPending;
+
+  const PhotoDeletionResult({
+    required this.remoteDeletionConfirmed,
+    required this.remoteDeletionPending,
+  });
+}
+
 class UploadQueueService extends ChangeNotifier {
   final AppDatabase database;
   final GoogleAuthService authService;
   final DriveService driveService;
   final Connectivity connectivity;
   final String? customDocsDirectory;
+  final Future<void> Function()? scheduleBackgroundWork;
   PatientFolderService? patientFolderService;
 
   bool _isProcessing = false;
   bool _disposed = false;
   StreamSubscription<List<ConnectivityResult>>? _connectivitySub;
+  final Map<String, Timer> _retryTimers = {};
   static const _uuid = Uuid();
 
   // Retry backoff delays in seconds: 5s, 15s, 30s, 60s
@@ -59,9 +71,10 @@ class UploadQueueService extends ChangeNotifier {
     this.patientFolderService,
     Connectivity? connectivity,
     this.customDocsDirectory,
+    this.scheduleBackgroundWork,
   }) : connectivity = connectivity ?? Connectivity() {
     _initConnectivityListener();
-    recoverOrphanedUnassignedPhotos();
+    unawaited(recoverOrphanedPhotos());
     _bindFolderServiceListener();
   }
 
@@ -76,6 +89,7 @@ class UploadQueueService extends ChangeNotifier {
   void setPatientFolderService(PatientFolderService service) {
     patientFolderService = service;
     _bindFolderServiceListener();
+    unawaited(processQueue());
   }
 
   void _initConnectivityListener() {
@@ -84,8 +98,8 @@ class UploadQueueService extends ChangeNotifier {
         final isDisconnected =
             results.contains(ConnectivityResult.none) && results.length == 1;
         if (!isDisconnected) {
-          processQueue();
-          processPendingPhotoDeletions();
+          unawaited(processQueue());
+          unawaited(processPendingPhotoDeletions());
         }
       });
     } catch (_) {
@@ -103,7 +117,20 @@ class UploadQueueService extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _connectivitySub?.cancel();
+    for (final timer in _retryTimers.values) {
+      timer.cancel();
+    }
+    _retryTimers.clear();
     super.dispose();
+  }
+
+  /// Wakes the durable worker without attempting interactive authentication.
+  /// Call this after startup, app resume, connectivity restoration, or a
+  /// successful UI sign-in.
+  Future<void> wake() async {
+    if (_disposed) return;
+    await processQueue();
+    await processPendingPhotoDeletions();
   }
 
   /// Gets current queue status counts (optionally filtered by patientId).
@@ -143,6 +170,24 @@ class UploadQueueService extends ChangeNotifier {
   /// Returns the base directory for photo storage.
   Future<String> getBasePath() async => _getBasePath();
 
+  ({String fileName, String localPath}) _allocatePhotoPath(
+    Directory directory,
+    String requestedFileName,
+  ) {
+    var fileName = requestedFileName;
+    var localPath = p.join(directory.path, fileName);
+    var suffix = 0;
+    while (File(localPath).existsSync()) {
+      suffix++;
+      final dot = requestedFileName.lastIndexOf('.');
+      final stem = dot > 0 ? requestedFileName.substring(0, dot) : requestedFileName;
+      final extension = dot > 0 ? requestedFileName.substring(dot) : '';
+      fileName = '${stem}_$suffix$extension';
+      localPath = p.join(directory.path, fileName);
+    }
+    return (fileName: fileName, localPath: localPath);
+  }
+
   /// Formats deterministic photo filename in authoritative Indian Standard Time (UTC+05:30):
   /// `YYYYMMDD_HHMMSS_SSS_<sequence>.jpg`
   static String formatPhotoFileName(DateTime timestamp, int sequenceNumber) {
@@ -166,7 +211,7 @@ class UploadQueueService extends ChangeNotifier {
   }) async {
     final now = capturedAt ?? DateTime.now();
     final seq = sequenceNumber ?? 1;
-    final fileName = formatPhotoFileName(now, seq);
+    final requestedFileName = formatPhotoFileName(now, seq);
 
     final basePath = await _getBasePath();
     final Directory queueDir;
@@ -181,7 +226,9 @@ class UploadQueueService extends ChangeNotifier {
       queueDir.createSync(recursive: true);
     }
 
-    final localPath = p.join(queueDir.path, fileName);
+    final allocated = _allocatePhotoPath(queueDir, requestedFileName);
+    final fileName = allocated.fileName;
+    final localPath = allocated.localPath;
     final tempFile = File(capturedTempPath);
 
     if (!tempFile.existsSync()) {
@@ -216,6 +263,9 @@ class UploadQueueService extends ChangeNotifier {
     await database.insertUpload(item);
     _safeNotifyListeners();
 
+    if (scheduleBackgroundWork != null) {
+      unawaited(scheduleBackgroundWork!());
+    }
     unawaited(processQueue());
 
     return item;
@@ -245,7 +295,7 @@ class UploadQueueService extends ChangeNotifier {
   }) async {
     final now = capturedAt ?? DateTime.now();
     final seq = sequenceNumber ?? 1;
-    final fileName = formatPhotoFileName(now, seq);
+    final requestedFileName = formatPhotoFileName(now, seq);
 
     final basePath = await _getBasePath();
     final sessionDir = Directory(
@@ -255,7 +305,9 @@ class UploadQueueService extends ChangeNotifier {
       sessionDir.createSync(recursive: true);
     }
 
-    final localPath = p.join(sessionDir.path, fileName);
+    final allocated = _allocatePhotoPath(sessionDir, requestedFileName);
+    final fileName = allocated.fileName;
+    final localPath = allocated.localPath;
     final tempFile = File(capturedTempPath);
 
     if (!tempFile.existsSync()) {
@@ -350,6 +402,96 @@ class UploadQueueService extends ChangeNotifier {
     }
   }
 
+  /// Recovers both unassigned and patient-bound photos that reached private
+  /// storage before the SQLite insert completed. Recovery is intentionally
+  /// conservative: unknown patient directories are left untouched rather than
+  /// inventing a route for clinical data.
+  Future<void> recoverOrphanedPhotos() async {
+    await recoverOrphanedUnassignedPhotos();
+    await _recoverOrphanedPatientPhotos();
+    await _recoverInterruptedPatientMoves();
+    _safeNotifyListeners();
+  }
+
+  Future<void> _recoverOrphanedPatientPhotos() async {
+    try {
+      final basePath = await _getBasePath();
+      final patientsDir = Directory(
+        p.join(basePath, AppConfig.photoQueueDirName, 'patients'),
+      );
+      if (!patientsDir.existsSync()) return;
+
+      final knownUploads = await database.getAllUploads();
+      final knownPaths = knownUploads.map((u) => p.normalize(u.localPath)).toSet();
+      for (final entity in patientsDir.listSync(recursive: true).whereType<File>()) {
+        if (!entity.path.toLowerCase().endsWith('.jpg')) continue;
+        final normalizedPath = p.normalize(entity.path);
+        if (knownPaths.contains(normalizedPath)) continue;
+
+        final relative = p.relative(entity.path, from: patientsDir.path);
+        final parts = p.split(relative);
+        if (parts.isEmpty) continue;
+        final patientId = parts.first;
+        final patient = await database.getPatient(patientId);
+        if (patient == null) continue;
+
+        final fileName = p.basename(entity.path);
+        final sequenceMatch = RegExp(r'_(\d+)(?:_[0-9]+)?\.jpg$', caseSensitive: false).firstMatch(fileName);
+        final sequence = int.tryParse(sequenceMatch?.group(1) ?? '') ?? 1;
+        final capturedAt = entity.statSync().modified;
+        final hasFolder = patient.driveFolderId != null && patient.driveFolderId!.isNotEmpty;
+        await database.insertUpload(
+          UploadItem(
+            id: _uuid.v4(),
+            sessionId: parts.length > 2 ? parts[1] : null,
+            patientId: patient.id,
+            driveFolderId: patient.driveFolderId,
+            localPath: entity.path,
+            fileName: fileName,
+            status: hasFolder ? UploadStatus.waiting : UploadStatus.pending,
+            retryCount: 0,
+            createdAt: capturedAt,
+            capturedAt: capturedAt,
+            sequenceNumber: sequence,
+          ),
+        );
+        knownPaths.add(normalizedPath);
+        debugPrint('RECOVERED patient photo: $fileName for ${patient.id}');
+      }
+    } catch (e) {
+      debugPrint('Error recovering orphaned patient photos: $e');
+    }
+  }
+
+  /// Repairs a crash that happened after a local assignment rename but before
+  /// the SQLite row update. The file name/session directory are deterministic,
+  /// so the missing path can be repaired without touching Drive.
+  Future<void> _recoverInterruptedPatientMoves() async {
+    try {
+      final basePath = await _getBasePath();
+      final uploads = await database.getAllUploads();
+      for (final item in uploads) {
+        if (item.patientId == null || File(item.localPath).existsSync()) continue;
+        final patientDir = Directory(
+          p.join(basePath, AppConfig.photoQueueDirName, 'patients', item.patientId!),
+        );
+        if (!patientDir.existsSync()) continue;
+        File? recovered;
+        for (final entity in patientDir.listSync(recursive: true).whereType<File>()) {
+          if (p.basename(entity.path) == item.fileName) {
+            recovered = entity;
+            break;
+          }
+        }
+        if (recovered != null) {
+          await database.updateUpload(item.copyWith(localPath: recovered.path));
+        }
+      }
+    } catch (e) {
+      debugPrint('Error recovering interrupted patient photo moves: $e');
+    }
+  }
+
   /// Workflow B: Assigns an unassigned session to a verified patient.
   /// Validates that patient has an available Drive folder.
   /// For photos already on Google Drive, moves them server-side into the patient's Drive folder.
@@ -361,8 +503,7 @@ class UploadQueueService extends ChangeNotifier {
     required String sessionId,
     required Patient patient,
   }) async {
-    if (patient.folderStatus == FolderStatus.missing ||
-        patient.folderStatus == FolderStatus.conflict) {
+    if (patient.folderStatus == FolderStatus.conflict) {
       throw ArgumentError(
         'Cannot assign session: Patient ${patient.id} folder status is ${patient.folderStatus.name}.',
       );
@@ -509,6 +650,10 @@ class UploadQueueService extends ChangeNotifier {
     }
 
     if (failedPhotoIds.isNotEmpty) {
+      final latestSession = await database.getSession(sessionId);
+      if (latestSession != null) {
+        await database.updateSession(latestSession.copyWith(status: 'assignment_failed'));
+      }
       throw StateError(
         'Failed to move ${failedPhotoIds.length} of ${uploads.length} photos: $lastError',
       );
@@ -611,44 +756,85 @@ class UploadQueueService extends ChangeNotifier {
           await database.updateUpload(currentItem.copyWith(
             status: UploadStatus.failed,
             lastError: 'Local photo file not found at ${currentItem.localPath}',
+            clearNextAttemptAt: true,
           ));
           _safeNotifyListeners();
           continue;
         }
 
-        if (currentItem.driveFolderId == null || currentItem.driveFolderId!.isEmpty) {
+        // For an existing Drive file, driveFolderId is the source folder
+        // until the move is confirmed; the patient record supplies the target.
+        String? targetFolderId = currentItem.driveFileId != null &&
+                currentItem.driveFileId!.isNotEmpty
+            ? null
+            : currentItem.driveFolderId;
+        Patient? patient;
+        if (currentItem.patientId != null) {
+          patient = await database.getPatient(currentItem.patientId!);
+          if (patient?.driveFolderId != null && patient!.driveFolderId!.isNotEmpty) {
+            targetFolderId = patient.driveFolderId;
+          }
+        }
+
+        if (targetFolderId == null || targetFolderId.isEmpty) {
           // If patient has an ID, try to resolve Drive folder
           if (currentItem.patientId != null) {
-            final patient = await database.getPatient(currentItem.patientId!);
             if (patient != null) {
-              if (patient.driveFolderId != null && patient.driveFolderId!.isNotEmpty) {
-                currentItem = currentItem.copyWith(
-                  driveFolderId: patient.driveFolderId,
-                  status: UploadStatus.waiting,
-                );
-                await database.updateUpload(currentItem);
-              } else if (patientFolderService != null) {
+              if (patientFolderService != null) {
                 try {
-                  final client = await authService.getAuthenticatedClient();
+                  final client = await authService.getAuthenticatedClientSilently();
                   if (client != null) {
-                    final res = await patientFolderService!.getOrCreatePatientFolder(patient);
+                    final res = await patientFolderService!.getOrCreatePatientFolder(
+                      patient,
+                      clientOverride: client,
+                    );
                     if (res.patient.driveFolderId != null && res.patient.driveFolderId!.isNotEmpty) {
-                      currentItem = currentItem.copyWith(
-                        driveFolderId: res.patient.driveFolderId,
-                        status: UploadStatus.waiting,
-                      );
-                      await database.updateUpload(currentItem);
+                      targetFolderId = res.patient.driveFolderId;
+                      if (currentItem.driveFileId == null || currentItem.driveFileId!.isEmpty) {
+                        currentItem = currentItem.copyWith(
+                          driveFolderId: targetFolderId,
+                          status: UploadStatus.waiting,
+                          clearNextAttemptAt: true,
+                        );
+                        await database.updateUpload(currentItem);
+                      }
                       _safeNotifyListeners();
+                    } else {
+                      await _handleFailure(
+                        currentItem,
+                        'Patient Drive folder could not be resolved yet.',
+                      );
+                      break;
                     }
+                  } else {
+                    await _handleFailure(
+                      currentItem,
+                      'Google authorization is not available for background upload.',
+                    );
+                    break;
                   }
                 } catch (e) {
-                  debugPrint('Folder creation for offline patient deferred: $e');
+                  debugPrint('Folder creation for patient upload deferred: $e');
+                  await _handleFailure(currentItem, 'Drive folder resolution failed: $e');
+                  break;
                 }
+              } else {
+                await _handleFailure(
+                  currentItem,
+                  'Patient folder service is not configured.',
+                );
+                break;
               }
+            } else {
+              await _handleFailure(currentItem, 'Patient record is not available locally.');
+              break;
             }
+          } else {
+            await _handleFailure(currentItem, 'Upload has no patient route.');
+            break;
           }
 
-          if (currentItem.driveFolderId == null || currentItem.driveFolderId!.isEmpty) {
+          if (targetFolderId == null || targetFolderId.isEmpty) {
             debugPrint('Pending upload ${currentItem.id} waiting for Drive folder creation.');
             break;
           }
@@ -657,22 +843,61 @@ class UploadQueueService extends ChangeNotifier {
         await database.updateUpload(currentItem.copyWith(status: UploadStatus.uploading));
         _safeNotifyListeners();
 
-        final client = await authService.getAuthenticatedClient();
+        final client = await authService.getAuthenticatedClientSilently();
         if (client == null) {
           await _handleFailure(
             currentItem,
-            'Google account authorization not available. Please sign in.',
+            'Google account authorization not available for background upload.',
           );
           break;
         }
 
         try {
-          final driveFileId = await driveService.uploadPhoto(
-            client: client,
-            file: localFile,
-            folderId: currentItem.driveFolderId!,
-            fileName: currentItem.fileName,
-          );
+          String driveFileId;
+          if (currentItem.driveFileId != null && currentItem.driveFileId!.isNotEmpty) {
+            // An item already created on Drive (for example an unassigned
+            // photo) must be moved, not uploaded a second time.
+            final sourceFolder = currentItem.driveFolderId;
+            if (sourceFolder == null || sourceFolder.isEmpty) {
+              throw StateError('Existing Drive photo has no source folder.');
+            }
+            if (sourceFolder != targetFolderId) {
+              await driveService.moveFile(
+                client: client,
+                fileId: currentItem.driveFileId!,
+                sourceFolderId: sourceFolder,
+                targetFolderId: targetFolderId,
+              );
+            }
+            driveFileId = currentItem.driveFileId!;
+          } else {
+            // After a retry, reconcile an ambiguous previous request before
+            // creating another Drive file with the same deterministic name.
+            if (currentItem.retryCount > 0) {
+              final existing = await driveService.findPhotoByName(
+                client: client,
+                folderId: targetFolderId,
+                fileName: currentItem.fileName,
+              );
+              if (existing?.id != null && existing!.id!.isNotEmpty) {
+                driveFileId = existing.id!;
+              } else {
+                driveFileId = await driveService.uploadPhoto(
+                  client: client,
+                  file: localFile,
+                  folderId: targetFolderId,
+                  fileName: currentItem.fileName,
+                );
+              }
+            } else {
+              driveFileId = await driveService.uploadPhoto(
+                client: client,
+                file: localFile,
+                folderId: targetFolderId,
+                fileName: currentItem.fileName,
+              );
+            }
+          }
 
           // DRIVE CONFIRMED:
           // In V5, local file is retained as an offline cache for instant viewing.
@@ -680,7 +905,10 @@ class UploadQueueService extends ChangeNotifier {
           await database.updateUpload(currentItem.copyWith(
             status: UploadStatus.uploaded,
             driveFileId: driveFileId,
+            driveFolderId: targetFolderId,
+            driveParentFolderId: targetFolderId,
             lastError: null,
+            clearNextAttemptAt: true,
           ));
 
           // If item belonged to an unassigned session, check if session is completed
@@ -698,7 +926,31 @@ class UploadQueueService extends ChangeNotifier {
           _safeNotifyListeners();
         } catch (e) {
           debugPrint('Upload attempt failed for ${currentItem.fileName}: $e');
-          await _handleFailure(currentItem, e.toString());
+          // A timeout can happen after Drive has accepted the file. Reconcile
+          // by deterministic folder/name before scheduling another create.
+          var reconciled = false;
+          try {
+            final existing = await driveService.findPhotoByName(
+              client: client,
+              folderId: targetFolderId,
+              fileName: currentItem.fileName,
+            );
+            if (existing?.id != null && existing!.id!.isNotEmpty) {
+              await database.updateUpload(currentItem.copyWith(
+                status: UploadStatus.uploaded,
+                driveFileId: existing.id,
+                clearLastError: true,
+                clearNextAttemptAt: true,
+              ));
+              reconciled = true;
+              _safeNotifyListeners();
+            }
+          } catch (reconcileError) {
+            debugPrint('Could not reconcile ambiguous Drive upload: $reconcileError');
+          }
+          if (!reconciled) {
+            await _handleFailure(currentItem, e.toString());
+          }
         }
       }
     } finally {
@@ -713,7 +965,7 @@ class UploadQueueService extends ChangeNotifier {
     final pendingDeletions = await database.getPendingPhotoDeletions();
     if (pendingDeletions.isEmpty) return;
 
-    final client = await authService.getAuthenticatedClient();
+    final client = await authService.getAuthenticatedClientSilently();
     if (client == null) return;
 
     for (final deletion in pendingDeletions) {
@@ -739,6 +991,72 @@ class UploadQueueService extends ChangeNotifier {
     }
   }
 
+  /// Deletes one local photo without violating the Drive-first safety rule.
+  ///
+  /// If Drive cannot be reached, a durable pending deletion is written before
+  /// the local cache/row is removed. Explicit Drive API failures leave the
+  /// photo visible and retryable instead of silently losing it.
+  Future<PhotoDeletionResult> deletePhotoSafely(
+    UploadItem item, {
+    String? patientId,
+  }) async {
+    final fileId = item.driveFileId;
+    var remoteDeletionConfirmed = fileId == null || fileId.isEmpty;
+    var pendingRemoteDeletion = false;
+
+    if (!remoteDeletionConfirmed) {
+      final client = await authService.getAuthenticatedClientSilently();
+      if (client != null) {
+        try {
+          await driveService.deleteFile(
+            client: client,
+            fileId: fileId,
+            parentFolderId: item.driveFolderId,
+          );
+          remoteDeletionConfirmed = true;
+        } catch (e) {
+          final message = e.toString().toLowerCase();
+          final offline = e is SocketException ||
+              message.contains('socketexception') ||
+              message.contains('timeout') ||
+              message.contains('network') ||
+              message.contains('connection');
+          if (!offline) rethrow;
+          pendingRemoteDeletion = true;
+        }
+      } else {
+        pendingRemoteDeletion = true;
+      }
+    }
+
+    if (pendingRemoteDeletion && fileId != null && fileId.isNotEmpty) {
+      // Persist the remote operation before touching local state.
+      await database.addPendingPhotoDeletion(
+        id: _uuid.v4(),
+        driveFileId: fileId,
+        fileName: item.fileName,
+        patientId: patientId ?? item.patientId,
+        driveFolderId: item.driveFolderId,
+      );
+    }
+
+    final localFile = item.localPath.isNotEmpty ? File(item.localPath) : null;
+    if (localFile != null && localFile.existsSync()) {
+      await localFile.delete();
+    }
+    await database.deleteUpload(item.id);
+    await database.recordDeletedPhotoTombstone(
+      driveFileId: item.driveFileId,
+      fileName: item.fileName,
+      patientId: patientId ?? item.patientId,
+    );
+    _safeNotifyListeners();
+    return PhotoDeletionResult(
+      remoteDeletionConfirmed: remoteDeletionConfirmed,
+      remoteDeletionPending: pendingRemoteDeletion,
+    );
+  }
+
   /// Handles upload failure with bounded gentle retries: 5s, 15s, 30s, 60s.
   Future<void> _handleFailure(UploadItem item, String errorMessage) async {
     final nextRetryCount = item.retryCount + 1;
@@ -753,13 +1071,14 @@ class UploadQueueService extends ChangeNotifier {
         status: UploadStatus.waiting,
         retryCount: nextRetryCount,
         lastError: errorMessage,
+        nextAttemptAt: DateTime.now().add(Duration(seconds: delaySeconds)),
       ));
       _safeNotifyListeners();
 
-      Future.delayed(Duration(seconds: delaySeconds), () {
-        if (!_disposed) {
-          processQueue();
-        }
+      _retryTimers[item.id]?.cancel();
+      _retryTimers[item.id] = Timer(Duration(seconds: delaySeconds), () {
+        _retryTimers.remove(item.id);
+        if (!_disposed) unawaited(processQueue());
       });
     } else {
       debugPrint(
@@ -769,6 +1088,7 @@ class UploadQueueService extends ChangeNotifier {
         status: UploadStatus.failed,
         retryCount: nextRetryCount,
         lastError: errorMessage,
+        clearNextAttemptAt: true,
       ));
       _safeNotifyListeners();
     }

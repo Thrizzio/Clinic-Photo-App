@@ -4,6 +4,51 @@ import 'package:googleapis/drive/v3.dart' as drive;
 import 'package:googleapis_auth/googleapis_auth.dart';
 
 class DriveService {
+  static String _escapeQueryValue(String value) =>
+      value.replaceAll('\\', '\\\\').replaceAll("'", "\\'");
+
+  /// Reads cheap Drive metadata used as a spreadsheet-level change
+  /// checkpoint. This avoids fetching all rows when the workbook did not
+  /// change; row-level delta retrieval is not assumed.
+  Future<({String? modifiedTime, String? version})> getFileChangeFingerprint({
+    required AuthClient client,
+    required String fileId,
+  }) async {
+    final api = drive.DriveApi(client);
+    final file = await api.files.get(
+      fileId,
+      $fields: 'id,modifiedTime,version',
+    ) as drive.File;
+    return (modifiedTime: file.modifiedTime?.toUtc().toIso8601String(), version: file.version?.toString());
+  }
+
+  /// Finds an existing image with the exact name in a folder.
+  ///
+  /// This is used only when an upload response is ambiguous (for example, a
+  /// timeout after Drive accepted the multipart request) or when retrying an
+  /// item that may already have been created. It prevents a retry from
+  /// creating a second copy with the same deterministic filename.
+  Future<drive.File?> findPhotoByName({
+    required AuthClient client,
+    required String folderId,
+    required String fileName,
+  }) async {
+    final driveApi = drive.DriveApi(client);
+    final safeName = _escapeQueryValue(fileName);
+    final safeFolderId = _escapeQueryValue(folderId);
+    final response = await driveApi.files.list(
+      q: "'$safeFolderId' in parents and name = '$safeName' and trashed = false and mimeType contains 'image/'",
+      $fields: 'files(id, name, parents, createdTime)',
+      pageSize: 10,
+      orderBy: 'createdTime desc',
+    );
+    final files = response.files ?? const <drive.File>[];
+    for (final file in files) {
+      if (file.id != null && file.id!.isNotEmpty) return file;
+    }
+    return null;
+  }
+
   /// Uploads a local photo to the specified patient Google Drive folder.
   ///
   /// Returns the Drive file ID of the uploaded photo.

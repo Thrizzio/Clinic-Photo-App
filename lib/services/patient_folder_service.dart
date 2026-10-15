@@ -40,6 +40,7 @@ class PatientFolderService {
 
   /// Optional listener callback invoked immediately upon local Drive folder resolution/creation.
   void Function(Patient patient)? onFolderCreated;
+  final Map<String, Future<PatientFolderResult>> _inFlight = {};
 
   PatientFolderService({
     required this.driveService,
@@ -64,6 +65,22 @@ class PatientFolderService {
   /// 8. Mark available.
   /// 9. On failure preserve recoverable state; never pretend success.
   Future<PatientFolderResult> getOrCreatePatientFolder(
+    Patient patient, {
+    AuthClient? clientOverride,
+  }) async {
+    final existing = _inFlight[patient.id];
+    if (existing != null) return existing;
+
+    final future = _resolvePatientFolder(patient, clientOverride: clientOverride);
+    _inFlight[patient.id] = future;
+    try {
+      return await future;
+    } finally {
+      if (identical(_inFlight[patient.id], future)) _inFlight.remove(patient.id);
+    }
+  }
+
+  Future<PatientFolderResult> _resolvePatientFolder(
     Patient patient, {
     AuthClient? clientOverride,
   }) async {

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import '../services/config_service.dart';
 import '../services/database.dart';
@@ -54,6 +55,10 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
         }
         return;
       }
+
+      // Interactive authorization has completed; pending local photos may now
+      // be processed silently without another prompt.
+      unawaited(widget.queueService.wake());
 
       if (!mounted) return;
 

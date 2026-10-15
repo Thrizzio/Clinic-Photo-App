@@ -1,9 +1,11 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'config.dart';
 import 'screens/patients_screen.dart';
 import 'screens/welcome_screen.dart';
 import 'services/config_service.dart';
+import 'services/background_upload_worker.dart';
 import 'services/database.dart';
 import 'services/drive.dart';
 import 'services/google_auth.dart';
@@ -20,6 +22,14 @@ void main() async {
   final authService = GoogleAuthService();
   final sheetsService = SheetsService();
   final driveService = DriveService();
+  final backgroundUploadWorker = BackgroundUploadWorker();
+  try {
+    await backgroundUploadWorker.initialize();
+  } catch (e) {
+    // The in-process queue remains usable if WorkManager is unavailable on a
+    // particular device or during a development/test launch.
+    debugPrint('Could not initialize background upload worker: $e');
+  }
 
   SupabasePatientService? supabaseService;
   try {
@@ -57,6 +67,7 @@ void main() async {
     authService: authService,
     driveService: driveService,
     patientFolderService: folderService,
+    scheduleBackgroundWork: backgroundUploadWorker.scheduleNow,
   );
 
   final config = configService.loadConfig();
@@ -65,7 +76,7 @@ void main() async {
   if (config.hasCompletedSetup) {
     await authService.signInSilently();
     // Wake up queue processor in background to resume any pending uploads
-    queueService.processQueue();
+    unawaited(queueService.wake());
   }
 
   runApp(ClinicPhotosApp(

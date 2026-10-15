@@ -119,7 +119,7 @@ void main() {
       );
     });
 
-    test('refuses to assign session to patient with missing or conflict folder status', () async {
+    test('assigns locally without a folder, but refuses a conflicting folder mapping', () async {
       final session = await queueService.createUnassignedSession();
 
       final dummyPhoto = File('${tempRootDir.path}/temp_shot_4.jpg');
@@ -136,12 +136,22 @@ void main() {
         folderStatus: FolderStatus.missing,
       );
 
-      expect(
-        () => queueService.assignSession(
-          sessionId: session.id,
-          patient: missingPatient,
-        ),
-        throwsA(isA<ArgumentError>()),
+      await queueService.assignSession(
+        sessionId: session.id,
+        patient: missingPatient,
+      );
+
+      final assignedUploads = await database.getUploadsForSession(session.id);
+      expect(assignedUploads.single.patientId, 'P200');
+      expect(assignedUploads.single.status, UploadStatus.pending);
+      expect(await database.getUnassignedSessionsCount(), 0);
+
+      final conflictSession = await queueService.createUnassignedSession();
+      final conflictPhoto = File('${tempRootDir.path}/temp_shot_5.jpg');
+      await conflictPhoto.writeAsString('image_data_5');
+      await queueService.enqueueUnassignedPhoto(
+        sessionId: conflictSession.id,
+        capturedTempPath: conflictPhoto.path,
       );
 
       const conflictPatient = Patient(
@@ -153,14 +163,14 @@ void main() {
 
       expect(
         () => queueService.assignSession(
-          sessionId: session.id,
+          sessionId: conflictSession.id,
           patient: conflictPatient,
         ),
         throwsA(isA<ArgumentError>()),
       );
 
       // Photos remain safely in unassigned status without any loss
-      final sessionUploads = await database.getUploadsForSession(session.id);
+      final sessionUploads = await database.getUploadsForSession(conflictSession.id);
       expect(sessionUploads.length, 1);
       expect(sessionUploads.first.status, UploadStatus.unassigned);
       expect(await database.getUnassignedSessionsCount(), 1);

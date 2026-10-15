@@ -32,6 +32,7 @@ class UploadItem {
   final DateTime createdAt;
   final DateTime capturedAt;
   final int sequenceNumber;
+  final DateTime? nextAttemptAt;
 
   UploadItem({
     required this.id,
@@ -48,6 +49,7 @@ class UploadItem {
     required this.createdAt,
     DateTime? capturedAt,
     this.sequenceNumber = 1,
+    this.nextAttemptAt,
   })  : driveFolderId = driveFolderId ?? driveParentFolderId,
         capturedAt = capturedAt ?? createdAt;
 
@@ -70,6 +72,8 @@ class UploadItem {
     DateTime? createdAt,
     DateTime? capturedAt,
     int? sequenceNumber,
+    DateTime? nextAttemptAt,
+    bool clearNextAttemptAt = false,
   }) {
     return UploadItem(
       id: id ?? this.id,
@@ -85,6 +89,7 @@ class UploadItem {
       createdAt: createdAt ?? this.createdAt,
       capturedAt: capturedAt ?? this.capturedAt,
       sequenceNumber: sequenceNumber ?? this.sequenceNumber,
+      nextAttemptAt: clearNextAttemptAt ? null : (nextAttemptAt ?? this.nextAttemptAt),
     );
   }
 
@@ -104,6 +109,7 @@ class UploadItem {
       'created_at': createdAt.toIso8601String(),
       'captured_at': capturedAt.toIso8601String(),
       'sequence_number': sequenceNumber,
+      'next_attempt_at': nextAttemptAt?.toIso8601String(),
     };
   }
 
@@ -125,6 +131,9 @@ class UploadItem {
           ? DateTime.parse(map['captured_at'] as String)
           : createdAt,
       sequenceNumber: (map['sequence_number'] as num?)?.toInt() ?? 1,
+      nextAttemptAt: map['next_attempt_at'] != null
+          ? DateTime.tryParse(map['next_attempt_at'] as String)
+          : null,
     );
   }
 

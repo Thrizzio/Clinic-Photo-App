@@ -10,6 +10,7 @@ class GoogleAuthService {
   GoogleSignInAccount? _currentAccount;
   bool _initialized = false;
   Future<void>? _initFuture;
+  bool _silentRequest = false;
 
   GoogleAuthService([GoogleSignIn? googleSignIn])
       : _googleSignIn = googleSignIn ?? GoogleSignIn.instance;
@@ -88,6 +89,24 @@ class GoogleAuthService {
   ///
   /// Uses [extension_google_sign_in_as_googleapis_auth] with [GoogleSignInClientAuthorization.authClient].
   Future<AuthClient?> getAuthenticatedClient() async {
+    final allowInteractive = !_silentRequest;
+    _silentRequest = false;
+    return _getAuthenticatedClient(allowInteractive: allowInteractive);
+  }
+
+  /// Gets a client without ever requesting a new OAuth scope prompt. Test
+  /// doubles that override [getAuthenticatedClient] continue to work because
+  /// this method delegates through the overridable entry point.
+  Future<AuthClient?> getAuthenticatedClientSilently() async {
+    _silentRequest = true;
+    try {
+      return await getAuthenticatedClient();
+    } finally {
+      _silentRequest = false;
+    }
+  }
+
+  Future<AuthClient?> _getAuthenticatedClient({required bool allowInteractive}) async {
     final account = _currentAccount ?? await signInSilently();
     if (account == null) {
       return null;
@@ -99,10 +118,13 @@ class GoogleAuthService {
         AppConfig.googleScopes,
       );
 
-      // If not yet authorized, request authorization
-      authz ??= await account.authorizationClient.authorizeScopes(
-        AppConfig.googleScopes,
-      );
+      // A queue worker must never open an authorization prompt. UI callers
+      // use the default true value and may request scopes interactively.
+      if (authz == null && !allowInteractive) {
+        debugPrint('Google API scopes are not authorized; silent worker access deferred.');
+        return null;
+      }
+      authz ??= await account.authorizationClient.authorizeScopes(AppConfig.googleScopes);
 
       return authz.authClient(scopes: AppConfig.googleScopes);
     } catch (e) {
