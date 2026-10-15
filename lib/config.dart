@@ -18,8 +18,8 @@ abstract final class AppConfig {
     'https://www.googleapis.com/auth/drive',
   ];
 
-  /// Standard column header names in the clinic Google Sheet (Visits table).
-  /// Column order in the spreadsheet does not matter.
+  /// Standard column header names in the legacy Visits table. The Appointments
+  /// master view is discovered dynamically; column order never matters.
   static const String patientIdHeader = 'Patient ID';
   static const String patientNameHeader = 'Patient Name';
   static const String photosDriveHeader = 'Photos (Drive)';
@@ -49,7 +49,7 @@ abstract final class AppConfig {
   );
   static const String defaultDoctorPassword = String.fromEnvironment(
     'DOCTOR_PASSWORD',
-    defaultValue: 'ClinicSecurePassword2026!',
+    defaultValue: '',
   );
 
   /// Returns the HTTPS REST URL for Supabase.

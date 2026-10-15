@@ -19,11 +19,13 @@ The doctor never needs to manually interact with Google Drive or organize folder
 
 * **Rapid Shutter (<50ms, Non-Blocking)**: The camera shutter releases immediately. Captured images are written to private application storage (`photo_queue/`) and queued in SQLite. Shutter never blocks on network or Google Drive uploads.
 * **Private Storage**: Clinical photos are stored strictly in private app storage. They are never saved to the device's public photo gallery or exposed to consumer photo apps.
-* **Ephemeral SQLite Queue**: The `uploads` SQLite table only tracks pending work (`waiting`, `uploading`, `failed`). Once Google Drive confirms a successful upload, the local photo file is deleted and the SQLite record is removed.
+* **Durable SQLite Queue**: The `uploads` SQLite table is the source of truth for pending work (`waiting`, `uploading`, `pending`, `failed`). A local file is never deleted before Drive confirms the remote operation; confirmed uploads remain as a private offline gallery cache until the doctor safely deletes them.
 * **Startup Crash Recovery**: If the app or phone restarts during an upload, any item with status `uploading` is automatically reset to `waiting` on database open.
-* **Gentle Bounded Retries**: Automatic exponential retry backoffs (5s, 15s, 30s, 60s). If uploads fail after 4 attempts, the item is marked as `failed`, and a minimal status pill (`! 1 failed · Tap to Retry`) lets the doctor retry whenever connectivity is restored.
-* **Safe Drive Folder ID Validation**: Google Sheet rows missing a `Drive Folder ID` are skipped during sync to prevent taking photos for unroutable patients.
+* **Process-Resilient Worker**: Android WorkManager schedules a network-constrained one-off upload and a 15-minute periodic safety pass. The Dart worker reconstructs the SQLite/auth/Drive services in its own isolate, while persisted retry timestamps prevent tight retry loops.
+* **Gentle Bounded Retries**: Automatic exponential retry backoffs (5s, 15s, 30s, 60s). Failed work remains in SQLite for a later retry; the capture and patient-list UI does not expose upload progress or success badges.
+* **Safe Drive Folder ID Validation**: Existing Google Sheet folder links are validated. Patients without a link remain locally routable for lazy folder creation, but no photo is deleted or marked uploaded until Drive confirms the destination.
 * **Safe Reconfiguration**: Changing the clinic Google Sheet in Settings tests and validates the new sheet before replacing the existing working configuration.
+* **Reference Camera Mode**: A previous local or Drive-backed photo can be shown as a translucent, adjustable camera overlay without baking the reference into the captured image.
 
 ---
 
@@ -67,13 +69,17 @@ Enable the following two APIs in **APIs & Services > Library**:
 
 ## 4. Clinic Google Sheet Format
 
-The clinic's Google Sheet acts as the patient index. The app requires a header row with the following three column names (case-insensitive, columns can be in any order):
+The clinic workbook is read from an `Appointments` tab when one is present. Each patient is deduplicated by normalized phone number; a unique normalized name is used only when no phone number is available. The legacy Visits/Patient ID format remains supported for existing workbooks.
 
-| Patient ID | Patient Name | Drive Folder ID |
-| :--- | :--- | :--- |
-| P001 | Rahul Sharma | 1ABCxyz... |
-| P002 | Ananya Patel | 1DEFuvw... |
-| P003 | Priya Verma | 1GHIrst... |
+For the Appointments master view, the header row should contain `Appointment ID`, `Patient Name`, and `Phone Number`. `Photos (Drive)` or `Drive Folder ID` may also be present:
+
+| Appointment ID | Patient Name | Phone Number | Photos (Drive) |
+| :--- | :--- | :--- | :--- |
+| A001 | Rahul Sharma | +91 9876543210 | 1ABCxyz... |
+| A002 | Ananya Patel | +91 9876543211 | 1DEFuvw... |
+| A003 | Priya Verma | +91 9876543212 | 1GHIrst... |
+
+If no `Appointments` tab exists, the configured tab must contain the legacy headers `Patient ID`, `Patient Name`, and `Photos (Drive)`/`Drive Folder ID`.
 
 ### Finding the Drive Folder ID
 In Google Drive, open the patient's folder in a web browser. The URL looks like:
@@ -99,35 +105,65 @@ The string after `/folders/` (`1ABCxyz_9876543210-abcdef`) is the **Drive Folder
 1. **Search**: Search instantly by Patient ID or Name from local SQLite cache.
 2. **Capture**: Tap the patient to open the camera. Tap the shutter to rapidly capture clinical photos (counter updates in real-time).
 3. **Auto-Upload**: Tap **Done** to return to the patient list. The background queue automatically uploads photos to that patient's Google Drive folder.
-4. **Status**: A minimal pill at the bottom displays progress (`↑ 2 uploading`, `✓ All photos uploaded`, or `! 1 failed · Tap to Retry`).
+4. **Reference mode**: Open the reference picker from the camera, choose a previous local/Drive photo, and adjust its overlay opacity. The reference is never baked into the new capture.
+5. **Background delivery**: WorkManager continues the durable queue after the app is backgrounded or the process is recreated. The app UI shows the local capture immediately and does not display upload progress or upload-success badges.
 
 ---
 
 ## 6. Development & Verification
 
 ### Prerequisites
-* Flutter SDK (3.24+ / 3.27+)
+* Flutter SDK 3.47.4 (Dart 3.13.3; see `.fvmrc`)
 * Android SDK (API 34+)
+* Java 17
 
 ### Dependencies
 ```bash
 flutter pub get
 ```
 
+The repository keeps `pubspec.lock`; use `flutter pub get --offline` on a
+machine with the pinned packages already cached.
+
+Copy `.env.example` to `.env` for local Supabase/doctor configuration. `.env`
+is ignored by Git; pass it explicitly when running or building:
+
+```bash
+flutter run --dart-define-from-file=.env
+flutter build apk --debug --dart-define-from-file=.env
+```
+
 ### Static Analysis
 Run static analysis to confirm zero lints or errors:
 ```bash
-flutter analyze
+make analyze
 ```
 
 ### Automated Unit & Integration Tests
 Run the automated test suite covering URL parsing, dynamic header detection, Drive folder validation, SQLite caching, in-memory crash recovery, and queue persistence:
 ```bash
-flutter test
+make test
 ```
 
 ### Run Locally on Android
 Ensure an Android device or emulator is connected:
 ```bash
-flutter run
+make run
+```
+
+### Reproducible container build
+
+The pinned Flutter/Android toolchain is also described by `Dockerfile`:
+
+```bash
+docker build -t clinic-photos:dev .
+docker run --rm clinic-photos:dev test --no-pub
+docker run --rm clinic-photos:dev build apk --debug
+```
+
+The container can build and test the Android artifact. A physical-device run
+still requires a host-connected Android device or emulator:
+
+```bash
+make run
 ```

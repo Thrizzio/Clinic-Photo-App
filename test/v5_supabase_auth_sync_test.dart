@@ -10,7 +10,15 @@ import 'package:clinic_photos/services/supabase_patient_service.dart';
 import 'package:clinic_photos/services/supabase_auth_service.dart';
 
 void main() {
-  group('V5 Supabase Authentication, RLS & Multi-Device Sync Integration Tests', () {
+  const runSupabaseIntegration = bool.fromEnvironment(
+    'RUN_SUPABASE_INTEGRATION',
+    defaultValue: false,
+  );
+
+  group(
+    'V5 Supabase Authentication, RLS & Multi-Device Sync Integration Tests',
+    skip: runSupabaseIntegration ? null : 'Set RUN_SUPABASE_INTEGRATION=true to run network integration tests.',
+    () {
     const supabaseUrl = AppConfig.defaultSupabaseUrl;
     const anonKey = AppConfig.defaultSupabaseAnonKey;
 
