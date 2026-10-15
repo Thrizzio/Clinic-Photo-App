@@ -106,9 +106,16 @@ class _ClinicSetupScreenState extends State<ClinicSetupScreen> {
         throw Exception('No sheets found in this spreadsheet.');
       }
 
+      final appointmentTab = tabs.firstWhere(
+        SheetsService.isAppointmentsTab,
+        orElse: () => '',
+      );
       setState(() {
-        _availableTabs = tabs;
-        _selectedTab = tabs.first;
+        // Appointments is the master patient view. Keep the legacy tab picker
+        // only for older workbooks that genuinely have no Appointments tab;
+        // Visits is still read by SheetsService solely for folder enrichment.
+        _availableTabs = appointmentTab.isNotEmpty ? [appointmentTab] : tabs;
+        _selectedTab = appointmentTab.isNotEmpty ? appointmentTab : tabs.first;
         _currentStep = _SetupStep.selectTab;
         _isLoading = false;
       });
@@ -358,12 +365,12 @@ class _ClinicSetupScreenState extends State<ClinicSetupScreen> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         const Text(
-          'Select Patient Sheet',
+          'Select Appointments Sheet',
           style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
         ),
         const SizedBox(height: 8),
         Text(
-          'Select the tab that contains your patient information.',
+          'Appointments is the patient master. The legacy Visits tab is used only to retain existing Drive folder links.',
           style: TextStyle(color: Theme.of(context).colorScheme.onSurfaceVariant, fontSize: 15),
         ),
         const SizedBox(height: 16),

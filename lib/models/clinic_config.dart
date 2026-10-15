@@ -7,6 +7,9 @@ class ClinicConfig {
   final String? lastPatientSync;
   final int lastSyncedRow;
   final String? lastFullSync;
+  final String? lastSheetModifiedTime;
+  final String? lastSheetVersion;
+  final String? lastPatientFingerprint;
 
   const ClinicConfig({
     required this.spreadsheetId,
@@ -17,6 +20,9 @@ class ClinicConfig {
     this.lastPatientSync,
     this.lastSyncedRow = 1,
     this.lastFullSync,
+    this.lastSheetModifiedTime,
+    this.lastSheetVersion,
+    this.lastPatientFingerprint,
   });
 
   ClinicConfig copyWith({
@@ -28,6 +34,9 @@ class ClinicConfig {
     String? lastPatientSync,
     int? lastSyncedRow,
     String? lastFullSync,
+    String? lastSheetModifiedTime,
+    String? lastSheetVersion,
+    String? lastPatientFingerprint,
   }) {
     return ClinicConfig(
       spreadsheetId: spreadsheetId ?? this.spreadsheetId,
@@ -38,6 +47,9 @@ class ClinicConfig {
       lastPatientSync: lastPatientSync ?? this.lastPatientSync,
       lastSyncedRow: lastSyncedRow ?? this.lastSyncedRow,
       lastFullSync: lastFullSync ?? this.lastFullSync,
+      lastSheetModifiedTime: lastSheetModifiedTime ?? this.lastSheetModifiedTime,
+      lastSheetVersion: lastSheetVersion ?? this.lastSheetVersion,
+      lastPatientFingerprint: lastPatientFingerprint ?? this.lastPatientFingerprint,
     );
   }
 

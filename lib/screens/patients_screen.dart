@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../models/patient.dart';
@@ -9,7 +10,6 @@ import '../services/patient_folder_service.dart';
 import '../services/sheets.dart';
 import '../services/upload_queue.dart';
 import '../widgets/patient_tile.dart';
-import '../widgets/upload_status.dart';
 import 'camera_screen.dart';
 import 'patient_photos_screen.dart';
 import 'settings_screen.dart';
@@ -42,12 +42,10 @@ class PatientsScreen extends StatefulWidget {
   State<PatientsScreen> createState() => _PatientsScreenState();
 }
 
-class _PatientsScreenState extends State<PatientsScreen> {
+class _PatientsScreenState extends State<PatientsScreen> with WidgetsBindingObserver {
   final _searchController = TextEditingController();
   List<Patient> _patients = [];
   int _unassignedSessionsCount = 0;
-  int _activeUploadsCount = 0;
-  int _failedUploadsCount = 0;
   bool _isLoadingCache = true;
   bool _isSyncing = false;
   String? _syncStatusMessage;
@@ -74,6 +72,10 @@ class _PatientsScreenState extends State<PatientsScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    // Every app construction path must give the durable queue the same folder
+    // resolver instance used by the patient UI.
+    widget.queueService.setPatientFolderService(_patientFolderService);
     _previousOnFolderCreated = _patientFolderService.onFolderCreated;
     _patientFolderService.onFolderCreated = (patient) {
       _previousOnFolderCreated?.call(patient);
@@ -83,33 +85,29 @@ class _PatientsScreenState extends State<PatientsScreen> {
     };
     widget.queueService.addListener(_onQueueUpdated);
     _loadCachedPatients();
-    _updateQueueStatus();
-    _syncPatientDatabaseInBackground();
+    unawaited(_syncPatientDatabaseInBackground().then((_) {
+      if (mounted) unawaited(_syncSheetInBackground());
+    }));
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _patientFolderService.onFolderCreated = _previousOnFolderCreated;
     widget.queueService.removeListener(_onQueueUpdated);
     _searchController.dispose();
     super.dispose();
   }
 
-  void _onQueueUpdated() {
-    _updateQueueStatus();
-    _loadCachedPatients();
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(widget.queueService.wake());
+    }
   }
 
-  Future<void> _updateQueueStatus() async {
-    try {
-      final status = await widget.queueService.getStatus();
-      if (mounted) {
-        setState(() {
-          _activeUploadsCount = status.activeCount;
-          _failedUploadsCount = status.failedCount;
-        });
-      }
-    } catch (_) {}
+  void _onQueueUpdated() {
+    _loadCachedPatients();
   }
 
   /// Loads cached patients and unassigned sessions count immediately from SQLite.
@@ -179,9 +177,12 @@ class _PatientsScreenState extends State<PatientsScreen> {
   }
 
   /// Background sync with Google Sheet.
-  /// If [forceFullSync] is true, or if no full sync has occurred, or if incremental sync fails:
-  /// performs a complete reconciliation using validateAndFetchPatients + reconcileSheetPatients.
-  /// Triggered only when explicitly requested (e.g. manual Refresh or after settings reconfiguration).
+  ///
+  /// Drive metadata is the cheap change detector. When the workbook has not
+  /// changed, we leave the cached patient list alone. When it has changed (or
+  /// the caller explicitly requests a refresh), we fetch and reconcile the
+  /// complete master view. We deliberately do not infer row-level deltas from
+  /// row numbers because sorting and inserted rows make that unsafe.
   Future<void> _syncSheetInBackground({bool forceFullSync = false}) async {
     final config = widget.configService.loadConfig();
     if (!config.hasCompletedSetup || config.spreadsheetId.isEmpty) return;
@@ -199,40 +200,25 @@ class _PatientsScreenState extends State<PatientsScreen> {
       }
 
       final now = DateTime.now();
+      final driveService = widget.driveService ?? DriveService();
+      final fingerprint = await driveService.getFileChangeFingerprint(
+        client: client,
+        fileId: config.spreadsheetId,
+      );
+      var unchanged = false;
+      if (!forceFullSync) {
+        final sameModifiedTime = fingerprint.modifiedTime != null &&
+            config.lastSheetModifiedTime != null &&
+            fingerprint.modifiedTime == config.lastSheetModifiedTime;
+        final sameVersion = fingerprint.version != null &&
+            config.lastSheetVersion != null &&
+            fingerprint.version == config.lastSheetVersion;
+        unchanged = sameModifiedTime
+            ? (config.lastSheetVersion == null || fingerprint.version == null || sameVersion)
+            : (fingerprint.modifiedTime == null && sameVersion);
+      }
 
-      if (!forceFullSync && config.lastSyncedRow > 1) {
-        // Incremental sync
-        final incResult = await widget.sheetsService.fetchIncrementalPatients(
-          client: client,
-          spreadsheetId: config.spreadsheetId,
-          sheetName: config.sheetTabName,
-          lastSyncedRow: config.lastSyncedRow,
-        );
-
-        if (incResult != null) {
-          if (incResult.updatedPatients.isNotEmpty) {
-            await _patientSyncService.reconcileSheetPatients(incResult.updatedPatients);
-          }
-          await widget.configService.updateLastSync(
-            now,
-            lastSyncedRow: incResult.newLastSyncedRow,
-          );
-        } else {
-          // Range failed or header changed: fallback to full sync
-          final fullResult = await widget.sheetsService.validateAndFetchPatients(
-            client: client,
-            spreadsheetId: config.spreadsheetId,
-            sheetName: config.sheetTabName,
-          );
-          await _patientSyncService.reconcileSheetPatients(fullResult.patients);
-          await widget.configService.updateLastSync(
-            now,
-            lastSyncedRow: fullResult.totalRows,
-            isFullSync: true,
-          );
-        }
-      } else {
-        // Full initial / manual refresh sync
+      if (!unchanged) {
         final fullResult = await widget.sheetsService.validateAndFetchPatients(
           client: client,
           spreadsheetId: config.spreadsheetId,
@@ -240,10 +226,18 @@ class _PatientsScreenState extends State<PatientsScreen> {
         );
         debugPrint('FULL RECONCILIATION RESULT PATIENTS: ${fullResult.patients.length}');
         await _patientSyncService.reconcileSheetPatients(fullResult.patients);
+        await widget.configService.saveConfig(
+          config.copyWith(
+            sheetTabName: fullResult.effectiveSheetName ?? config.sheetTabName,
+          ),
+        );
         await widget.configService.updateLastSync(
           now,
           lastSyncedRow: fullResult.totalRows,
           isFullSync: true,
+          sheetModifiedTime: fingerprint.modifiedTime,
+          sheetVersion: fingerprint.version,
+          patientFingerprint: SheetsService.fingerprintPatients(fullResult.patients),
         );
       }
 
@@ -608,7 +602,7 @@ class _PatientsScreenState extends State<PatientsScreen> {
                   fontWeight: FontWeight.w500,
                 ),
               ),
-              UploadStatusPill(queueService: widget.queueService),
+               const SizedBox.shrink(),
             ],
           ),
         ),
@@ -695,63 +689,6 @@ class _PatientsScreenState extends State<PatientsScreen> {
                 ],
               ),
             ),
-
-            // Real-time Upload Queue Progress Pill
-            if (_activeUploadsCount > 0)
-              Container(
-                margin: const EdgeInsets.fromLTRB(16, 4, 16, 2),
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                decoration: BoxDecoration(
-                  color: isDark ? theme.colorScheme.primaryContainer.withValues(alpha: 0.5) : theme.colorScheme.primaryContainer,
-                  borderRadius: BorderRadius.circular(20),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    SizedBox(
-                      width: 12,
-                      height: 12,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        color: theme.colorScheme.onPrimaryContainer,
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Text(
-                      'Uploading $_activeUploadsCount ${_activeUploadsCount == 1 ? "photo" : "photos"} to Drive…',
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.bold,
-                        color: theme.colorScheme.onPrimaryContainer,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-
-            if (_failedUploadsCount > 0)
-              Container(
-                margin: const EdgeInsets.fromLTRB(16, 2, 16, 2),
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                decoration: BoxDecoration(
-                  color: isDark ? theme.colorScheme.errorContainer.withValues(alpha: 0.5) : theme.colorScheme.errorContainer,
-                  borderRadius: BorderRadius.circular(20),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.error_outline, size: 14, color: theme.colorScheme.onErrorContainer),
-                    const SizedBox(width: 6),
-                    Text(
-                      '$_failedUploadsCount ${_failedUploadsCount == 1 ? "photo" : "photos"} failed (will retry)',
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: theme.colorScheme.onErrorContainer,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
 
             // Patients List
             Expanded(

@@ -51,11 +51,13 @@ class SheetParseResult {
   final List<Patient> patients;
   final int totalRows;
   final HeaderIndices? headerIndices;
+  final String? effectiveSheetName;
 
   const SheetParseResult({
     required this.patients,
     required this.totalRows,
     this.headerIndices,
+    this.effectiveSheetName,
   });
 }
 
@@ -78,6 +80,15 @@ class _PatientGroupData {
   final Set<String> folderIds = {};
 
   _PatientGroupData({required this.id});
+}
+
+class _AppointmentGroupData {
+  final String externalId;
+  String name = '';
+  String? phone;
+  final Set<String> folderIds = {};
+
+  _AppointmentGroupData({required this.externalId});
 }
 
 class SheetsService {
@@ -187,6 +198,11 @@ class SheetsService {
         norm == 'directory';
   }
 
+  static bool isVisitsTab(String title) {
+    final norm = title.trim().toLowerCase();
+    return norm == 'visits' || norm == 'visit log' || norm.contains('visit');
+  }
+
   static int? _findPhoneColIndex(Map<String, int> columnMap) {
     for (final alias in phoneHeaderAliases) {
       final normalized = normalizeHeader(alias);
@@ -262,6 +278,120 @@ class SheetsService {
     }
 
     return result;
+  }
+
+  /// Stable lightweight fingerprint for already parsed appointment records.
+  /// It is used only as a post-processing checkpoint, not as a replacement for
+  /// Drive's spreadsheet-level modified/version metadata.
+  static String fingerprintPatients(Iterable<Patient> patients) {
+    final values = patients
+        .map((p) => '${p.normalizedPhone ?? ''}|${p.normalizedName}|${p.driveFolderId ?? ''}')
+        .toList()
+      ..sort();
+    var hash = 2166136261;
+    for (final value in values.join('\n').codeUnits) {
+      hash ^= value;
+      hash = (hash * 16777619) & 0xFFFFFFFF;
+    }
+    return hash.toRadixString(16).padLeft(8, '0');
+  }
+
+  /// Resolves the current master patient view from appointment rows. Phone is
+  /// the primary identity when it is a reliable normalized number; a unique
+  /// normalized name is the cautious fallback for rows without phones.
+  /// Repeated appointments therefore produce one incoming patient record and
+  /// no Patient ID column is required.
+  static Map<String, Patient> resolvePatientsFromAppointments(
+    List<List<dynamic>> rows,
+  ) {
+    if (rows.isEmpty) return const {};
+
+    var headerRow = -1;
+    var appointmentIdCol = -1;
+    var nameCol = -1;
+    var phoneCol = -1;
+    var folderCol = -1;
+    for (var r = 0; r < rows.length; r++) {
+      final row = rows[r];
+      var localName = -1;
+      var localPhone = -1;
+      var localAppointment = -1;
+      var localFolder = -1;
+      for (var c = 0; c < row.length; c++) {
+        final header = normalizeHeader(row[c]?.toString() ?? '');
+        if (isAppointmentHeader(header) && localAppointment == -1) localAppointment = c;
+        if ((header == 'patient name' || header == 'name') && localName == -1) localName = c;
+        if (isPhoneHeader(header) && localPhone == -1) localPhone = c;
+        if ((header == normalizeHeader(AppConfig.photosDriveHeader) ||
+                header == normalizeHeader(AppConfig.legacyDriveFolderIdHeader)) &&
+            localFolder == -1) {
+          localFolder = c;
+        }
+      }
+      if (localName != -1 || localPhone != -1) {
+        headerRow = r;
+        appointmentIdCol = localAppointment;
+        nameCol = localName;
+        phoneCol = localPhone;
+        folderCol = localFolder;
+        break;
+      }
+    }
+    if (headerRow == -1) return const {};
+
+    final groups = <String, _AppointmentGroupData>{};
+    for (var r = headerRow + 1; r < rows.length; r++) {
+      final row = rows[r];
+      final rawName = nameCol >= 0 && nameCol < row.length ? row[nameCol]?.toString().trim() : '';
+      final cleanName = Patient.isUsableName(rawName) ? rawName : null;
+      final rawPhone = phoneCol >= 0 && phoneCol < row.length ? row[phoneCol]?.toString() : null;
+      final cleanPhone = Patient.cleanPhone(rawPhone);
+      final normalizedPhone = Patient.normalizePhone(cleanPhone);
+      final normalizedName = cleanName == null ? '' : Patient.normalizeName(cleanName);
+      if (normalizedPhone == null && normalizedName.isEmpty) continue;
+
+      final rawAppointmentId = appointmentIdCol >= 0 && appointmentIdCol < row.length
+          ? row[appointmentIdCol]?.toString().trim() ?? ''
+          : '';
+      final appointmentId = rawAppointmentId.isNotEmpty
+          ? (RegExp(r'^\d+\.0$').hasMatch(rawAppointmentId)
+              ? rawAppointmentId.substring(0, rawAppointmentId.length - 2)
+              : rawAppointmentId)
+          : 'appointment_row_$r';
+      final key = normalizedPhone != null && normalizedPhone.isNotEmpty
+          ? 'phone:$normalizedPhone'
+          : 'name:$normalizedName';
+      final group = groups.putIfAbsent(
+        key,
+        () => _AppointmentGroupData(externalId: appointmentId),
+      );
+      if (cleanName != null && group.name.isEmpty) group.name = cleanName;
+      if (cleanPhone != null && group.phone == null) group.phone = cleanPhone;
+      if (folderCol >= 0 && folderCol < row.length) {
+        final folder = extractDriveFolderId(row[folderCol]?.toString() ?? '');
+        if (folder != null) group.folderIds.add(folder);
+      }
+    }
+
+    return {
+      for (final entry in groups.entries)
+        entry.key: Patient(
+          id: entry.value.externalId,
+          name: entry.value.name,
+          displayName: entry.value.name,
+          normalizedName: Patient.normalizeName(entry.value.name),
+          phoneDisplay: entry.value.phone,
+          normalizedPhone: Patient.normalizePhone(entry.value.phone),
+          legacyPatientId: entry.value.externalId,
+          source: PatientSource.clinicSheet,
+          driveFolderId: entry.value.folderIds.length == 1 ? entry.value.folderIds.first : null,
+          folderStatus: entry.value.folderIds.isEmpty
+              ? FolderStatus.missing
+              : (entry.value.folderIds.length == 1 ? FolderStatus.available : FolderStatus.conflict),
+          createdAt: DateTime.now(),
+          updatedAt: DateTime.now(),
+        ),
+    };
   }
 
   /// Parses a single header row into a [HeaderIndices] object.
@@ -544,9 +674,14 @@ class SheetsService {
     required String sheetName,
   }) async {
     final sheetsApi = sheets.SheetsApi(client);
+    final tabs = await fetchSheetTabs(client: client, spreadsheetId: spreadsheetId);
+    final effectiveSheetName = tabs.firstWhere(
+      isAppointmentsTab,
+      orElse: () => sheetName,
+    );
     final valueRange = await sheetsApi.spreadsheets.values.get(
       spreadsheetId,
-      sheetName,
+      effectiveSheetName,
     );
     final rawRows = valueRange.values;
 
@@ -554,23 +689,30 @@ class SheetsService {
       return const SheetParseResult(
         patients: [],
         totalRows: 0,
+        effectiveSheetName: null,
       );
     }
 
-    final tabs = await fetchSheetTabs(client: client, spreadsheetId: spreadsheetId);
     final rows = rawRows.cast<List<dynamic>>();
-    final headerIndices = discoverHeaderIndices(rows);
-    final patientsMap = resolvePatientsFromVisits(
-      rows: rows,
-      headerIndices: headerIndices,
-    );
+    final isAppointmentMaster = isAppointmentsTab(effectiveSheetName);
+    final HeaderIndices? headerIndices;
+    final Map<String, Patient> patientsMap;
+    if (isAppointmentMaster) {
+      headerIndices = null;
+      patientsMap = resolvePatientsFromAppointments(rows);
+    } else {
+      final discovered = discoverHeaderIndices(rows);
+      headerIndices = discovered;
+      patientsMap = resolvePatientsFromVisits(rows: rows, headerIndices: discovered);
+    }
 
     // 1. Fetch Appointments schedule if present in workbook
-    Map<String, AppointmentRecord> appointmentsMap = const {};
+    Map<String, AppointmentRecord> appointmentsMap =
+        isAppointmentMaster ? parseAppointments(rows) : const {};
     final apptTabName = tabs.firstWhere(
       (t) =>
           isAppointmentsTab(t) &&
-          t.trim().toLowerCase() != sheetName.trim().toLowerCase(),
+           t.trim().toLowerCase() != effectiveSheetName.trim().toLowerCase(),
       orElse: () => '',
     );
     if (apptTabName.isNotEmpty) {
@@ -601,9 +743,10 @@ class SheetsService {
     final patientsTabName = tabs.firstWhere(
       (t) =>
           isPatientsTab(t) &&
-          t.trim().toLowerCase() != sheetName.trim().toLowerCase(),
+           t.trim().toLowerCase() != effectiveSheetName.trim().toLowerCase(),
       orElse: () => '',
     );
+    List<List<dynamic>>? directoryRowsForFolderLinks;
     if (patientsTabName.isNotEmpty) {
       try {
         final patientsRange = await sheetsApi.spreadsheets.values.get(
@@ -612,9 +755,10 @@ class SheetsService {
         );
         final pRows = patientsRange.values;
         if (pRows != null && pRows.isNotEmpty) {
+          directoryRowsForFolderLinks = pRows.cast<List<dynamic>>();
           enrichPatientsFromDirectory(
             patientsMap,
-            pRows.cast<List<dynamic>>(),
+            directoryRowsForFolderLinks,
             appointmentsMap: appointmentsMap,
           );
         }
@@ -623,10 +767,42 @@ class SheetsService {
       }
     }
 
+    // The Appointments tab is the patient master, but the legacy Visits tab
+    // can still carry the authoritative Drive folder link. Merge only a
+    // verified folder match; never let a visit row replace appointment name or
+    // phone data, and never guess when identity is ambiguous.
+    if (isAppointmentMaster) {
+      final visitsTabName = tabs.firstWhere(
+        (t) =>
+            isVisitsTab(t) &&
+            t.trim().toLowerCase() != effectiveSheetName.trim().toLowerCase(),
+        orElse: () => '',
+      );
+      if (visitsTabName.isNotEmpty) {
+        try {
+          final visitsRange = await sheetsApi.spreadsheets.values.get(
+            spreadsheetId,
+            '$visitsTabName!A1:ZZ',
+          );
+          final visitRows = visitsRange.values;
+          if (visitRows != null && visitRows.isNotEmpty) {
+            enrichPatientsFromVisitsFolders(
+              patientsMap,
+              visitRows.cast<List<dynamic>>(),
+              directoryRows: directoryRowsForFolderLinks,
+            );
+          }
+        } catch (e) {
+          debugPrint('Error enriching appointment patients from Visits tab: $e');
+        }
+      }
+    }
+
     return SheetParseResult(
       patients: patientsMap.values.where((p) => p.hasValidName).toList(),
       totalRows: rows.length,
       headerIndices: headerIndices,
+      effectiveSheetName: effectiveSheetName,
     );
   }
 
@@ -793,7 +969,26 @@ class SheetsService {
 
       final normPhone = Patient.normalizePhone(cleanPhoneNumber);
 
-      final existing = patientsMap[cleanId];
+      var existingKey = cleanId;
+      var existing = patientsMap[existingKey];
+      if (existing == null && cleanApptId != null && cleanApptId.isNotEmpty) {
+        for (final entry in patientsMap.entries) {
+          if (entry.value.legacyPatientId == cleanApptId) {
+            existingKey = entry.key;
+            existing = entry.value;
+            break;
+          }
+        }
+      }
+      if (existing == null && normPhone != null && normPhone.isNotEmpty) {
+        for (final entry in patientsMap.entries) {
+          if (entry.value.normalizedPhone == normPhone) {
+            existingKey = entry.key;
+            existing = entry.value;
+            break;
+          }
+        }
+      }
       if (existing != null) {
         final updatedName = existing.hasValidName
             ? existing.name
@@ -801,7 +996,7 @@ class SheetsService {
         final updatedPhone = existing.phoneNumber ?? cleanPhoneNumber;
         final updatedNormPhone = existing.phoneNumberNormalized ?? normPhone;
 
-        patientsMap[cleanId] = Patient(
+        patientsMap[existingKey] = Patient(
           id: existing.id,
           legacyPatientId: existing.legacyPatientId ?? cleanId,
           name: updatedName,
@@ -819,6 +1014,156 @@ class SheetsService {
         );
       }
     }
+  }
+
+  /// Copies verified Drive folder identity from a legacy Visits tab onto the
+  /// Appointments patient master. Phone is the primary match; a unique name is
+  /// the fallback. A conflicting folder mapping remains a conflict instead of
+  /// being silently selected.
+  static void enrichPatientsFromVisitsFolders(
+    Map<String, Patient> patientsMap,
+    List<List<dynamic>> visitsRows,
+    {
+    List<List<dynamic>>? directoryRows,
+    }
+  ) {
+    if (patientsMap.isEmpty || visitsRows.isEmpty) return;
+
+    late final HeaderIndices headers;
+    try {
+      headers = discoverHeaderIndices(visitsRows);
+    } catch (_) {
+      return;
+    }
+    final visitPatients = resolvePatientsFromVisits(
+      rows: visitsRows,
+      headerIndices: headers,
+    );
+    final directoryAppointmentByPatientId = _directoryAppointmentLinks(directoryRows);
+
+    Patient? findMatch(Patient visitPatient, String? appointmentId) {
+      if (appointmentId != null && appointmentId.isNotEmpty) {
+        final matches = patientsMap.values
+            .where((p) => p.legacyPatientId == appointmentId)
+            .toList();
+        if (matches.length == 1) return matches.single;
+      }
+      if (visitPatient.normalizedPhone != null && visitPatient.normalizedPhone!.isNotEmpty) {
+        final matches = patientsMap.values
+            .where((p) => p.normalizedPhone == visitPatient.normalizedPhone)
+            .toList();
+        if (matches.length == 1) return matches.single;
+        return null;
+      }
+      if (visitPatient.hasValidName) {
+        final matches = patientsMap.values
+            .where((p) => p.normalizedName == visitPatient.normalizedName)
+            .toList();
+        if (matches.length == 1) return matches.single;
+      }
+      return null;
+    }
+
+    final representativeByIdentity = <String, Patient>{};
+    final appointmentIdByIdentity = <String, String>{};
+    final foldersByIdentity = <String, Set<String>>{};
+    final conflictsByIdentity = <String>{};
+    for (final visitPatient in visitPatients.values) {
+      final linkedAppointmentId = directoryAppointmentByPatientId[visitPatient.legacyPatientId];
+      final identity = linkedAppointmentId != null
+          ? 'appointment:$linkedAppointmentId'
+          : (visitPatient.normalizedPhone != null &&
+              visitPatient.normalizedPhone!.isNotEmpty
+              ? 'phone:${visitPatient.normalizedPhone}'
+              : (visitPatient.hasValidName ? 'name:${visitPatient.normalizedName}' : ''));
+      if (identity.isEmpty) continue;
+      representativeByIdentity.putIfAbsent(identity, () => visitPatient);
+      if (linkedAppointmentId != null && linkedAppointmentId.isNotEmpty) {
+        appointmentIdByIdentity[identity] = linkedAppointmentId;
+      }
+      if (visitPatient.folderStatus == FolderStatus.conflict) {
+        conflictsByIdentity.add(identity);
+      }
+      final folderId = visitPatient.driveFolderId;
+      if (folderId != null && folderId.isNotEmpty) {
+        foldersByIdentity.putIfAbsent(identity, () => <String>{}).add(folderId);
+      }
+    }
+
+    for (final entry in representativeByIdentity.entries) {
+      final visitPatient = entry.value;
+      final folders = foldersByIdentity[entry.key] ?? const <String>{};
+      final conflict = conflictsByIdentity.contains(entry.key) || folders.length > 1;
+      if (!conflict && folders.isEmpty) continue;
+
+      final matched = findMatch(visitPatient, appointmentIdByIdentity[entry.key]);
+      if (matched == null) continue;
+
+      final folderId = folders.length == 1 ? folders.single : null;
+      final updated = Patient(
+        id: matched.id,
+        name: matched.name,
+        displayName: matched.displayName,
+        normalizedName: matched.normalizedName,
+        phoneDisplay: matched.phoneDisplay,
+        normalizedPhone: matched.normalizedPhone,
+        legacyPatientId: matched.legacyPatientId,
+        source: matched.source,
+        driveFolderId: conflict ? null : folderId,
+        folderStatus: conflict ? FolderStatus.conflict : FolderStatus.available,
+        createdAt: matched.createdAt,
+        updatedAt: DateTime.now(),
+        syncStatus: matched.syncStatus,
+      );
+      final key = patientsMap.entries
+          .firstWhere((entry) => entry.value.id == matched.id)
+          .key;
+      patientsMap[key] = updated;
+    }
+  }
+
+  static Map<String, String> _directoryAppointmentLinks(
+    List<List<dynamic>>? directoryRows,
+  ) {
+    if (directoryRows == null || directoryRows.isEmpty) return const {};
+
+    var patientIdCol = -1;
+    var appointmentIdCol = -1;
+    var dataStartIndex = 0;
+    for (var r = 0; r < directoryRows.length; r++) {
+      final row = directoryRows[r];
+      for (var c = 0; c < row.length; c++) {
+        final header = normalizeHeader(row[c]?.toString() ?? '');
+        if (header == 'patient id' || (header == 'id' && patientIdCol == -1)) {
+          patientIdCol = c;
+        } else if (isAppointmentHeader(header) && appointmentIdCol == -1) {
+          appointmentIdCol = c;
+        }
+      }
+      if (patientIdCol != -1 && appointmentIdCol != -1) {
+        dataStartIndex = r + 1;
+        break;
+      }
+    }
+    if (patientIdCol == -1 || appointmentIdCol == -1) return const {};
+
+    String cleanId(dynamic value) {
+      var id = value?.toString().trim() ?? '';
+      if (RegExp(r'^\d+\.0$').hasMatch(id)) id = id.substring(0, id.length - 2);
+      return id;
+    }
+
+    final result = <String, String>{};
+    for (var r = dataStartIndex; r < directoryRows.length; r++) {
+      final row = directoryRows[r];
+      if (patientIdCol >= row.length || appointmentIdCol >= row.length) continue;
+      final patientId = cleanId(row[patientIdCol]);
+      final appointmentId = cleanId(row[appointmentIdCol]);
+      if (patientId.isNotEmpty && appointmentId.isNotEmpty) {
+        result[patientId] = appointmentId;
+      }
+    }
+    return result;
   }
 
   /// Incremental sync: fetches only rows appended after [lastSyncedRow].

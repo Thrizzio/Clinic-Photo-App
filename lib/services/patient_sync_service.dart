@@ -130,15 +130,43 @@ class PatientSyncService {
     }
 
     final businessIdToPatient = <String, Patient>{};
+    final phoneToPatient = <String, Patient>{};
+    final ambiguousPhones = <String>{};
+    final nameToPatient = <String, Patient>{};
+    final ambiguousNames = <String>{};
+    void indexName(Patient patient) {
+      if (!patient.hasValidName) return;
+      final key = patient.normalizedName;
+      final previous = nameToPatient[key];
+      if (previous != null && previous.id != patient.id) {
+        ambiguousNames.add(key);
+      } else if (!ambiguousNames.contains(key)) {
+        nameToPatient[key] = patient;
+      }
+    }
+    void indexPhone(Patient patient) {
+      final phone = patient.normalizedPhone;
+      if (phone == null || phone.isEmpty) return;
+      final previous = phoneToPatient[phone];
+      if (previous != null && previous.id != patient.id) {
+        ambiguousPhones.add(phone);
+      } else if (!ambiguousPhones.contains(phone)) {
+        phoneToPatient[phone] = patient;
+      }
+    }
     for (final p in cloudPatients) {
       if (p.normalizedPhone != null && p.normalizedPhone!.isNotEmpty) {
         businessIdToPatient['${p.normalizedName}:${p.normalizedPhone}'] = p;
       }
+      indexPhone(p);
+      indexName(p);
     }
     for (final p in localPatients) {
       if (p.normalizedPhone != null && p.normalizedPhone!.isNotEmpty) {
         businessIdToPatient.putIfAbsent('${p.normalizedName}:${p.normalizedPhone}', () => p);
       }
+      indexPhone(p);
+      indexName(p);
     }
 
     final List<Patient> patientsToUpsert = [];
@@ -172,9 +200,19 @@ class PatientSyncService {
         existingPatient = cloudById[canonicalUuid] ?? localById[canonicalUuid];
       }
 
-      // 2. If not mapped by external ID, search by business identity: (normalized_name, normalized_phone)
+      // 2. If not mapped by external ID, use normalized phone as the primary
+      // identity and a unique normalized name only when no phone is present.
+      if (existingPatient == null &&
+          normPhone != null &&
+          normPhone.isNotEmpty &&
+          !ambiguousPhones.contains(normPhone)) {
+        existingPatient = phoneToPatient[normPhone];
+      }
       if (existingPatient == null && normPhone != null && normPhone.isNotEmpty) {
         existingPatient = businessIdToPatient['$normName:$normPhone'];
+      }
+      if (existingPatient == null && normPhone == null && normName.isNotEmpty && !ambiguousNames.contains(normName)) {
+        existingPatient = nameToPatient[normName];
       }
 
       if (existingPatient != null) {
@@ -214,6 +252,8 @@ class PatientSyncService {
         if (normPhone != null && normPhone.isNotEmpty) {
           businessIdToPatient['$normName:$normPhone'] = merged;
         }
+        indexPhone(merged);
+        indexName(merged);
       } else {
         // GENUINELY NEW PATIENT: Assign fresh canonical UUID
         createdCount++;
@@ -241,6 +281,8 @@ class PatientSyncService {
         if (normPhone != null && normPhone.isNotEmpty) {
           businessIdToPatient['$normName:$normPhone'] = newCanonical;
         }
+        indexPhone(newCanonical);
+        indexName(newCanonical);
       }
     }
 
@@ -387,9 +429,25 @@ class PatientSyncService {
     final localPatients = await database.getPatients();
     final cloudById = {for (final p in cloudPatients) p.id: p};
     final cloudByBusinessId = <String, Patient>{};
+    final cloudByPhone = <String, Patient>{};
+    final ambiguousCloudPhones = <String>{};
+    final cloudByName = <String, Patient>{};
+    final ambiguousCloudNames = <String>{};
     for (final p in cloudPatients) {
       if (p.normalizedPhone != null && p.normalizedPhone!.isNotEmpty) {
         cloudByBusinessId['${p.normalizedName}:${p.normalizedPhone}'] = p;
+        final previousPhone = cloudByPhone[p.normalizedPhone!];
+        if (previousPhone != null && previousPhone.id != p.id) {
+          ambiguousCloudPhones.add(p.normalizedPhone!);
+        } else if (!ambiguousCloudPhones.contains(p.normalizedPhone!)) {
+          cloudByPhone[p.normalizedPhone!] = p;
+        }
+      }
+      final previous = cloudByName[p.normalizedName];
+      if (previous != null && previous.id != p.id) {
+        ambiguousCloudNames.add(p.normalizedName);
+      } else if (!ambiguousCloudNames.contains(p.normalizedName)) {
+        cloudByName[p.normalizedName] = p;
       }
     }
 
@@ -461,8 +519,19 @@ class PatientSyncService {
         }
 
         // In-memory lookup by business identity
+        if (cloudMatch == null &&
+            patient.normalizedPhone != null &&
+            patient.normalizedPhone!.isNotEmpty &&
+            !ambiguousCloudPhones.contains(patient.normalizedPhone)) {
+          cloudMatch = cloudByPhone[patient.normalizedPhone!];
+        }
         if (cloudMatch == null && patient.normalizedPhone != null && patient.normalizedPhone!.isNotEmpty) {
           cloudMatch = cloudByBusinessId['${patient.normalizedName}:${patient.normalizedPhone}'];
+        }
+        if (cloudMatch == null &&
+            (patient.normalizedPhone == null || patient.normalizedPhone!.isEmpty) &&
+            !ambiguousCloudNames.contains(patient.normalizedName)) {
+          cloudMatch = cloudByName[patient.normalizedName];
         }
 
         if (cloudMatch != null) {
