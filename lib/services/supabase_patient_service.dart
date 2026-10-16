@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:uuid/uuid.dart';
 import '../models/patient.dart';
+import 'sync_diagnostics.dart';
 
 /// Abstract service managing canonical cloud patient identity in Supabase.
 abstract class SupabasePatientService {
@@ -77,6 +78,7 @@ class RemoteSupabasePatientService implements SupabasePatientService {
   @override
   Future<List<Patient>> fetchAllPatients() async {
     try {
+      SyncDiagnostics.networkRequest('supabase', 'patients.select');
       final response = await client
           .from('patients')
           .select('id, display_name, normalized_name, phone_display, normalized_phone, drive_folder_id, created_at, updated_at');
@@ -99,6 +101,7 @@ class RemoteSupabasePatientService implements SupabasePatientService {
     }
 
     try {
+      SyncDiagnostics.networkRequest('supabase', 'patients.upsert.single');
       final response = await client
           .from('patients')
           .select()
@@ -214,6 +217,7 @@ class RemoteSupabasePatientService implements SupabasePatientService {
     for (var i = 0; i < rowsData.length; i += 50) {
       final chunk = rowsData.sublist(i, (i + 50 > rowsData.length) ? rowsData.length : i + 50);
       try {
+        SyncDiagnostics.networkRequest('supabase', 'patients.upsert.batch');
         await client.from('patients').upsert(
           chunk,
           onConflict: 'id',
@@ -246,6 +250,7 @@ class RemoteSupabasePatientService implements SupabasePatientService {
     };
 
     try {
+      SyncDiagnostics.networkRequest('supabase', 'patient_sources.upsert.single');
       await client.from('patient_sources').upsert(
         rowData,
         onConflict: 'source,external_id',
@@ -274,6 +279,7 @@ class RemoteSupabasePatientService implements SupabasePatientService {
     for (var i = 0; i < rowsData.length; i += 50) {
       final chunk = rowsData.sublist(i, (i + 50 > rowsData.length) ? rowsData.length : i + 50);
       try {
+        SyncDiagnostics.networkRequest('supabase', 'patient_sources.upsert.batch');
         await client.from('patient_sources').upsert(
           chunk,
           onConflict: 'source,external_id',
@@ -288,6 +294,7 @@ class RemoteSupabasePatientService implements SupabasePatientService {
   @override
   Future<List<Map<String, String>>> fetchAllPatientSources() async {
     try {
+      SyncDiagnostics.networkRequest('supabase', 'patient_sources.select');
       final response = await client
           .from('patient_sources')
           .select('patient_id, source, external_id');
@@ -366,8 +373,10 @@ class RemoteSupabasePatientService implements SupabasePatientService {
     }
     try {
       // Delete source mappings first to satisfy foreign key ordering
+      SyncDiagnostics.networkRequest('supabase', 'patient_sources.delete');
       await client.from('patient_sources').delete().eq('patient_id', patientId);
       // Delete patient record
+      SyncDiagnostics.networkRequest('supabase', 'patients.delete');
       await client.from('patients').delete().eq('id', patientId);
     } catch (e) {
       debugPrint('Supabase deletePatient error: $e');

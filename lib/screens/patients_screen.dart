@@ -17,6 +17,7 @@ import 'unassigned_photos_screen.dart';
 import '../widgets/new_patient_dialog.dart';
 import '../services/patient_sync_service.dart';
 import '../services/supabase_patient_service.dart';
+import '../services/sync_diagnostics.dart';
 
 class PatientsScreen extends StatefulWidget {
   final GoogleAuthService authService;
@@ -145,41 +146,58 @@ class _PatientsScreenState extends State<PatientsScreen> with WidgetsBindingObse
   /// Normal patient-list sync should primarily be SQLite <-> Supabase.
   /// Does NOT query Google Sheets or Google Drive.
   Future<void> _syncPatientDatabaseInBackground() async {
-    if (mounted) {
-      setState(() {
-        _isSyncing = true;
-      });
-    }
-
-    try {
-      // Supabase is supplementary cloud synchronization. A stale/expired
-      // session or an unavailable DNS route must not keep the app in a
-      // permanent "syncing" state while the SQLite patient cache is usable.
-      await _patientSyncService.syncLocalWithSupabase().timeout(
-        const Duration(seconds: 8),
-        onTimeout: () => throw TimeoutException('Supabase patient sync timed out'),
-      );
-      await _refreshAll();
-
-      if (mounted) {
-        final now = DateTime.now();
-        final timeStr = DateFormat('h:mm a').format(now);
-        setState(() {
-          _isSyncing = false;
-          _isOffline = false;
-          _syncStatusMessage = '✓ Synced $timeStr';
-        });
-      }
-    } catch (e) {
-      debugPrint('Background database sync notice: $e');
+    final trace = SyncDiagnostics.start(
+      'patient_database_sync',
+      trigger: 'patients_startup',
+    );
+    await SyncDiagnostics.run(trace, () async {
       if (mounted) {
         setState(() {
-          _isSyncing = false;
-          _isOffline = true;
-          _syncStatusMessage = 'Offline · Showing cached list';
+          _isSyncing = true;
         });
       }
-    }
+
+      try {
+        // Supabase is supplementary cloud synchronization. A stale/expired
+        // session or an unavailable DNS route must not keep the app in a
+        // permanent "syncing" state while the SQLite patient cache is usable.
+        await trace.stage(
+          'supabase_reconciliation',
+          () => _patientSyncService.syncLocalWithSupabase().timeout(
+            const Duration(seconds: 8),
+            onTimeout: () => throw TimeoutException('Supabase patient sync timed out'),
+          ),
+        );
+        await trace.stage('local_list_refresh', _refreshAll);
+
+        if (mounted) {
+          final now = DateTime.now();
+          final timeStr = DateFormat('h:mm a').format(now);
+          setState(() {
+            _isSyncing = false;
+            _isOffline = false;
+            _syncStatusMessage = '✓ Synced $timeStr';
+          });
+        }
+        trace.finish(
+          outcome: 'success',
+          fields: <String, Object?>{'visiblePatientCount': _patients.length},
+        );
+      } catch (e) {
+        trace.finish(
+          outcome: 'error',
+          fields: <String, Object?>{'errorType': e.runtimeType.toString()},
+        );
+        debugPrint('Background database sync notice: $e');
+        if (mounted) {
+          setState(() {
+            _isSyncing = false;
+            _isOffline = true;
+            _syncStatusMessage = 'Offline · Showing cached list';
+          });
+        }
+      }
+    });
   }
 
   /// Background sync with Google Sheet.
@@ -190,8 +208,31 @@ class _PatientsScreenState extends State<PatientsScreen> with WidgetsBindingObse
   /// complete master view. We deliberately do not infer row-level deltas from
   /// row numbers because sorting and inserted rows make that unsafe.
   Future<void> _syncSheetInBackground({bool forceFullSync = false}) async {
+    final trace = SyncDiagnostics.start(
+      'sheet_sync',
+      trigger: forceFullSync ? 'manual_refresh' : 'background_refresh',
+    );
+    await SyncDiagnostics.run(
+      trace,
+      () => _syncSheetInBackgroundImpl(
+        forceFullSync: forceFullSync,
+        trace: trace,
+      ),
+    );
+  }
+
+  Future<void> _syncSheetInBackgroundImpl({
+    required bool forceFullSync,
+    required SyncTrace trace,
+  }) async {
     final config = widget.configService.loadConfig();
-    if (!config.hasCompletedSetup || config.spreadsheetId.isEmpty) return;
+    if (!config.hasCompletedSetup || config.spreadsheetId.isEmpty) {
+      trace.finish(
+        outcome: 'skipped',
+        fields: <String, Object?>{'reason': 'sheet_not_configured'},
+      );
+      return;
+    }
 
     if (mounted) {
       setState(() {
@@ -200,16 +241,22 @@ class _PatientsScreenState extends State<PatientsScreen> with WidgetsBindingObse
     }
 
     try {
-      final client = await widget.authService.getAuthenticatedClient();
+      final client = await trace.stage(
+        'google_auth',
+        widget.authService.getAuthenticatedClient,
+      );
       if (client == null) {
         throw Exception('Not signed in');
       }
 
       final now = DateTime.now();
       final driveService = widget.driveService ?? DriveService();
-      final fingerprint = await driveService.getFileChangeFingerprint(
-        client: client,
-        fileId: config.spreadsheetId,
+      final fingerprint = await trace.stage(
+        'drive_sheet_fingerprint',
+        () => driveService.getFileChangeFingerprint(
+          client: client,
+          fileId: config.spreadsheetId,
+        ),
       );
       var unchanged = false;
       if (!forceFullSync) {
@@ -227,55 +274,82 @@ class _PatientsScreenState extends State<PatientsScreen> with WidgetsBindingObse
       if (!unchanged) {
         var incrementalApplied = false;
         if (!forceFullSync && config.lastSyncedRow > 1) {
-          final incremental = await widget.sheetsService.fetchIncrementalPatients(
-            client: client,
-            spreadsheetId: config.spreadsheetId,
-            sheetName: config.sheetTabName,
-            lastSyncedRow: config.lastSyncedRow,
+          trace.addCount('incrementalFetches');
+          final incremental = await trace.stage(
+            'sheets_incremental_fetch',
+            () => widget.sheetsService.fetchIncrementalPatients(
+              client: client,
+              spreadsheetId: config.spreadsheetId,
+              sheetName: config.sheetTabName,
+              lastSyncedRow: config.lastSyncedRow,
+            ),
           );
 
           // A non-empty tail is safe to reconcile incrementally. If the
           // workbook changed without adding rows, fall back to the complete
           // master view so edits/reordering cannot leave stale patients.
           if (incremental != null && incremental.newRowsCount > 0) {
-            await _patientSyncService.reconcileSheetPatients(
-              incremental.updatedPatients,
+            trace.addCount('rowsFetched', incremental.newRowsCount);
+            await trace.stage(
+              'sheet_reconciliation_incremental',
+              () => _patientSyncService.reconcileSheetPatients(
+                incremental.updatedPatients,
+              ),
             );
-            await widget.configService.updateLastSync(
-              now,
-              lastSyncedRow: incremental.newLastSyncedRow,
-              sheetModifiedTime: fingerprint.modifiedTime,
-              sheetVersion: fingerprint.version,
+            await trace.stage(
+              'checkpoint_update_incremental',
+              () => widget.configService.updateLastSync(
+                now,
+                lastSyncedRow: incremental.newLastSyncedRow,
+                sheetModifiedTime: fingerprint.modifiedTime,
+                sheetVersion: fingerprint.version,
+              ),
             );
             incrementalApplied = true;
           }
         }
 
         if (!incrementalApplied) {
-          final fullResult = await widget.sheetsService.validateAndFetchPatients(
-            client: client,
-            spreadsheetId: config.spreadsheetId,
-            sheetName: config.sheetTabName,
-          );
-          debugPrint('FULL RECONCILIATION RESULT PATIENTS: ${fullResult.patients.length}');
-          await _patientSyncService.reconcileSheetPatients(fullResult.patients);
-          await widget.configService.saveConfig(
-            config.copyWith(
-              sheetTabName: fullResult.effectiveSheetName ?? config.sheetTabName,
+          trace.addCount('fullFetches');
+          final fullResult = await trace.stage(
+            'sheets_full_fetch',
+            () => widget.sheetsService.validateAndFetchPatients(
+              client: client,
+              spreadsheetId: config.spreadsheetId,
+              sheetName: config.sheetTabName,
             ),
           );
-          await widget.configService.updateLastSync(
-            now,
-            lastSyncedRow: fullResult.totalRows,
-            isFullSync: true,
-            sheetModifiedTime: fingerprint.modifiedTime,
-            sheetVersion: fingerprint.version,
-            patientFingerprint: SheetsService.fingerprintPatients(fullResult.patients),
+          trace.addCount('recordsFetched', fullResult.patients.length);
+          debugPrint('FULL RECONCILIATION RESULT PATIENTS: ${fullResult.patients.length}');
+          await trace.stage(
+            'sheet_reconciliation_full',
+            () => _patientSyncService.reconcileSheetPatients(fullResult.patients),
+          );
+          await trace.stage(
+            'checkpoint_save_full',
+            () => widget.configService.saveConfig(
+              config.copyWith(
+                sheetTabName: fullResult.effectiveSheetName ?? config.sheetTabName,
+              ),
+            ),
+          );
+          await trace.stage(
+            'checkpoint_update_full',
+            () => widget.configService.updateLastSync(
+              now,
+              lastSyncedRow: fullResult.totalRows,
+              isFullSync: true,
+              sheetModifiedTime: fingerprint.modifiedTime,
+              sheetVersion: fingerprint.version,
+              patientFingerprint: SheetsService.fingerprintPatients(fullResult.patients),
+            ),
           );
         }
+      } else {
+        trace.addCount('noOpChecks');
       }
 
-      await _refreshAll();
+      await trace.stage('local_list_refresh', _refreshAll);
 
       if (mounted) {
         final timeStr = DateFormat('h:mm a').format(now);
@@ -285,7 +359,18 @@ class _PatientsScreenState extends State<PatientsScreen> with WidgetsBindingObse
           _syncStatusMessage = '✓ Synced $timeStr';
         });
       }
+      trace.finish(
+        outcome: 'success',
+        fields: <String, Object?>{
+          'branch': unchanged ? 'unchanged' : 'changed',
+          'visiblePatientCount': _patients.length,
+        },
+      );
     } catch (e) {
+      trace.finish(
+        outcome: 'error',
+        fields: <String, Object?>{'errorType': e.runtimeType.toString()},
+      );
       if (mounted) {
         setState(() {
           _isSyncing = false;

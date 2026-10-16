@@ -13,18 +13,26 @@ import 'services/sheets.dart';
 import 'services/upload_queue.dart';
 import 'services/patient_folder_service.dart';
 import 'services/supabase_patient_service.dart';
+import 'services/sync_diagnostics.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  final startupTrace = SyncDiagnostics.start('startup', trigger: 'main');
 
-  final configService = await ConfigService.init();
-  final database = await AppDatabase.init();
+  final configService = await startupTrace.stage(
+    'config_init',
+    ConfigService.init,
+  );
+  final database = await startupTrace.stage('database_init', AppDatabase.init);
   final authService = GoogleAuthService();
   final sheetsService = SheetsService();
   final driveService = DriveService();
   final backgroundUploadWorker = BackgroundUploadWorker();
   try {
-    await backgroundUploadWorker.initialize();
+    await startupTrace.stage(
+      'workmanager_init',
+      backgroundUploadWorker.initialize,
+    );
   } catch (e) {
     // The in-process queue remains usable if WorkManager is unavailable on a
     // particular device or during a development/test launch.
@@ -38,12 +46,15 @@ void main() async {
     if (url.startsWith('https://') &&
         !url.contains('xyzcompany') &&
         !key.contains('placeholder')) {
-      await Supabase.initialize(
-        url: url,
-        // ignore: deprecated_member_use
-        anonKey: key,
-        authOptions: const FlutterAuthClientOptions(
-          authFlowType: AuthFlowType.implicit,
+      await startupTrace.stage(
+        'supabase_init',
+        () => Supabase.initialize(
+          url: url,
+          // ignore: deprecated_member_use
+          anonKey: key,
+          authOptions: const FlutterAuthClientOptions(
+            authFlowType: AuthFlowType.implicit,
+          ),
         ),
       );
       final client = Supabase.instance.client;
@@ -72,23 +83,45 @@ void main() async {
 
   final config = configService.loadConfig();
 
-  runApp(ClinicPhotosApp(
-    configService: configService,
-    database: database,
-    authService: authService,
-    sheetsService: sheetsService,
-    driveService: driveService,
-    queueService: queueService,
-    supabaseService: supabaseService,
-    hasCompletedSetup: config.hasCompletedSetup,
-  ));
+  await startupTrace.stage(
+    'run_app',
+    () async {
+      runApp(ClinicPhotosApp(
+        configService: configService,
+        database: database,
+        authService: authService,
+        sheetsService: sheetsService,
+        driveService: driveService,
+        queueService: queueService,
+        supabaseService: supabaseService,
+        hasCompletedSetup: config.hasCompletedSetup,
+      ));
+    },
+  );
 
   // Do not hold the first frame hostage to Google Credential Manager or a
   // network retry. SQLite-backed patients must render even when Google auth
   // is unavailable; the durable queue will retry silently when authorized.
   if (config.hasCompletedSetup) {
-    unawaited(queueService.wake());
+    unawaited(
+      SyncDiagnostics.run(
+        SyncDiagnostics.start('upload_queue_wake', trigger: 'startup'),
+        () async {
+          try {
+            await queueService.wake();
+            SyncDiagnostics.current?.finish(outcome: 'success');
+          } catch (error) {
+            SyncDiagnostics.current?.finish(
+              outcome: 'error',
+              fields: <String, Object?>{'errorType': error.runtimeType.toString()},
+            );
+            rethrow;
+          }
+        },
+      ),
+    );
   }
+  startupTrace.finish(outcome: 'complete');
 }
 
 class ClinicPhotosApp extends StatelessWidget {

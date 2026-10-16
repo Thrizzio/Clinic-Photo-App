@@ -5,6 +5,7 @@ import 'package:googleapis_auth/googleapis_auth.dart';
 import '../config.dart';
 import '../models/patient.dart';
 import 'drive.dart';
+import 'sync_diagnostics.dart';
 
 class AppointmentRecord {
   final String appointmentId;
@@ -727,6 +728,7 @@ class SheetsService {
     required String spreadsheetId,
   }) async {
     final sheetsApi = sheets.SheetsApi(client);
+    SyncDiagnostics.networkRequest('sheets', 'spreadsheets.get.tabs');
     final spreadsheet = await sheetsApi.spreadsheets.get(
       spreadsheetId,
       $fields: 'sheets.properties.title',
@@ -757,6 +759,7 @@ class SheetsService {
       isAppointmentsTab,
       orElse: () => sheetName,
     );
+    SyncDiagnostics.networkRequest('sheets', 'values.get.master');
     final valueRange = await sheetsApi.spreadsheets.values.get(
       spreadsheetId,
       effectiveSheetName,
@@ -795,6 +798,7 @@ class SheetsService {
     );
     if (apptTabName.isNotEmpty) {
       try {
+        SyncDiagnostics.networkRequest('sheets', 'values.get.appointments');
         final apptRange = await sheetsApi.spreadsheets.values.get(
           spreadsheetId,
           '$apptTabName!A1:Z500',
@@ -827,6 +831,7 @@ class SheetsService {
     List<List<dynamic>>? directoryRowsForFolderLinks;
     if (patientsTabName.isNotEmpty) {
       try {
+        SyncDiagnostics.networkRequest('sheets', 'values.get.patients');
         final patientsRange = await sheetsApi.spreadsheets.values.get(
           spreadsheetId,
           '$patientsTabName!A1:Z500',
@@ -858,6 +863,7 @@ class SheetsService {
       );
       if (visitsTabName.isNotEmpty) {
         try {
+          SyncDiagnostics.networkRequest('sheets', 'values.get.visits');
           final visitsRange = await sheetsApi.spreadsheets.values.get(
             spreadsheetId,
             '$visitsTabName!A1:ZZ',
@@ -914,6 +920,7 @@ class SheetsService {
 
       if (masterApptTab.isEmpty) return const {};
 
+      SyncDiagnostics.networkRequest('sheets', 'values.get.companion_appointments');
       final apptRange = await sheetsApi.spreadsheets.values.get(
         masterId,
         '$masterApptTab!A1:Z500',
@@ -925,6 +932,7 @@ class SheetsService {
 
       // Attempt to self-heal target spreadsheet by copying the Appointments sheet tab
       try {
+        SyncDiagnostics.networkRequest('sheets', 'spreadsheets.get.companion_metadata');
         final masterMeta = await sheetsApi.spreadsheets.get(
           masterId,
           $fields: 'sheets(properties(sheetId,title))',
@@ -935,6 +943,7 @@ class SheetsService {
         );
         final sheetId = tabObj?.properties?.sheetId;
         if (sheetId != null) {
+          SyncDiagnostics.networkRequest('sheets', 'sheets.copyTo.appointments');
           await sheetsApi.spreadsheets.sheets.copyTo(
             sheets.CopySheetToAnotherSpreadsheetRequest(
               destinationSpreadsheetId: targetSpreadsheetId,
@@ -1267,6 +1276,7 @@ class SheetsService {
     final range = '$sheetName!A${lastSyncedRow + 1}:ZZ';
 
     try {
+      SyncDiagnostics.networkRequest('sheets', 'values.get.new_rows');
       final valueRange = await sheetsApi.spreadsheets.values.get(
         spreadsheetId,
         range,
@@ -1296,6 +1306,7 @@ class SheetsService {
         isAppointmentsTab,
         orElse: () => sheetName,
       );
+      SyncDiagnostics.networkRequest('sheets', 'values.batchGet.incremental');
       final batchResponse = await sheetsApi.spreadsheets.values.batchGet(
         spreadsheetId,
         ranges: [
@@ -1374,6 +1385,7 @@ class SheetsService {
           orElse: () => '',
         );
         if (!isAppointmentMaster && apptTabName.isNotEmpty) {
+          SyncDiagnostics.networkRequest('sheets', 'values.get.incremental_appointments');
           final apptRange = await sheetsApi.spreadsheets.values.get(
             spreadsheetId,
             '$apptTabName!A1:Z500',
@@ -1398,6 +1410,7 @@ class SheetsService {
           orElse: () => '',
         );
         if (patientsTabName.isNotEmpty) {
+          SyncDiagnostics.networkRequest('sheets', 'values.get.incremental_patients');
           final patientsRange = await sheetsApi.spreadsheets.values.get(
             spreadsheetId,
             '$patientsTabName!A1:Z500',
@@ -1455,6 +1468,7 @@ class SheetsService {
   }) async {
     final sheetsApi = sheets.SheetsApi(client);
 
+    SyncDiagnostics.networkRequest('sheets', 'values.get.folder_links');
     final valueRange = await sheetsApi.spreadsheets.values.get(
       spreadsheetId,
       sheetName,
@@ -1510,6 +1524,7 @@ class SheetsService {
       data: dataToUpdate,
     );
 
+    SyncDiagnostics.networkRequest('sheets', 'values.batchUpdate.folder_links');
     await sheetsApi.spreadsheets.values.batchUpdate(
       batchRequest,
       spreadsheetId,

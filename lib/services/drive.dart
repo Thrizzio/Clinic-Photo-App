@@ -2,6 +2,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:googleapis/drive/v3.dart' as drive;
 import 'package:googleapis_auth/googleapis_auth.dart';
+import 'sync_diagnostics.dart';
 
 class DriveService {
   static String _escapeQueryValue(String value) =>
@@ -15,6 +16,7 @@ class DriveService {
     required String fileId,
   }) async {
     final api = drive.DriveApi(client);
+    SyncDiagnostics.networkRequest('drive', 'files.get.fingerprint');
     final file = await api.files.get(
       fileId,
       $fields: 'id,modifiedTime,version',
@@ -36,6 +38,7 @@ class DriveService {
     final driveApi = drive.DriveApi(client);
     final safeName = _escapeQueryValue(fileName);
     final safeFolderId = _escapeQueryValue(folderId);
+    SyncDiagnostics.networkRequest('drive', 'files.list.photo_by_name');
     final response = await driveApi.files.list(
       q: "'$safeFolderId' in parents and name = '$safeName' and trashed = false and mimeType contains 'image/'",
       $fields: 'files(id, name, parents, createdTime)',
@@ -71,6 +74,7 @@ class DriveService {
     );
 
     try {
+      SyncDiagnostics.networkRequest('drive', 'files.create.photo');
       final response = await driveApi.files.create(
         fileMetadata,
         uploadMedia: media,
@@ -105,6 +109,7 @@ class DriveService {
     final query =
         "mimeType = 'application/vnd.google-apps.folder' and '$parentFolderId' in parents and name = '$safeName' and trashed = false";
 
+    SyncDiagnostics.networkRequest('drive', 'files.list.folders');
     final fileList = await driveApi.files.list(
       q: query,
       $fields: 'files(id, name, parents)',
@@ -131,6 +136,7 @@ class DriveService {
       ..mimeType = 'application/vnd.google-apps.folder'
       ..parents = [parentFolderId];
 
+    SyncDiagnostics.networkRequest('drive', 'files.create.folder');
     final created = await driveApi.files.create(
       folderMetadata,
       $fields: 'id, name, parents',
@@ -156,6 +162,7 @@ class DriveService {
     required String targetFolderId,
   }) async {
     final driveApi = drive.DriveApi(client);
+    SyncDiagnostics.networkRequest('drive', 'files.update.move');
     await driveApi.files.update(
       drive.File(),
       fileId,
@@ -177,6 +184,7 @@ class DriveService {
   }) async {
     final driveApi = drive.DriveApi(client);
     try {
+      SyncDiagnostics.networkRequest('drive', 'files.delete');
       await driveApi.files.delete(fileId, supportsAllDrives: true);
       debugPrint('Deleted Drive file $fileId permanently');
       return;
@@ -191,6 +199,7 @@ class DriveService {
     try {
       String? folderToRemove = parentFolderId;
       if (folderToRemove == null || folderToRemove.isEmpty) {
+        SyncDiagnostics.networkRequest('drive', 'files.get.delete_parent');
         final fileMeta = await driveApi.files.get(
           fileId,
           $fields: 'parents',
@@ -203,6 +212,7 @@ class DriveService {
       }
 
       if (folderToRemove != null && folderToRemove.isNotEmpty) {
+        SyncDiagnostics.networkRequest('drive', 'files.update.remove_parent');
         await driveApi.files.update(
           drive.File(),
           fileId,
@@ -214,6 +224,7 @@ class DriveService {
 
       // Also attempt to move to trash if allowed
       try {
+        SyncDiagnostics.networkRequest('drive', 'files.update.trash');
         await driveApi.files.update(
           drive.File()..trashed = true,
           fileId,
@@ -282,6 +293,7 @@ class DriveService {
     final query =
         "'$folderId' in parents and trashed = false and mimeType contains 'image/'";
 
+    SyncDiagnostics.networkRequest('drive', 'files.list.patient_photos');
     final fileList = await driveApi.files.list(
       q: query,
       $fields: 'files(id, name, createdTime, thumbnailLink, webContentLink, size)',
@@ -298,6 +310,7 @@ class DriveService {
     required String fileId,
   }) async {
     final driveApi = drive.DriveApi(client);
+    SyncDiagnostics.networkRequest('drive', 'files.get.bytes');
     final media = await driveApi.files.get(
       fileId,
       downloadOptions: drive.DownloadOptions.fullMedia,
@@ -317,6 +330,7 @@ class DriveService {
   }) async {
     final driveApi = drive.DriveApi(client);
     try {
+      SyncDiagnostics.networkRequest('drive', 'files.get.folder_access');
       final file = await driveApi.files.get(
         folderId,
         $fields: 'id, name, mimeType',
@@ -334,6 +348,7 @@ class DriveService {
   }) async {
     final driveApi = drive.DriveApi(client);
     try {
+      SyncDiagnostics.networkRequest('drive', 'files.list.spreadsheets');
       final response = await driveApi.files.list(
         q: "mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false",
         $fields: 'files(id, name, webViewLink)',

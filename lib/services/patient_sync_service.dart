@@ -5,6 +5,7 @@ import '../models/patient.dart';
 import 'database.dart';
 import 'sheets.dart';
 import 'supabase_patient_service.dart';
+import 'sync_diagnostics.dart';
 
 class ReconciliationResult {
   final int totalSheetPatients;
@@ -86,6 +87,11 @@ class PatientSyncService {
   Future<ReconciliationResult> reconcileSheetPatients(
     List<Patient> sheetPatients,
   ) async {
+    final trace = SyncDiagnostics.current;
+    Future<T> measured<T>(String name, Future<T> Function() action) {
+      return trace == null ? action() : trace.stage(name, action);
+    }
+
     int linkedCount = 0;
     int createdCount = 0;
     final reconciled = <Patient>[];
@@ -96,16 +102,29 @@ class PatientSyncService {
     List<Patient> cloudPatients = const [];
     List<Map<String, String>> cloudSources = const [];
     try {
-      cloudPatients = await supabaseService.fetchAllPatients();
-      cloudSources = await supabaseService.fetchAllPatientSources();
+      cloudPatients = await measured(
+        'reconcile_supabase_fetch_patients',
+        supabaseService.fetchAllPatients,
+      );
+      cloudSources = await measured(
+        'reconcile_supabase_fetch_sources',
+        supabaseService.fetchAllPatientSources,
+      );
     } catch (e) {
       lastSupabaseError = formatSupabaseError(e);
       debugPrint('Warning: unable to fetch from Supabase during sheet reconciliation: $lastSupabaseError');
     }
 
-    final localPatients = await database.getPatients();
-    final localSources = await database.getAllPatientSources();
-    final deletedTombstones = await database.getAllDeletedTombstoneSources();
+    final localPatients = await measured('reconcile_db_get_patients', () {
+      return database.getPatients();
+    });
+    final localSources = await measured('reconcile_db_get_sources', () {
+      return database.getAllPatientSources();
+    });
+    final deletedTombstones = await measured('reconcile_db_get_tombstones', () {
+      return database.getAllDeletedTombstoneSources();
+    });
+    trace?.addCount('sheetRecordsExamined', sheetPatients.length);
 
     // 2. Build in-memory indexes
     final cloudById = {for (final p in cloudPatients) p.id: p};
@@ -290,10 +309,16 @@ class PatientSyncService {
     bool supabaseSuccess = false;
     try {
       if (patientsToUpsert.isNotEmpty) {
-        await supabaseService.upsertPatients(patientsToUpsert);
+        await measured(
+          'reconcile_supabase_upsert_patients',
+          () => supabaseService.upsertPatients(patientsToUpsert),
+        );
       }
       if (sourcesToLink.isNotEmpty) {
-        await supabaseService.linkPatientSources(sourcesToLink);
+        await measured(
+          'reconcile_supabase_link_sources',
+          () => supabaseService.linkPatientSources(sourcesToLink),
+        );
       }
       supabaseSuccess = true;
     } catch (e) {
@@ -305,12 +330,17 @@ class PatientSyncService {
     final syncStatus = supabaseSuccess ? 'synced' : 'pending_cloud';
     final localPatientsToSave = patientsToUpsert.map((p) => p.copyWith(syncStatus: syncStatus)).toList();
     if (localPatientsToSave.isNotEmpty) {
-      for (final update in idUpdates) {
-        await database.updatePatientId(oldId: update.oldId, newId: update.newId);
-      }
-      await database.upsertPatients(localPatientsToSave);
-      await database.linkPatientSources(sourcesToLink);
+      await measured('reconcile_db_persist', () async {
+        for (final update in idUpdates) {
+          await database.updatePatientId(oldId: update.oldId, newId: update.newId);
+        }
+        await database.upsertPatients(localPatientsToSave);
+        await database.linkPatientSources(sourcesToLink);
+      });
     }
+    trace?.addCount('recordsLinked', linkedCount);
+    trace?.addCount('recordsCreated', createdCount);
+    trace?.addCount('recordsPersisted', localPatientsToSave.length);
 
     final cloudCount = cloudById.length;
     final isSynced = (lastSupabaseError == null) && (cloudCount > 0 || reconciled.isEmpty);
@@ -404,8 +434,16 @@ class PatientSyncService {
   /// 3. Pushes any locally created/updated patients marked 'pending_cloud' to Supabase.
   /// 4. Caches all active canonical cloud patients in SQLite.
   Future<void> syncLocalWithSupabase() async {
+    final trace = SyncDiagnostics.current;
+    Future<T> measured<T>(String name, Future<T> Function() action) {
+      return trace == null ? action() : trace.stage(name, action);
+    }
+
     // 0. Retry any pending cloud deletions first
-    final pendingDeletions = await database.getPendingDeletions();
+    final pendingDeletions = await measured('supabase_pending_deletions', () {
+      return database.getPendingDeletions();
+    });
+    trace?.addCount('pendingDeletions', pendingDeletions.length);
     for (final pendingId in pendingDeletions) {
       try {
         await supabaseService.deletePatient(pendingId);
@@ -419,14 +457,25 @@ class PatientSyncService {
     List<Patient> cloudPatients = const [];
     List<Map<String, String>> cloudSources = const [];
     try {
-      cloudPatients = await supabaseService.fetchAllPatients();
-      cloudSources = await supabaseService.fetchAllPatientSources();
+      cloudPatients = await measured(
+        'supabase_fetch_patients',
+        supabaseService.fetchAllPatients,
+      );
+      cloudSources = await measured(
+        'supabase_fetch_sources',
+        supabaseService.fetchAllPatientSources,
+      );
     } catch (e) {
       debugPrint('Supabase fetchAllPatients notice: $e');
       rethrow;
     }
 
-    final localPatients = await database.getPatients();
+    final localPatients = await measured('supabase_db_get_patients', () {
+      return database.getPatients();
+    });
+    trace?.addCount('cloudPatients', cloudPatients.length);
+    trace?.addCount('cloudSources', cloudSources.length);
+    trace?.addCount('localPatients', localPatients.length);
     final cloudById = {for (final p in cloudPatients) p.id: p};
     final cloudByBusinessId = <String, Patient>{};
     final cloudByPhone = <String, Patient>{};
@@ -468,7 +517,9 @@ class PatientSyncService {
     if (cloudPatients.isNotEmpty) {
       for (final local in localPatients) {
         if (local.syncStatus == 'synced' && !cloudById.containsKey(local.id)) {
-          final sources = await database.getSourcesForPatient(local.id);
+          final sources = await measured('supabase_db_get_deleted_sources', () {
+            return database.getSourcesForPatient(local.id);
+          });
           for (final s in sources) {
             final src = s['source'];
             final ext = s['external_id'];
@@ -488,13 +539,18 @@ class PatientSyncService {
             );
           }
           await database.recordDeletedTombstone(patientId: local.id);
-          await database.deletePatient(local.id);
+          await measured('supabase_db_delete_missing_patient', () {
+            return database.deletePatient(local.id);
+          });
+          trace?.addCount('cloudDeletionsPropagated');
         }
       }
     }
 
     // 3. Push any local patients pending cloud push
-    final currentLocalPatients = await database.getPatients();
+    final currentLocalPatients = await measured('supabase_db_get_push_candidates', () {
+      return database.getPatients();
+    });
     final List<Patient> toPush;
     if (cloudPatients.isEmpty && currentLocalPatients.isNotEmpty) {
       toPush = currentLocalPatients.where((p) => Patient.isValidUuid(p.id) && p.hasValidName).toList();
@@ -503,6 +559,7 @@ class PatientSyncService {
     }
 
     if (toPush.isNotEmpty) {
+      trace?.addCount('recordsToPush', toPush.length);
       final List<Patient> patientsToUpsert = [];
       final List<({String patientId, String source, String externalId})> sourcesToLink = [];
       final List<({String oldId, String newId})> idUpdates = [];
@@ -579,16 +636,24 @@ class PatientSyncService {
 
       // Batch persist to Supabase
       try {
-        await supabaseService.upsertPatients(patientsToUpsert);
+        await measured(
+          'supabase_push_patients',
+          () => supabaseService.upsertPatients(patientsToUpsert),
+        );
         if (sourcesToLink.isNotEmpty) {
-          await supabaseService.linkPatientSources(sourcesToLink);
+          await measured(
+            'supabase_push_sources',
+            () => supabaseService.linkPatientSources(sourcesToLink),
+          );
         }
-        for (final update in idUpdates) {
-          await database.updatePatientId(oldId: update.oldId, newId: update.newId);
-        }
-        for (final p in localPatientsToUpdate) {
-          await database.updatePatient(p);
-        }
+        await measured('supabase_db_apply_push', () async {
+          for (final update in idUpdates) {
+            await database.updatePatientId(oldId: update.oldId, newId: update.newId);
+          }
+          for (final p in localPatientsToUpdate) {
+            await database.updatePatient(p);
+          }
+        });
       } catch (e) {
         final lastPushError = formatSupabaseError(e);
         debugPrint('Failed to batch push patients to Supabase: $lastPushError');
@@ -598,7 +663,10 @@ class PatientSyncService {
 
     // 4. Cache canonical cloud patients in SQLite (using in-memory updated map)
     if (cloudById.isNotEmpty) {
-      await database.upsertPatients(cloudById.values.toList());
+      await measured('supabase_db_cache_cloud', () {
+        return database.upsertPatients(cloudById.values.toList());
+      });
     }
+    trace?.addCount('cloudPatientsCached', cloudById.length);
   }
 }

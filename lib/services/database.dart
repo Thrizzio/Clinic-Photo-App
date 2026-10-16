@@ -5,6 +5,7 @@ import 'package:uuid/uuid.dart';
 import '../models/capture_session.dart';
 import '../models/patient.dart';
 import '../models/upload_item.dart';
+import 'sync_diagnostics.dart';
 
 enum SearchFilterMode {
   all,
@@ -1074,6 +1075,7 @@ class SqliteAppDatabase implements AppDatabase {
 
   @override
   Future<void> upsertPatients(List<Patient> patients) async {
+    SyncDiagnostics.databaseOperation('sqlite.upsertPatients');
     await db.transaction((txn) async {
       for (final incoming in patients) {
         // 1. Check exact UUID match
@@ -1142,6 +1144,7 @@ class SqliteAppDatabase implements AppDatabase {
 
   @override
   Future<Patient?> getPatient(String id) async {
+    SyncDiagnostics.databaseOperation('sqlite.getPatient');
     final rows = await db.query(
       'patients',
       where: 'id = ?',
@@ -1188,6 +1191,7 @@ class SqliteAppDatabase implements AppDatabase {
     required String source,
     required String externalId,
   }) async {
+    SyncDiagnostics.databaseOperation('sqlite.linkPatientSource');
     final existing = await db.query(
       'patient_sources',
       where: 'source = ? AND external_id = ?',
@@ -1217,6 +1221,7 @@ class SqliteAppDatabase implements AppDatabase {
     required String source,
     required String externalId,
   }) async {
+    SyncDiagnostics.databaseOperation('sqlite.getPatientIdBySource');
     final rows = await db.query(
       'patient_sources',
       columns: ['patient_id'],
@@ -1235,6 +1240,7 @@ class SqliteAppDatabase implements AppDatabase {
 
   @override
   Future<List<Map<String, String>>> getSourcesForPatient(String patientId) async {
+    SyncDiagnostics.databaseOperation('sqlite.getSourcesForPatient');
     final rows = await db.query(
       'patient_sources',
       columns: ['source', 'external_id'],
@@ -1252,6 +1258,7 @@ class SqliteAppDatabase implements AppDatabase {
     List<({String patientId, String source, String externalId})> sources,
   ) async {
     if (sources.isEmpty) return;
+    SyncDiagnostics.databaseOperation('sqlite.linkPatientSources');
     const uuidGen = Uuid();
     final nowIso = DateTime.now().toIso8601String();
 
@@ -1286,6 +1293,7 @@ class SqliteAppDatabase implements AppDatabase {
 
   @override
   Future<List<Map<String, String>>> getAllPatientSources() async {
+    SyncDiagnostics.databaseOperation('sqlite.getAllPatientSources');
     final rows = await db.query(
       'patient_sources',
       columns: ['patient_id', 'source', 'external_id'],
@@ -1311,6 +1319,7 @@ class SqliteAppDatabase implements AppDatabase {
   @override
   Future<Patient?> getPatientByBusinessIdentity(String normalizedName, String? normalizedPhone) async {
     if (normalizedPhone == null || normalizedPhone.isEmpty) return null;
+    SyncDiagnostics.databaseOperation('sqlite.getPatientByBusinessIdentity');
     final rows = await db.query(
       'patients',
       where: 'normalized_name = ? AND normalized_phone = ?',
@@ -1323,6 +1332,7 @@ class SqliteAppDatabase implements AppDatabase {
 
   @override
   Future<List<Patient>> getPatients() async {
+    SyncDiagnostics.databaseOperation('sqlite.getPatients');
     final rows = await db.query(
       'patients',
       orderBy: 'display_name COLLATE NOCASE ASC, name COLLATE NOCASE ASC',
@@ -1467,6 +1477,7 @@ class SqliteAppDatabase implements AppDatabase {
 
   @override
   Future<void> updatePatient(Patient patient) async {
+    SyncDiagnostics.databaseOperation('sqlite.updatePatient');
     await db.update(
       'patients',
       patient.toMap(),
@@ -1477,6 +1488,7 @@ class SqliteAppDatabase implements AppDatabase {
 
   @override
   Future<void> updatePatientId({required String oldId, required String newId}) async {
+    SyncDiagnostics.databaseOperation('sqlite.updatePatientId');
     await db.transaction((txn) async {
       await txn.update('patients', {'id': newId}, where: 'id = ?', whereArgs: [oldId]);
       await txn.update('uploads', {'patient_id': newId}, where: 'patient_id = ?', whereArgs: [oldId]);
@@ -1487,6 +1499,7 @@ class SqliteAppDatabase implements AppDatabase {
 
   @override
   Future<void> deletePatient(String id) async {
+    SyncDiagnostics.databaseOperation('sqlite.deletePatient');
     await db.transaction((txn) async {
       await txn.delete('uploads', where: 'patient_id = ?', whereArgs: [id]);
       await txn.delete('capture_sessions', where: 'patient_id = ?', whereArgs: [id]);
@@ -1497,6 +1510,7 @@ class SqliteAppDatabase implements AppDatabase {
 
   @override
   Future<void> addPendingDeletion(String patientId) async {
+    SyncDiagnostics.databaseOperation('sqlite.addPendingDeletion');
     await db.insert(
       'pending_deletions',
       {
@@ -1509,12 +1523,14 @@ class SqliteAppDatabase implements AppDatabase {
 
   @override
   Future<List<String>> getPendingDeletions() async {
+    SyncDiagnostics.databaseOperation('sqlite.getPendingDeletions');
     final rows = await db.query('pending_deletions');
     return rows.map((r) => r['patient_id'].toString()).toList();
   }
 
   @override
   Future<void> removePendingDeletion(String patientId) async {
+    SyncDiagnostics.databaseOperation('sqlite.removePendingDeletion');
     await db.delete(
       'pending_deletions',
       where: 'patient_id = ?',
@@ -1528,6 +1544,7 @@ class SqliteAppDatabase implements AppDatabase {
     String? source,
     String? externalId,
   }) async {
+    SyncDiagnostics.databaseOperation('sqlite.recordDeletedTombstone');
     await db.insert('deleted_patient_tombstones', {
       'id': const Uuid().v4(),
       'patient_id': patientId,
@@ -1553,6 +1570,7 @@ class SqliteAppDatabase implements AppDatabase {
 
   @override
   Future<Set<String>> getAllDeletedTombstoneSources() async {
+    SyncDiagnostics.databaseOperation('sqlite.getAllDeletedTombstoneSources');
     final rows = await db.query(
       'deleted_patient_tombstones',
       columns: ['source', 'external_id'],
