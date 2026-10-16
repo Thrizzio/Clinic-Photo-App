@@ -174,6 +174,14 @@ class Patient {
   /// Whether a genuine clinical name is recorded for this patient.
   bool get hasValidName => isUsableName(_name, id, legacyPatientId);
 
+  /// Whether the record has enough usable identity data to be imported.
+  /// A normalized phone number is sufficient when a worksheet has no usable
+  /// name value or no name column at all.
+  bool get hasUsableIdentity {
+    final phone = normalizedPhone;
+    return hasValidName || (phone != null && phone.isNotEmpty);
+  }
+
   /// Formats a name for display: trims, collapses whitespace, and capitalizes
   /// each name part while preserving common separators such as hyphens and
   /// apostrophes (for example, `jOhN dOE` becomes `John Doe`).
@@ -298,6 +306,75 @@ class Patient {
     return normalizedPhone == otherNormPhone;
   }
 
+  /// Compares patients for the patient selector: newest records first.
+  ///
+  /// Records without a timestamp are treated as oldest. Patients with the
+  /// same timestamp use a deterministic, human-friendly tie-breaker (name,
+  /// then canonical ID) so SQLite and the in-memory database expose the same
+  /// order on every refresh.
+  static int compareByLastModified(Patient a, Patient b) {
+    final aUpdatedAt = a.updatedAt?.toUtc();
+    final bUpdatedAt = b.updatedAt?.toUtc();
+
+    if (aUpdatedAt == null && bUpdatedAt != null) return 1;
+    if (aUpdatedAt != null && bUpdatedAt == null) return -1;
+    if (aUpdatedAt != null && bUpdatedAt != null) {
+      final timestampComparison = bUpdatedAt.compareTo(aUpdatedAt);
+      if (timestampComparison != 0) return timestampComparison;
+    }
+
+    final nameComparison = a.displayName.toLowerCase().compareTo(
+          b.displayName.toLowerCase(),
+        );
+    if (nameComparison != 0) return nameComparison;
+
+    final displayNameComparison = a.displayName.compareTo(b.displayName);
+    if (displayNameComparison != 0) return displayNameComparison;
+
+    return a.id.compareTo(b.id);
+  }
+
+  /// Returns whether two records contain the same patient data.
+  ///
+  /// Timestamps and sync state are deliberately excluded: fetching an
+  /// unchanged remote record or marking a local write as synced must not make
+  /// the patient appear newly modified.
+  static bool hasSamePatientData(Patient a, Patient b) {
+    return a._name == b._name &&
+        a.normalizedName == b.normalizedName &&
+        a.phoneDisplay == b.phoneDisplay &&
+        a.normalizedPhone == b.normalizedPhone &&
+        a.legacyPatientId == b.legacyPatientId &&
+        a.source == b.source &&
+        a.driveFolderId?.trim() == b.driveFolderId?.trim() &&
+        a.folderStatus == b.folderStatus;
+  }
+
+  /// Chooses a canonical timestamp for a genuine record change.
+  ///
+  /// A newer timestamp supplied by the cloud is retained so devices converge
+  /// on the same value. Local changes fall back to the current UTC time. The
+  /// monotonic guard prevents a clock moving backwards from making a genuine
+  /// edit sort behind the previous version.
+  static DateTime timestampForChange({
+    required DateTime? previous,
+    DateTime? incoming,
+    DateTime? now,
+  }) {
+    final previousUtc = previous?.toUtc();
+    final incomingUtc = incoming?.toUtc();
+    if (incomingUtc != null &&
+        (previousUtc == null || incomingUtc.isAfter(previousUtc))) {
+      return incomingUtc;
+    }
+
+    var candidate = (now ?? DateTime.now()).toUtc();
+    if (previousUtc != null && !candidate.isAfter(previousUtc)) {
+      candidate = previousUtc.add(const Duration(microseconds: 1));
+    }
+    return candidate;
+  }
+
   /// Merges an existing cached Patient with an incoming Patient.
   /// Hard Invariant: If doctor-created patient matches an incoming Sheet patient,
   /// retains existing UUID, Drive folder, and sets legacyPatientId with source = merged.
@@ -358,7 +435,7 @@ class Patient {
         ? 'pending_cloud'
         : incoming.syncStatus;
 
-    return Patient(
+    final merged = Patient(
       id: existing.id, // Always retain existing local UUID
       name: mergedName,
       displayName: mergedName,
@@ -370,8 +447,19 @@ class Patient {
       driveFolderId: mergedFolderId,
       folderStatus: mergedStatus,
       createdAt: existing.createdAt,
-      updatedAt: DateTime.now(),
+      updatedAt: existing.updatedAt ?? incoming.updatedAt,
       syncStatus: mergedSyncStatus,
+    );
+
+    if (hasSamePatientData(existing, merged)) {
+      return merged;
+    }
+
+    return merged.copyWith(
+      updatedAt: timestampForChange(
+        previous: existing.updatedAt,
+        incoming: incoming.updatedAt,
+      ),
     );
   }
 
@@ -417,7 +505,7 @@ class Patient {
     final cleanP = cleanPhone(phoneDisplay);
     final normP = normalizedPhone ?? normalizePhone(cleanP);
     final createdIso = (createdAt ?? DateTime.now()).toIso8601String();
-    final updatedIso = (updatedAt ?? DateTime.now()).toIso8601String();
+    final updatedIso = updatedAt?.toUtc().toIso8601String();
     return {
       'id': id,
       'display_name': displayName,

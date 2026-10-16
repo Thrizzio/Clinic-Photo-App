@@ -277,6 +277,80 @@ void main() {
       expect(allCloud.first.displayName, 'Dr. Neha Kulkarni');
     });
 
+    test('A phone-only worksheet row is accepted and keeps the canonical UUID', () async {
+      const canonicalId = '88888888-8888-4888-8888-888888888888';
+      final existing = Patient(
+        id: canonicalId,
+        name: 'Existing Name',
+        phoneNumber: '+91 98765 43210',
+        source: PatientSource.doctorCreated,
+      );
+      await database.upsertPatients([existing]);
+      await supabaseService.upsertPatient(existing);
+
+      final result = await syncService.reconcileSheetPatients([
+        const Patient(
+          id: 'sheet-phone-only',
+          legacyPatientId: 'sheet-phone-only',
+          name: '',
+          phoneNumber: '09876543210',
+          source: PatientSource.clinicSheet,
+        ),
+      ]);
+
+      expect(result.linkedExistingCount, 1);
+      expect(result.createdNewCount, 0);
+      final patients = await database.getPatients();
+      expect(patients, hasLength(1));
+      expect(patients.single.id, canonicalId);
+      expect(patients.single.name, 'Existing Name');
+      expect(patients.single.normalizedPhone, '9876543210');
+    });
+
+    test('Name-only reconciliation falls back only when the name is unambiguous', () async {
+      final unique = Patient(
+        id: '99999999-9999-4999-8999-999999999999',
+        name: 'Unique Name',
+        source: PatientSource.doctorCreated,
+      );
+      final duplicateA = Patient(
+        id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        name: 'Shared Name',
+        phoneNumber: '9000000001',
+        source: PatientSource.doctorCreated,
+      );
+      final duplicateB = Patient(
+        id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+        name: 'Shared Name',
+        phoneNumber: '9000000002',
+        source: PatientSource.doctorCreated,
+      );
+      await database.upsertPatients([unique, duplicateA, duplicateB]);
+      await supabaseService.upsertPatients([unique, duplicateA, duplicateB]);
+
+      final uniqueResult = await syncService.reconcileSheetPatients([
+        const Patient(
+          id: 'sheet-unique',
+          legacyPatientId: 'sheet-unique',
+          name: '  UNIQUE   NAME ',
+          source: PatientSource.clinicSheet,
+        ),
+      ]);
+      expect(uniqueResult.linkedExistingCount, 1);
+      expect(uniqueResult.createdNewCount, 0);
+
+      final ambiguousResult = await syncService.reconcileSheetPatients([
+        const Patient(
+          id: 'sheet-shared',
+          legacyPatientId: 'sheet-shared',
+          name: 'Shared Name',
+          source: PatientSource.clinicSheet,
+        ),
+      ]);
+      expect(ambiguousResult.linkedExistingCount, 0);
+      expect(ambiguousResult.createdNewCount, 1);
+    });
+
     test('Multi-phone synchronization: Phone A creates patient -> Supabase -> Phone B receives same UUID', () async {
       final dbPhoneA = InMemoryAppDatabase();
       final dbPhoneB = InMemoryAppDatabase();

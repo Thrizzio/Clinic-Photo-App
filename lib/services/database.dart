@@ -21,6 +21,27 @@ enum SearchFilterMode {
       };
 }
 
+/// Applies the timestamp policy at a direct local write boundary.
+///
+/// Callers often copy a cached patient and change one field without manually
+/// supplying a new timestamp. A real data change must still move the record
+/// forward, while sync-status-only writes and unchanged remote fetches must
+/// retain the previous timestamp.
+Patient _patientForLocalWrite(Patient existing, Patient candidate) {
+  final sameData = Patient.hasSamePatientData(existing, candidate);
+  final updatedAt = sameData
+      ? (existing.updatedAt ?? candidate.updatedAt)
+      : Patient.timestampForChange(
+          previous: existing.updatedAt,
+          incoming: candidate.updatedAt,
+        );
+
+  return candidate.copyWith(
+    createdAt: candidate.createdAt ?? existing.createdAt,
+    updatedAt: updatedAt,
+  );
+}
+
 /// Abstract contract for clinic data storage.
 abstract class AppDatabase {
   // --- Patients Cache Operations ---
@@ -40,7 +61,7 @@ abstract class AppDatabase {
   /// Retrieves a patient by exact business identity (normalized name + normalized phone).
   Future<Patient?> getPatientByBusinessIdentity(String normalizedName, String? normalizedPhone);
 
-  /// Retrieves all cached patients sorted by name.
+  /// Retrieves all cached patients sorted by canonical last-modified time.
   Future<List<Patient>> getPatients();
 
   /// Search patients with optional filter mode (All, Name, Phone, Patient ID).
@@ -883,6 +904,9 @@ class SqliteAppDatabase implements AppDatabase {
 
       final oldName = (row['display_name'] ?? row['name'] ?? '').toString();
       final hasUsable = Patient.isUsableName(oldName, oldId);
+      final oldPhone = (row['phone_display'] ?? row['phone_number'])?.toString();
+      final hasUsableIdentity = hasUsable ||
+          (Patient.normalizePhone(oldPhone)?.isNotEmpty ?? false);
 
       // Check if patient has any uploads or capture sessions
       final uploadCount = Sqflite.firstIntValue(await db.rawQuery(
@@ -894,7 +918,7 @@ class SqliteAppDatabase implements AppDatabase {
         [oldId],
       )) ?? 0;
 
-      if (!hasUsable && uploadCount == 0 && sessionCount == 0) {
+      if (!hasUsableIdentity && uploadCount == 0 && sessionCount == 0) {
         // Discard unusable placeholder rows that have zero photos and zero sessions
         await db.delete('patients', where: 'id = ?', whereArgs: [oldId]);
         continue;
@@ -1008,8 +1032,11 @@ class SqliteAppDatabase implements AppDatabase {
       final name = (row['display_name'] ?? row['name'] ?? '').toString();
       final legacyId = row['legacy_patient_id']?.toString();
       final isUsable = Patient.isUsableName(name, id, legacyId);
+      final phone = (row['phone_display'] ?? row['phone_number'])?.toString();
+      final hasUsableIdentity = isUsable ||
+          (Patient.normalizePhone(phone)?.isNotEmpty ?? false);
 
-      if (isUsable) continue;
+      if (hasUsableIdentity) continue;
 
       final source = row['source']?.toString() ?? '';
       final isDoctorCreated = source == PatientSource.doctorCreated.name ||
@@ -1333,11 +1360,10 @@ class SqliteAppDatabase implements AppDatabase {
   @override
   Future<List<Patient>> getPatients() async {
     SyncDiagnostics.databaseOperation('sqlite.getPatients');
-    final rows = await db.query(
-      'patients',
-      orderBy: 'display_name COLLATE NOCASE ASC, name COLLATE NOCASE ASC',
-    );
-    return rows.map(Patient.fromMap).toList();
+    final rows = await db.query('patients');
+    final patients = rows.map(Patient.fromMap).toList();
+    patients.sort(Patient.compareByLastModified);
+    return patients;
   }
 
   @override
@@ -1391,9 +1417,10 @@ class SqliteAppDatabase implements AppDatabase {
       'patients',
       where: whereClause,
       whereArgs: whereArgs,
-      orderBy: 'display_name COLLATE NOCASE ASC, name COLLATE NOCASE ASC',
     );
-    return rows.map(Patient.fromMap).toList();
+    final patients = rows.map(Patient.fromMap).toList();
+    patients.sort(Patient.compareByLastModified);
+    return patients;
   }
 
   // --- Capture Sessions Operations ---
@@ -1478,9 +1505,18 @@ class SqliteAppDatabase implements AppDatabase {
   @override
   Future<void> updatePatient(Patient patient) async {
     SyncDiagnostics.databaseOperation('sqlite.updatePatient');
+    final existingRows = await db.query(
+      'patients',
+      where: 'id = ?',
+      whereArgs: [patient.id],
+      limit: 1,
+    );
+    final persisted = existingRows.isEmpty
+        ? patient
+        : _patientForLocalWrite(Patient.fromMap(existingRows.first), patient);
     await db.update(
       'patients',
-      patient.toMap(),
+      persisted.toMap(),
       where: 'id = ?',
       whereArgs: [patient.id],
     );
@@ -2146,11 +2182,7 @@ class InMemoryAppDatabase implements AppDatabase {
   @override
   Future<List<Patient>> getPatients() async {
     final list = _patients.values.toList();
-    list.sort((a, b) {
-      final cmp = a.displayName.toLowerCase().compareTo(b.displayName.toLowerCase());
-      if (cmp != 0) return cmp;
-      return a.id.compareTo(b.id);
-    });
+    list.sort(Patient.compareByLastModified);
     return list;
   }
 
@@ -2182,11 +2214,7 @@ class InMemoryAppDatabase implements AppDatabase {
       };
     }).toList();
 
-    matches.sort((a, b) {
-      final cmp = a.displayName.toLowerCase().compareTo(b.displayName.toLowerCase());
-      if (cmp != 0) return cmp;
-      return a.id.compareTo(b.id);
-    });
+    matches.sort(Patient.compareByLastModified);
     return matches;
   }
 
@@ -2248,7 +2276,10 @@ class InMemoryAppDatabase implements AppDatabase {
 
   @override
   Future<void> updatePatient(Patient patient) async {
-    _patients[patient.id] = patient;
+    final existing = _patients[patient.id];
+    _patients[patient.id] = existing == null
+        ? patient
+        : _patientForLocalWrite(existing, patient);
   }
 
   @override

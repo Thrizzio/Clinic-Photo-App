@@ -160,15 +160,19 @@ class RemoteSupabasePatientService implements SupabasePatientService {
       );
     }
 
-    final nowIso = DateTime.now().toUtc().toIso8601String();
     final rowData = <String, dynamic>{
       'id': patient.id,
       'display_name': patient.displayName,
       'normalized_name': patient.normalizedName,
       'phone_display': patient.phoneDisplay,
       'normalized_phone': patient.normalizedPhone,
-      'updated_at': nowIso,
     };
+    // The local reconciliation layer owns the canonical timestamp. Omitting
+    // it for a legacy/partial record lets Supabase keep the existing value on
+    // conflict instead of turning every unchanged fetch into an edit.
+    if (patient.updatedAt != null) {
+      rowData['updated_at'] = patient.updatedAt!.toUtc().toIso8601String();
+    }
     // CRITICAL: Only include drive_folder_id if non-empty, so PostgREST conflict update
     // never overwrites an existing valid cloud drive_folder_id with null.
     if (patient.driveFolderId != null && patient.driveFolderId!.trim().isNotEmpty) {
@@ -210,7 +214,6 @@ class RemoteSupabasePatientService implements SupabasePatientService {
       }
     }
 
-    final nowIso = DateTime.now().toUtc().toIso8601String();
     final rowsData = patients.map((patient) {
       final map = <String, dynamic>{
         'id': patient.id,
@@ -218,8 +221,10 @@ class RemoteSupabasePatientService implements SupabasePatientService {
         'normalized_name': patient.normalizedName,
         'phone_display': patient.phoneDisplay,
         'normalized_phone': patient.normalizedPhone,
-        'updated_at': nowIso,
       };
+      if (patient.updatedAt != null) {
+        map['updated_at'] = patient.updatedAt!.toUtc().toIso8601String();
+      }
       if (patient.driveFolderId != null && patient.driveFolderId!.trim().isNotEmpty) {
         map['drive_folder_id'] = patient.driveFolderId!.trim();
       }
@@ -512,10 +517,13 @@ class InMemorySupabasePatientService implements SupabasePatientService {
       effectiveStatus = FolderStatus.missing;
     }
 
-    final merged = patient.copyWith(
+    final folderResolved = patient.copyWith(
       driveFolderId: effectiveFolderId,
       folderStatus: effectiveStatus,
     );
+    final merged = existing == null
+        ? folderResolved
+        : Patient.merge(existing, folderResolved).copyWith(id: patient.id);
     _patients[patient.id] = merged;
     return merged;
   }

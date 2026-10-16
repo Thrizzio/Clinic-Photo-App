@@ -70,22 +70,15 @@ void main() {
       expect(indices.folderColIndex, 2);
     });
 
-    test('throws MissingColumnException when Patient ID is missing', () {
+    test('allows a supported table without Patient ID when Patient Name is present', () {
       final headers = ['Patient Name', 'Drive Folder ID'];
-
-      expect(
-        () => SheetsService.parseHeaderIndices(headers),
-        throwsA(
-          isA<MissingColumnException>().having(
-            (e) => e.missingColumn,
-            'missingColumn',
-            AppConfig.patientIdHeader,
-          ),
-        ),
-      );
+      final indices = SheetsService.parseHeaderIndices(headers);
+      expect(indices.idColIndex, -1);
+      expect(indices.nameColIndex, 0);
+      expect(indices.folderColIndex, 1);
     });
 
-    test('throws MissingColumnException when Patient Name is missing', () {
+    test('throws a clear identity error when both Patient Name and Phone are missing', () {
       final headers = ['Patient ID', 'Drive Folder ID'];
 
       expect(
@@ -94,10 +87,19 @@ void main() {
           isA<MissingColumnException>().having(
             (e) => e.missingColumn,
             'missingColumn',
-            AppConfig.patientNameHeader,
+            'Patient Name or Phone Number',
           ),
         ),
       );
+    });
+
+    test('allows a supported table with only a phone column', () {
+      final headers = ['Phone Number', 'Drive Folder ID'];
+      final indices = SheetsService.parseHeaderIndices(headers);
+      expect(indices.idColIndex, -1);
+      expect(indices.nameColIndex, -1);
+      expect(indices.phoneColIndex, 0);
+      expect(indices.folderColIndex, 1);
     });
   });
 
@@ -206,26 +208,20 @@ void main() {
       expect(indices.folderColIndex, 2);
     });
 
-    test('TEST 8: Required Patient ID header is genuinely absent', () {
+    test('TEST 8: Patient ID is optional when Patient Name is present', () {
       final rows = [
         ['Clinic Title'],
         ['Patient Name', 'Visit Date', 'Photos (Drive)'],
         ['John Doe', '2026-09-28', 'https://drive.google.com/drive/folders/1ABC'],
       ];
 
-      expect(
-        () => SheetsService.discoverHeaderIndices(rows),
-        throwsA(
-          isA<MissingColumnException>().having(
-            (e) => e.missingColumn,
-            'missingColumn',
-            AppConfig.patientIdHeader,
-          ),
-        ),
-      );
+      final indices = SheetsService.discoverHeaderIndices(rows);
+      expect(indices.idColIndex, -1);
+      expect(indices.nameColIndex, 0);
+      expect(indices.headerRowNumber, 2);
     });
 
-    test('TEST 9: Patient ID exists but Patient Name is missing', () {
+    test('TEST 9: Patient ID exists but both identity columns are missing', () {
       final rows = [
         ['Clinic Title'],
         ['Patient ID', 'Visit Date', 'Photos (Drive)'],
@@ -238,13 +234,37 @@ void main() {
           isA<MissingColumnException>().having(
             (e) => e.missingColumn,
             'missingColumn',
-            AppConfig.patientNameHeader,
+            'Patient Name or Phone Number',
           ),
         ),
       );
     });
 
-    test('TEST 10: Photos (Drive) exists in column O (index 14)', () {
+    test('TEST 10: Phone-only table discovers the actual phone column without Patient ID', () {
+      final rows = [
+        ['Phone Number', 'Notes', 'Drive Folder ID'],
+        ['+91 98765 43210', 'walk-in', 'folder-phone-12345'],
+      ];
+
+      final indices = SheetsService.discoverHeaderIndices(rows);
+      expect(indices.idColIndex, -1);
+      expect(indices.nameColIndex, -1);
+      expect(indices.phoneColIndex, 0);
+      expect(indices.folderColIndex, 2);
+
+      final patients = SheetsService.resolvePatientsFromVisits(
+        rows: rows,
+        headerIndices: indices,
+      );
+      expect(patients, hasLength(1));
+      final patient = patients.values.single;
+      expect(patient.hasValidName, isFalse);
+      expect(patient.hasUsableIdentity, isTrue);
+      expect(patient.normalizedPhone, '9876543210');
+      expect(patient.driveFolderId, 'folder-phone-12345');
+    });
+
+    test('TEST 11: Photos (Drive) exists in column O (index 14)', () {
       final row8 = List<dynamic>.filled(15, '');
       row8[1] = 'Patient ID';
       row8[2] = 'Patient Name';

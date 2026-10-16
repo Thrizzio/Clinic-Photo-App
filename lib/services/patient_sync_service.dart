@@ -194,8 +194,9 @@ class PatientSyncService {
 
     // 3. Process sheet patients entirely in memory
     for (final incoming in sheetPatients) {
-      // Skip rows with no usable patient name - do not create "Name unavailable" patients
-      if (!incoming.hasValidName || incoming.displayName == 'Name unavailable') {
+      // Skip rows with no usable identity. A valid normalized phone is enough
+      // when a selected worksheet has no usable name value.
+      if (!incoming.hasUsableIdentity) {
         continue;
       }
 
@@ -558,7 +559,9 @@ class PatientSyncService {
     });
     final List<Patient> toPush;
     if (cloudPatients.isEmpty && currentLocalPatients.isNotEmpty) {
-      toPush = currentLocalPatients.where((p) => Patient.isValidUuid(p.id) && p.hasValidName).toList();
+      toPush = currentLocalPatients
+          .where((p) => Patient.isValidUuid(p.id) && p.hasUsableIdentity)
+          .toList();
     } else {
       toPush = currentLocalPatients.where((p) => p.syncStatus == 'pending_cloud' && Patient.isValidUuid(p.id)).toList();
     }

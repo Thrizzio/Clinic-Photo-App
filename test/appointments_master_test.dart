@@ -30,6 +30,47 @@ void main() {
       expect(kajal.legacyPatientId, '2000013');
       expect(kajal.driveFolderId, isNull);
       expect(kajal.folderStatus.name, 'conflict');
+
+      final phoneOnly = patients['phone:9876543210']!;
+      expect(phoneOnly.hasValidName, isFalse);
+      expect(phoneOnly.hasUsableIdentity, isTrue);
+      expect(phoneOnly.normalizedPhone, '9876543210');
+    });
+
+    test('recognizes appointment headers regardless of worksheet title and skips unusable rows', () {
+      final rows = [
+        ['Report export'],
+        ['Phone Number', 'Patient Name', 'Appointment ID'],
+        ['+91 98765 43210', '', '400001'],
+        ['', '   ', '400002'],
+      ];
+
+      expect(SheetsService.hasAppointmentTableHeaders(rows), isTrue);
+      final patients = SheetsService.resolvePatientsFromAppointments(rows);
+      expect(patients, hasLength(1));
+      expect(patients.values.single.normalizedPhone, '9876543210');
+      expect(patients.values.single.hasUsableIdentity, isTrue);
+    });
+
+    test('does not treat a Patients directory row with Patient ID as an appointment table', () {
+      expect(
+        SheetsService.hasAppointmentTableHeaders([
+          ['Appointment ID', 'Patient ID', 'Patient Name', 'Phone Number'],
+        ]),
+        isFalse,
+      );
+    });
+
+    test('retains support for legacy Appointments tabs without an appointment ID column', () {
+      expect(
+        SheetsService.hasAppointmentTableHeaders(
+          [
+            ['Patient Name', 'Phone Number'],
+          ],
+          allowMissingAppointmentId: true,
+        ),
+        isTrue,
+      );
     });
 
     test('joins blank-phone rows to the only matching normalized phone group', () {

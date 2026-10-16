@@ -106,16 +106,17 @@ class _ClinicSetupScreenState extends State<ClinicSetupScreen> {
         throw Exception('No sheets found in this spreadsheet.');
       }
 
-      final appointmentTab = tabs.firstWhere(
-        SheetsService.isAppointmentsTab,
-        orElse: () => '',
-      );
       setState(() {
-        // Appointments is the master patient view. Keep the legacy tab picker
-        // only for older workbooks that genuinely have no Appointments tab;
-        // Visits is still read by SheetsService solely for folder enrichment.
-        _availableTabs = appointmentTab.isNotEmpty ? [appointmentTab] : tabs;
-        _selectedTab = appointmentTab.isNotEmpty ? appointmentTab : tabs.first;
+        // Keep every worksheet available. The selected table's actual headers
+        // determine the supported parser; tab names are only labels.
+        _availableTabs = tabs;
+        final configuredTab = widget.isReconfiguration
+            ? widget.configService.loadConfig().sheetTabName
+            : '';
+        _selectedTab = tabs.firstWhere(
+          (tab) => tab.trim().toLowerCase() == configuredTab.trim().toLowerCase(),
+          orElse: () => tabs.first,
+        );
         _currentStep = _SetupStep.selectTab;
         _isLoading = false;
       });
@@ -161,6 +162,11 @@ class _ClinicSetupScreenState extends State<ClinicSetupScreen> {
         _isLoading = false;
       });
     } on MissingColumnException catch (e) {
+      setState(() {
+        _isLoading = false;
+        _errorMessage = e.toString();
+      });
+    } on NoUsablePatientIdentityException catch (e) {
       setState(() {
         _isLoading = false;
         _errorMessage = e.toString();
@@ -365,12 +371,12 @@ class _ClinicSetupScreenState extends State<ClinicSetupScreen> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         const Text(
-          'Select Appointments Sheet',
+          'Select Patient Sheet',
           style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
         ),
         const SizedBox(height: 8),
         Text(
-          'Appointments is the patient master. The legacy Visits tab is used only to retain existing Drive folder links.',
+          'Select the worksheet or table that contains the clinic patient information. The app detects supported columns from the selected table.',
           style: TextStyle(color: Theme.of(context).colorScheme.onSurfaceVariant, fontSize: 15),
         ),
         const SizedBox(height: 16),

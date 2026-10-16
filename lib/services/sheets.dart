@@ -27,6 +27,15 @@ class MissingColumnException implements Exception {
   String toString() => 'This sheet is missing a required column: $missingColumn';
 }
 
+/// Raised when a selected worksheet has identity columns but no usable patient
+/// values. A header-only or formula-empty table must not silently complete
+/// clinic setup with an empty patient registry.
+class NoUsablePatientIdentityException implements Exception {
+  @override
+  String toString() =>
+      'The selected sheet must contain at least one row with a usable Patient Name or Phone Number.';
+}
+
 class HeaderIndices {
   final int idColIndex;
   final int nameColIndex;
@@ -76,11 +85,12 @@ class IncrementalSyncResult {
 
 class _PatientGroupData {
   final String id;
+  final String? legacyId;
   String name = '';
   String? phoneNumber;
   final Set<String> folderIds = {};
 
-  _PatientGroupData({required this.id});
+  _PatientGroupData({required this.id, this.legacyId});
 }
 
 class _AppointmentGroupData {
@@ -226,6 +236,38 @@ class SheetsService {
   static bool isVisitsTab(String title) {
     final norm = title.trim().toLowerCase();
     return norm == 'visits' || norm == 'visit log' || norm.contains('visit');
+  }
+
+  /// Detects an appointment-style table from its actual headers rather than
+  /// relying on the worksheet title. This keeps renamed/reordered worksheets
+  /// selectable while preserving the appointment parser's identity rules.
+  ///
+  /// [allowMissingAppointmentId] is retained for legacy Appointments tabs that
+  /// contain only name/phone headers and therefore use deterministic row IDs.
+  static bool hasAppointmentTableHeaders(
+    List<List<dynamic>> rows, {
+    bool allowMissingAppointmentId = false,
+  }) {
+    for (final row in rows) {
+      var hasAppointmentId = false;
+      var hasPatientId = false;
+      var hasIdentity = false;
+      for (final cell in row) {
+        final header = normalizeHeader(cell?.toString() ?? '');
+        hasAppointmentId = hasAppointmentId || isAppointmentHeader(header);
+        hasPatientId = hasPatientId ||
+            header == normalizeHeader(AppConfig.patientIdHeader);
+        hasIdentity = hasIdentity ||
+            header == normalizeHeader(AppConfig.patientNameHeader) ||
+            header == 'name' ||
+            isPhoneHeader(header);
+      }
+      if (!hasPatientId && hasIdentity &&
+          (hasAppointmentId || allowMissingAppointmentId)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   static int? _findPhoneColIndex(Map<String, int> columnMap) {
@@ -474,7 +516,11 @@ class SheetsService {
   }
 
   /// Parses a single header row into a [HeaderIndices] object.
-  /// Throws [MissingColumnException] if Patient ID, Patient Name, or Photos (Drive) is missing.
+  ///
+  /// Patient ID is optional for appointment-style and lightweight patient
+  /// tables. At least one of Patient Name or a supported phone header is
+  /// required so the resulting rows have a usable identity. Photos (Drive)
+  /// remains optional unless [requireFolderColumn] is explicitly requested.
   static HeaderIndices parseHeaderIndices(
     List<dynamic> rawHeaderRow, {
     int headerRowIndex = 0,
@@ -496,11 +542,8 @@ class SheetsService {
         -1;
     final phoneColIndex = _findPhoneColIndex(columnMap);
 
-    if (idColIndex == -1) {
-      throw MissingColumnException(AppConfig.patientIdHeader);
-    }
-    if (nameColIndex == -1) {
-      throw MissingColumnException(AppConfig.patientNameHeader);
+    if (nameColIndex == -1 && phoneColIndex == null) {
+      throw MissingColumnException('${AppConfig.patientNameHeader} or Phone Number');
     }
     if (requireFolderColumn && folderColIndex == -1) {
       throw MissingColumnException(AppConfig.photosDriveHeader);
@@ -518,9 +561,11 @@ class SheetsService {
 
   /// Discovers the header row dynamically from a list of rows.
   ///
-  /// Searches for the row that contains all required columns (Patient ID, Patient Name,
-  /// and optionally Photos (Drive) / Drive Folder ID). If found, returns the [HeaderIndices] with the
-  /// discovered row index and column positions.
+  /// Searches for the row that contains the required identity columns
+  /// (Patient Name or a supported phone header) and optionally Photos (Drive)
+  /// / Drive Folder ID. Patient ID is optional for supported worksheet
+  /// formats. If found, returns the [HeaderIndices] with the discovered row
+  /// index and column positions.
   ///
   /// If no row contains all required headers, evaluates the best candidate row and throws
   /// [MissingColumnException] indicating the missing column.
@@ -529,7 +574,7 @@ class SheetsService {
     bool requireFolderColumn = false,
   }) {
     if (rows.isEmpty) {
-      throw MissingColumnException(AppConfig.patientIdHeader);
+      throw MissingColumnException('${AppConfig.patientNameHeader} or Phone Number');
     }
 
     int bestMatchCount = -1;
@@ -553,10 +598,12 @@ class SheetsService {
       final folderIdx = columnMap[normalizeHeader(AppConfig.photosDriveHeader)] ??
           columnMap[normalizeHeader(AppConfig.legacyDriveFolderIdHeader)] ??
           -1;
+      final phoneIdx = _findPhoneColIndex(columnMap);
 
       int matchCount = 0;
       if (idIdx != -1) matchCount++;
       if (nameIdx != -1) matchCount++;
+      if (phoneIdx != null) matchCount++;
       if (folderIdx != -1) matchCount++;
 
       if (matchCount > bestMatchCount) {
@@ -564,10 +611,11 @@ class SheetsService {
         bestCandidateIndex = r;
       }
 
-      // If required columns (and folder if required) are present, this is our header row
-      final hasRequired = idIdx != -1 && nameIdx != -1 && (!requireFolderColumn || folderIdx != -1);
+      // If an identity column (and folder if required) is present, this is our
+      // header row. Patient ID is deliberately not required here.
+      final hasIdentityColumn = nameIdx != -1 || phoneIdx != null;
+      final hasRequired = hasIdentityColumn && (!requireFolderColumn || folderIdx != -1);
       if (hasRequired) {
-        final phoneIdx = _findPhoneColIndex(columnMap);
         final indices = HeaderIndices(
           idColIndex: idIdx,
           nameColIndex: nameIdx,
@@ -616,15 +664,16 @@ class SheetsService {
   }) {
     final effectiveStartIndex = startRowIndex ?? (headerIndices.headerRowIndex + 1);
     final patientData = <String, _PatientGroupData>{};
+    final hasPatientIdColumn = headerIndices.idColIndex >= 0;
 
     for (int i = effectiveStartIndex; i < rows.length; i++) {
       final row = rows[i];
       if (row.isEmpty) continue;
 
-      final id = headerIndices.idColIndex < row.length
+      final id = hasPatientIdColumn && headerIndices.idColIndex < row.length
           ? row[headerIndices.idColIndex]?.toString().trim() ?? ''
           : '';
-      final name = headerIndices.nameColIndex < row.length
+      final name = headerIndices.nameColIndex >= 0 && headerIndices.nameColIndex < row.length
           ? row[headerIndices.nameColIndex]?.toString().trim() ?? ''
           : '';
       final rawFolder = (headerIndices.folderColIndex != -1 && headerIndices.folderColIndex < row.length)
@@ -634,35 +683,63 @@ class SheetsService {
           ? row[headerIndices.phoneColIndex!]?.toString()
           : null;
 
-      if (id.isEmpty) continue;
+      // Preserve the legacy rule for a table that has a Patient ID column:
+      // rows with a blank ID are not visit records. A table without that
+      // column is keyed below by normalized phone or name instead.
+      if (hasPatientIdColumn && id.isEmpty) continue;
 
-      // Filter out header tokens if encountered in data rows (e.g. incremental chunks or duplicate headers)
-      final normalizedId = normalizeHeader(id);
-      if (normalizedId == 'patient id' ||
-          normalizedId == 'id' ||
-          normalizedId == 'patient' ||
-          normalizedId == 'total' ||
-          normalizedId == 'totals' ||
-          normalizedId == 'count' ||
-          normalizedId == 'summary') {
+      String cleanId = id;
+      if (cleanId.isNotEmpty) {
+        // Filter out header tokens if encountered in data rows (e.g.
+        // incremental chunks or duplicate headers).
+        final normalizedId = normalizeHeader(cleanId);
+        if (normalizedId == 'patient id' ||
+            normalizedId == 'id' ||
+            normalizedId == 'patient' ||
+            normalizedId == 'total' ||
+            normalizedId == 'totals' ||
+            normalizedId == 'count' ||
+            normalizedId == 'summary') {
+          continue;
+        }
+
+        // Normalize numeric ID if formatted as float by Google Sheets (e.g.
+        // 1000001.0 -> 1000001).
+        if (RegExp(r'^\d+\.0$').hasMatch(cleanId)) {
+          cleanId = cleanId.substring(0, cleanId.length - 2);
+        }
+      }
+
+      final cleanName = Patient.isUsableName(name, cleanId.isNotEmpty ? cleanId : null)
+          ? name
+          : '';
+      final cleanPhone = Patient.cleanPhone(rawPhone);
+      final normalizedName = Patient.normalizeName(cleanName);
+      final normalizedPhone = Patient.normalizePhone(cleanPhone);
+
+      // A row must have at least one usable name or phone value. For a
+      // no-ID table use the strongest identity as the deterministic group key
+      // so repeated rows are reconciled as one patient.
+      if (cleanId.isEmpty && normalizedPhone == null && normalizedName.isEmpty) {
         continue;
       }
+      final groupKey = cleanId.isNotEmpty
+          ? 'id:$cleanId'
+          : (normalizedPhone != null && normalizedPhone.isNotEmpty
+              ? 'phone:$normalizedPhone'
+              : 'name:$normalizedName');
+      final entry = patientData.putIfAbsent(
+        groupKey,
+        () => _PatientGroupData(
+          id: cleanId.isNotEmpty ? cleanId : groupKey,
+          legacyId: cleanId.isNotEmpty ? cleanId : null,
+        ),
+      );
 
-      // Normalize numeric ID if formatted as float by Google Sheets (e.g. 1000001.0 -> 1000001)
-      String cleanId = id;
-      if (RegExp(r'^\d+\.0$').hasMatch(cleanId)) {
-        cleanId = cleanId.substring(0, cleanId.length - 2);
-      }
-
-      final entry = patientData.putIfAbsent(cleanId, () => _PatientGroupData(id: cleanId));
-      final cleanName = name.trim();
-      if (cleanName.isNotEmpty &&
-          cleanName != 'Patient $cleanId' &&
-          cleanName != 'Patient') {
+      if (cleanName.isNotEmpty && entry.name.isEmpty) {
         entry.name = cleanName;
       }
 
-      final cleanPhone = Patient.cleanPhone(rawPhone);
       if (cleanPhone != null && cleanPhone.isNotEmpty) {
         entry.phoneNumber = cleanPhone;
       }
@@ -685,14 +762,14 @@ class SheetsService {
           ? FolderStatus.missing
           : (entry.folderIds.length == 1 ? FolderStatus.available : FolderStatus.conflict);
 
-      result[entry.id] = Patient(
+      result[entry.legacyId ?? entry.id] = Patient(
         id: entry.id,
         name: resolvedName,
         displayName: resolvedName,
         normalizedName: Patient.normalizeName(resolvedName),
         phoneDisplay: entry.phoneNumber,
         normalizedPhone: normPhone,
-        legacyPatientId: entry.id,
+        legacyPatientId: entry.legacyId,
         source: PatientSource.clinicSheet,
         driveFolderId: folderId,
         folderStatus: folderStatus,
@@ -756,7 +833,7 @@ class SheetsService {
     final sheetsApi = sheets.SheetsApi(client);
     final tabs = await fetchSheetTabs(client: client, spreadsheetId: spreadsheetId);
     final effectiveSheetName = tabs.firstWhere(
-      isAppointmentsTab,
+      (tab) => tab.trim().toLowerCase() == sheetName.trim().toLowerCase(),
       orElse: () => sheetName,
     );
     SyncDiagnostics.networkRequest('sheets', 'values.get.master');
@@ -767,15 +844,15 @@ class SheetsService {
     final rawRows = valueRange.values;
 
     if (rawRows == null || rawRows.isEmpty) {
-      return const SheetParseResult(
-        patients: [],
-        totalRows: 0,
-        effectiveSheetName: null,
-      );
+      throw NoUsablePatientIdentityException();
     }
 
     final rows = rawRows.cast<List<dynamic>>();
-    final isAppointmentMaster = isAppointmentsTab(effectiveSheetName);
+    // Use the selected table's actual headers, not its worksheet title. This
+    // preserves support for renamed/reordered worksheets and tables.
+    final isAppointmentMaster = hasAppointmentTableHeaders(rows) ||
+        (isAppointmentsTab(effectiveSheetName) &&
+            hasAppointmentTableHeaders(rows, allowMissingAppointmentId: true));
     final HeaderIndices? headerIndices;
     final Map<String, Patient> patientsMap;
     if (isAppointmentMaster) {
@@ -882,8 +959,13 @@ class SheetsService {
       }
     }
 
+    final validatedPatients = patientsMap.values.where((p) => p.hasUsableIdentity).toList();
+    if (validatedPatients.isEmpty) {
+      throw NoUsablePatientIdentityException();
+    }
+
     return SheetParseResult(
-      patients: patientsMap.values.where((p) => p.hasValidName).toList(),
+      patients: validatedPatients,
       totalRows: rows.length,
       headerIndices: headerIndices,
       effectiveSheetName: effectiveSheetName,
@@ -1303,7 +1385,7 @@ class SheetsService {
         spreadsheetId: spreadsheetId,
       );
       final effectiveSheetName = tabs.firstWhere(
-        isAppointmentsTab,
+        (tab) => tab.trim().toLowerCase() == sheetName.trim().toLowerCase(),
         orElse: () => sheetName,
       );
       SyncDiagnostics.networkRequest('sheets', 'values.batchGet.incremental');
@@ -1321,21 +1403,28 @@ class SheetsService {
       final headerValues = ranges[0].values;
       if (headerValues == null || headerValues.isEmpty) return null;
       final headerRows = headerValues.cast<List<dynamic>>();
-      final isAppointmentMaster = isAppointmentsTab(effectiveSheetName);
+      final isAppointmentMaster = hasAppointmentTableHeaders(headerRows) ||
+          (isAppointmentsTab(effectiveSheetName) &&
+              hasAppointmentTableHeaders(
+                headerRows,
+                allowMissingAppointmentId: true,
+              ));
       late final int headerRowNumber;
       HeaderIndices? headerIndices;
       List<dynamic>? appointmentHeaderRow;
 
       if (isAppointmentMaster) {
         final appointmentHeaderIndex = headerRows.indexWhere((row) {
+          var hasAppointmentId = false;
           var hasName = false;
           var hasPhone = false;
           for (final cell in row) {
             final header = normalizeHeader(cell?.toString() ?? '');
+            hasAppointmentId = hasAppointmentId || isAppointmentHeader(header);
             hasName = hasName || header == 'patient name' || header == 'name';
             hasPhone = hasPhone || isPhoneHeader(header);
           }
-          return hasName || hasPhone;
+          return hasAppointmentId && (hasName || hasPhone);
         });
         if (appointmentHeaderIndex == -1) return null;
         appointmentHeaderRow = headerRows[appointmentHeaderIndex];
@@ -1429,7 +1518,7 @@ class SheetsService {
       }
 
       return IncrementalSyncResult(
-        updatedPatients: resolvedMap.values.where((p) => p.hasValidName).toList(),
+        updatedPatients: resolvedMap.values.where((p) => p.hasUsableIdentity).toList(),
         newRowsCount: newRows.length,
         newLastSyncedRow: lastSyncedRow + newRows.length,
       );
