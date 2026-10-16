@@ -168,7 +168,14 @@ class _PatientsScreenState extends State<PatientsScreen> with WidgetsBindingObse
             onTimeout: () => throw TimeoutException('Supabase patient sync timed out'),
           ),
         );
-        await trace.stage('local_list_refresh', _refreshAll);
+        if (cloudSyncCompleted) {
+          await trace.stage('local_list_refresh', _refreshAll);
+        } else {
+          // The initial SQLite load already populated the visible list. When
+          // cloud sync is skipped because there is no active session, another
+          // identical SQLite query only adds contention with the upload queue.
+          trace.addCount('localListRefreshSkipped');
+        }
 
         if (mounted) {
           final now = DateTime.now();
@@ -772,13 +779,18 @@ class _PatientsScreenState extends State<PatientsScreen> with WidgetsBindingObse
               child: Row(
                 children: [
                   if (_isSyncing) ...[
-                    const SizedBox(
-                      width: 12,
-                      height: 12,
-                      child: CircularProgressIndicator(strokeWidth: 2),
+                    Icon(
+                      Icons.cloud_sync_outlined,
+                      size: 14,
+                      color: theme.colorScheme.onSurfaceVariant,
                     ),
                     const SizedBox(width: 8),
-                    const Text('Syncing patient database...', style: TextStyle(fontSize: 12)),
+                    const Expanded(
+                      child: Text(
+                        'Updating in background…',
+                        style: TextStyle(fontSize: 12),
+                      ),
+                    ),
                   ] else ...[
                     Icon(
                       _isOffline ? Icons.cloud_off : Icons.cloud_done,
