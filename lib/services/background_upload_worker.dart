@@ -113,7 +113,12 @@ void uploadQueueDispatcher() {
       return false;
     } finally {
       queue?.dispose();
-      await database?.close();
+      // WorkManager runs the Dart callback in the app process on some Android
+      // versions. The database handle can therefore be shared with the UI
+      // isolate even though this callback was created as a fresh isolate.
+      // Closing it here races the patient screens and leaves their futures
+      // failing with `database_closed`. The OS closes the worker's handle when
+      // the worker/isolate exits; never close the shared clinic database here.
     }
   });
 }

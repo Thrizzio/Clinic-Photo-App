@@ -152,7 +152,13 @@ class _PatientsScreenState extends State<PatientsScreen> with WidgetsBindingObse
     }
 
     try {
-      await _patientSyncService.syncLocalWithSupabase();
+      // Supabase is supplementary cloud synchronization. A stale/expired
+      // session or an unavailable DNS route must not keep the app in a
+      // permanent "syncing" state while the SQLite patient cache is usable.
+      await _patientSyncService.syncLocalWithSupabase().timeout(
+        const Duration(seconds: 8),
+        onTimeout: () => throw TimeoutException('Supabase patient sync timed out'),
+      );
       await _refreshAll();
 
       if (mounted) {

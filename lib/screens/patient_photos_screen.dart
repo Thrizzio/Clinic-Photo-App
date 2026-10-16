@@ -321,9 +321,10 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
     if (mounted) {
       setState(() {
         _photos = localPhotos;
-        if (localPhotos.isNotEmpty) {
-          _isLoading = false;
-        }
+        // SQLite is the local source of truth. An empty local gallery is a
+        // valid result and must not leave the screen behind an indefinite
+        // spinner while Drive authentication/network work is attempted.
+        _isLoading = false;
       });
     }
 
@@ -350,7 +351,11 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
 
     // 2. Fetch remote photos from Google Drive in background and reconcile cross-device deletions
     try {
-      final client = await widget.authService.getAuthenticatedClient();
+      // Initial gallery refresh is background work. Never open Credential
+      // Manager just because a patient detail screen was opened.
+      final client = await widget.authService
+          .getAuthenticatedClientSilently()
+          .timeout(const Duration(seconds: 5), onTimeout: () => null);
       if (client == null) {
         if (mounted) {
           setState(() {
@@ -363,10 +368,12 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
         return;
       }
 
-      final remotePhotos = await widget.driveService.listPatientPhotos(
-        client: client,
-        folderId: _currentPatient.driveFolderId!,
-      );
+      final remotePhotos = await widget.driveService
+          .listPatientPhotos(
+            client: client,
+            folderId: _currentPatient.driveFolderId!,
+          )
+          .timeout(const Duration(seconds: 10));
 
       await _cacheRemoteReferenceCandidates(remotePhotos, tombstones);
 
@@ -523,7 +530,11 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
     }
 
     try {
-      final client = await widget.authService.getAuthenticatedClient();
+      // Thumbnail loading is also background work; local files have already
+      // been checked above and remote thumbnails must not trigger an OAuth UI.
+      final client = await widget.authService
+          .getAuthenticatedClientSilently()
+          .timeout(const Duration(seconds: 5), onTimeout: () => null);
       if (client == null) return null;
 
       final bytes = await widget.driveService.getFileBytes(client: client, fileId: fileId);
