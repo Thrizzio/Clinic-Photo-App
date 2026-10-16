@@ -840,7 +840,13 @@ class UploadQueueService extends ChangeNotifier {
           }
         }
 
-        await database.updateUpload(currentItem.copyWith(status: UploadStatus.uploading));
+        // Claim only after local validation and folder resolution. The
+        // conditional SQLite update still serializes overlapping foreground
+        // and WorkManager workers without exposing an uploading badge during
+        // the pending/offline phase.
+        final claimedItem = await database.claimUpload(currentItem.id);
+        if (claimedItem == null) continue;
+        currentItem = claimedItem;
         _safeNotifyListeners();
 
         final client = await authService.getAuthenticatedClientSilently();
@@ -871,24 +877,25 @@ class UploadQueueService extends ChangeNotifier {
             }
             driveFileId = currentItem.driveFileId!;
           } else {
-            // After a retry, reconcile an ambiguous previous request before
-            // creating another Drive file with the same deterministic name.
-            if (currentItem.retryCount > 0) {
+            // Reconcile the deterministic filename before every create. The
+            // lookup is best-effort for a first attempt, but mandatory after
+            // a retry/recovered crash so an accepted Drive request cannot be
+            // duplicated after process death.
+            String? existingDriveFileId;
+            try {
               final existing = await driveService.findPhotoByName(
                 client: client,
                 folderId: targetFolderId,
                 fileName: currentItem.fileName,
               );
-              if (existing?.id != null && existing!.id!.isNotEmpty) {
-                driveFileId = existing.id!;
-              } else {
-                driveFileId = await driveService.uploadPhoto(
-                  client: client,
-                  file: localFile,
-                  folderId: targetFolderId,
-                  fileName: currentItem.fileName,
-                );
-              }
+              existingDriveFileId = existing?.id;
+            } catch (lookupError) {
+              if (currentItem.retryCount > 0) rethrow;
+              debugPrint('Initial Drive idempotency lookup deferred: $lookupError');
+            }
+
+            if (existingDriveFileId != null && existingDriveFileId.isNotEmpty) {
+              driveFileId = existingDriveFileId;
             } else {
               driveFileId = await driveService.uploadPhoto(
                 client: client,
@@ -939,9 +946,18 @@ class UploadQueueService extends ChangeNotifier {
               await database.updateUpload(currentItem.copyWith(
                 status: UploadStatus.uploaded,
                 driveFileId: existing.id,
+                driveFolderId: targetFolderId,
+                driveParentFolderId: targetFolderId,
                 clearLastError: true,
                 clearNextAttemptAt: true,
               ));
+
+              if (currentItem.sessionId != null) {
+                final remaining = await database.getUploadsForSession(currentItem.sessionId!);
+                if (remaining.every((u) => u.status == UploadStatus.uploaded)) {
+                  await database.deleteSession(currentItem.sessionId!);
+                }
+              }
               reconciled = true;
               _safeNotifyListeners();
             }

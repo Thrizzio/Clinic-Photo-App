@@ -36,6 +36,7 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
   bool _exitRequested = false;
   bool _isInitializingCamera = false;
   int _cameraGeneration = 0;
+  bool _isAppResumed = true;
   Patient? _currentPatient;
   Uint8List? _referenceBytes;
   double _referenceOpacity = 0.35;
@@ -65,6 +66,7 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
   void dispose() {
     widget.queueService.removeListener(_onQueueUpdated);
     WidgetsBinding.instance.removeObserver(this);
+    _isAppResumed = false;
     _cameraGeneration++;
     final controller = _controller;
     _controller = null;
@@ -91,25 +93,30 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.inactive) {
+    if (state == AppLifecycleState.resumed) {
+      _isAppResumed = true;
+      unawaited(_initializeCamera());
+    } else {
+      // Flutter can report inactive -> hidden -> paused while the app is
+      // backgrounded. Dispose for every non-resumed state and invalidate any
+      // in-flight initialization so a stale controller is never installed.
+      _isAppResumed = false;
       _cameraGeneration++;
       final cameraController = _controller;
       _isCameraInitialized = false;
       _controller = null;
       if (cameraController != null) unawaited(cameraController.dispose());
-    } else if (state == AppLifecycleState.resumed) {
-      unawaited(_initializeCamera());
     }
   }
 
   Future<void> _initializeCamera() async {
-    if (_isInitializingCamera || _isPopping) return;
+    if (_isInitializingCamera || _isPopping || !_isAppResumed) return;
     _isInitializingCamera = true;
     final generation = ++_cameraGeneration;
     try {
       final cameras = await availableCameras();
       if (cameras.isEmpty) {
-        if (mounted) {
+        if (mounted && generation == _cameraGeneration && _isAppResumed) {
           setState(() {
             _errorMessage = 'No camera found on this device.';
           });
@@ -135,7 +142,10 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
         await controller.setFlashMode(_flashMode);
       } catch (_) {}
 
-       if (!mounted || generation != _cameraGeneration || _isPopping) {
+       if (!mounted ||
+           generation != _cameraGeneration ||
+           !_isAppResumed ||
+           _isPopping) {
          await controller.dispose();
          return;
        }
@@ -152,18 +162,30 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
         unawaited(previous.dispose());
       }
     } catch (e) {
-      if (mounted) {
+      if (mounted && generation == _cameraGeneration && _isAppResumed) {
         setState(() {
           _errorMessage = 'Camera initialization failed: $e';
         });
       }
     } finally {
       _isInitializingCamera = false;
+      // If resume arrived while an initialization invalidated by pause was
+      // still unwinding, the resume callback saw _isInitializingCamera and
+      // returned. Start the fresh generation now instead of leaving the
+      // camera permanently uninitialized.
+      if (mounted &&
+          _isAppResumed &&
+          !_isPopping &&
+          generation != _cameraGeneration &&
+          _controller == null) {
+        unawaited(_initializeCamera());
+      }
     }
   }
 
   Future<void> _toggleFlash() async {
-    if (_controller == null || !_controller!.value.isInitialized) return;
+    final controller = _controller;
+    if (controller == null || !controller.value.isInitialized) return;
 
     final nextMode = switch (_flashMode) {
       FlashMode.auto => FlashMode.always,
@@ -173,7 +195,8 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
     };
 
     try {
-      await _controller!.setFlashMode(nextMode);
+      await controller.setFlashMode(nextMode);
+      if (!mounted || !identical(_controller, controller)) return;
       setState(() {
         _flashMode = nextMode;
       });

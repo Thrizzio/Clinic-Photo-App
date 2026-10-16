@@ -18,6 +18,12 @@ enum UploadStatus {
   }
 }
 
+class _UnsetUploadField {
+  const _UnsetUploadField();
+}
+
+const _unsetUploadField = _UnsetUploadField();
+
 class UploadItem {
   final String id;
   final String? sessionId;
@@ -57,10 +63,10 @@ class UploadItem {
 
   UploadItem copyWith({
     String? id,
-    String? sessionId,
-    String? patientId,
-    String? driveFolderId,
-    String? driveParentFolderId,
+    Object? sessionId = _unsetUploadField,
+    Object? patientId = _unsetUploadField,
+    Object? driveFolderId = _unsetUploadField,
+    Object? driveParentFolderId = _unsetUploadField,
     String? localPath,
     String? fileName,
     UploadStatus? status,
@@ -75,11 +81,20 @@ class UploadItem {
     DateTime? nextAttemptAt,
     bool clearNextAttemptAt = false,
   }) {
+    final resolvedDriveFolderId = identical(driveFolderId, _unsetUploadField)
+        ? (identical(driveParentFolderId, _unsetUploadField)
+            ? this.driveFolderId
+            : driveParentFolderId as String?)
+        : (driveFolderId as String? ??
+            (!identical(driveParentFolderId, _unsetUploadField)
+                ? driveParentFolderId as String?
+                : null));
+
     return UploadItem(
       id: id ?? this.id,
-      sessionId: sessionId ?? this.sessionId,
-      patientId: patientId ?? this.patientId,
-      driveFolderId: driveFolderId ?? driveParentFolderId ?? this.driveFolderId,
+      sessionId: identical(sessionId, _unsetUploadField) ? this.sessionId : sessionId as String?,
+      patientId: identical(patientId, _unsetUploadField) ? this.patientId : patientId as String?,
+      driveFolderId: resolvedDriveFolderId,
       localPath: localPath ?? this.localPath,
       fileName: fileName ?? this.fileName,
       status: status ?? this.status,

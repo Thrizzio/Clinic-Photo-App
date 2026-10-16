@@ -205,6 +205,14 @@ abstract class AppDatabase {
   /// Gets the next waiting upload item to process.
   Future<UploadItem?> getNextPendingUpload();
 
+  /// Atomically claims one waiting/pending upload item for a worker.
+  ///
+  /// The returned item is already marked as [UploadStatus.uploading]. This
+  /// prevents a foreground queue and a WorkManager isolate from uploading the
+  /// same SQLite row concurrently while keeping folder resolution non-blocking
+  /// and visible as pending.
+  Future<UploadItem?> claimUpload(String id);
+
   /// Gets count of active uploads (waiting or uploading).
   Future<int> getActiveUploadsCount();
 
@@ -428,11 +436,17 @@ class SqliteAppDatabase implements AppDatabase {
 
           // Crash recovery: Any upload that was interrupted in 'uploading'
           // status is reset to 'waiting' so processing will resume cleanly.
-          await db.update(
-            'uploads',
-            {'status': UploadStatus.waiting.name},
-            where: 'status = ?',
-            whereArgs: [UploadStatus.uploading.name],
+          // Count the interrupted attempt and clear its old backoff. The
+          // queue will reconcile the deterministic Drive filename before it
+          // creates another file, covering a process death after Drive
+          // accepted the upload but before SQLite was finalized.
+          await db.rawUpdate(
+            '''
+            UPDATE uploads
+            SET status = ?, retry_count = retry_count + 1, next_attempt_at = NULL
+            WHERE status = ?
+            ''',
+            [UploadStatus.waiting.name, UploadStatus.uploading.name],
           );
         },
       ),
@@ -1793,6 +1807,41 @@ class SqliteAppDatabase implements AppDatabase {
   }
 
   @override
+  Future<UploadItem?> claimUpload(String id) async {
+    return db.transaction<UploadItem?>((txn) async {
+      final rows = await txn.query(
+        'uploads',
+        where: 'id = ? AND (status = ? OR status = ?)',
+        whereArgs: [
+          id,
+          UploadStatus.waiting.name,
+          UploadStatus.pending.name,
+        ],
+        limit: 1,
+      );
+      if (rows.isEmpty) return null;
+
+      final item = UploadItem.fromMap(rows.first);
+      final nextAttemptAt = item.nextAttemptAt;
+      if (nextAttemptAt != null && nextAttemptAt.isAfter(DateTime.now())) {
+        return null;
+      }
+
+      final claimed = await txn.update(
+        'uploads',
+        {'status': UploadStatus.uploading.name},
+        where: 'id = ? AND (status = ? OR status = ?)',
+        whereArgs: [
+          id,
+          UploadStatus.waiting.name,
+          UploadStatus.pending.name,
+        ],
+      );
+      return claimed == 1 ? item.copyWith(status: UploadStatus.uploading) : null;
+    });
+  }
+
+  @override
   Future<int> getActiveUploadsCount() async {
     final count = Sqflite.firstIntValue(await db.rawQuery(
       "SELECT COUNT(*) FROM uploads WHERE status = 'waiting' OR status = 'uploading' OR status = 'pending'",
@@ -1909,7 +1958,11 @@ class InMemoryAppDatabase implements AppDatabase {
   void _recoverFromCrash() {
     for (final entry in _uploads.entries.toList()) {
       if (entry.value.status == UploadStatus.uploading) {
-        _uploads[entry.key] = entry.value.copyWith(status: UploadStatus.waiting);
+        _uploads[entry.key] = entry.value.copyWith(
+          status: UploadStatus.waiting,
+          retryCount: entry.value.retryCount + 1,
+          clearNextAttemptAt: true,
+        );
       }
     }
   }
@@ -2445,6 +2498,21 @@ class InMemoryAppDatabase implements AppDatabase {
       }
     }
     return null;
+  }
+
+  @override
+  Future<UploadItem?> claimUpload(String id) async {
+    final item = _uploads[id];
+    if (item == null ||
+        (item.status != UploadStatus.waiting && item.status != UploadStatus.pending)) {
+      return null;
+    }
+    if (item.nextAttemptAt != null && item.nextAttemptAt!.isAfter(DateTime.now())) {
+      return null;
+    }
+    final claimed = item.copyWith(status: UploadStatus.uploading);
+    _uploads[id] = claimed;
+    return claimed;
   }
 
   @override

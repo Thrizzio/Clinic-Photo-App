@@ -255,6 +255,49 @@ void main() {
       expect(find.byType(CameraScreen), findsNothing);
       expect(find.byType(PatientsScreen), findsOneWidget);
     });
+
+    testWidgets('Camera lifecycle invalidates safely across background and resume', (tester) async {
+      final db = InMemoryAppDatabase();
+      final tempDir = Directory.systemTemp.createTempSync('cam_lifecycle_test_');
+      addTearDown(() => tempDir.deleteSync(recursive: true));
+
+      final queueService = UploadQueueService(
+        database: db,
+        driveService: DriveService(),
+        authService: GoogleAuthService(),
+        customDocsDirectory: tempDir.path,
+      );
+      addTearDown(queueService.dispose);
+
+      const patient = Patient(
+        id: 'lifecycle-patient',
+        name: 'Lifecycle Patient',
+        displayName: 'Lifecycle Patient',
+        driveFolderId: 'lifecycle-folder',
+        folderStatus: FolderStatus.available,
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: CameraScreen(
+            patient: patient,
+            queueService: queueService,
+          ),
+        ),
+      );
+      await tester.pump();
+
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pump(const Duration(milliseconds: 100));
+
+      // Removing the route while a stale initialization is unwinding must not
+      // trigger a setState-after-dispose or controller disposal exception.
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpAndSettle();
+    });
   });
 
   group('3. Search Persistence across Camera Sessions', () {

@@ -133,6 +133,28 @@ void main() {
       // Verify crash recovery reset status from 'uploading' back to 'waiting'
       items = await reopenedDb.getAllUploads();
       expect(items.first.status, UploadStatus.waiting);
+      expect(items.first.retryCount, 1);
+      expect(items.first.nextAttemptAt, isNull);
+    });
+
+    test('worker claim is atomic when two queue runners see the same item', () async {
+      final item = UploadItem(
+        id: 'claim_once_008',
+        patientId: 'P008',
+        driveFolderId: 'folder_008',
+        localPath: '/data/claim.jpg',
+        fileName: 'claim.jpg',
+        createdAt: DateTime.now(),
+      );
+      await database.insertUpload(item);
+
+      final claims = await Future.wait([
+        database.claimUpload(item.id),
+        database.claimUpload(item.id),
+      ]);
+
+      expect(claims.whereType<UploadItem>(), hasLength(1));
+      expect((await database.getAllUploads()).single.status, UploadStatus.uploading);
     });
 
     test('persisted backoff keeps a future retry out of the worker eligibility query', () async {
