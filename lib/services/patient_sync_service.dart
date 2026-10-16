@@ -433,10 +433,15 @@ class PatientSyncService {
   /// 2. Pulls all canonical patients from Supabase and propagates cross-device deletions to SQLite.
   /// 3. Pushes any locally created/updated patients marked 'pending_cloud' to Supabase.
   /// 4. Caches all active canonical cloud patients in SQLite.
-  Future<void> syncLocalWithSupabase() async {
+  Future<bool> syncLocalWithSupabase() async {
     final trace = SyncDiagnostics.current;
     Future<T> measured<T>(String name, Future<T> Function() action) {
       return trace == null ? action() : trace.stage(name, action);
+    }
+
+    if (!supabaseService.isReadyForSync) {
+      trace?.addCount('skippedNoActiveSession');
+      return false;
     }
 
     // 0. Retry any pending cloud deletions first
@@ -668,5 +673,6 @@ class PatientSyncService {
       });
     }
     trace?.addCount('cloudPatientsCached', cloudById.length);
+    return true;
   }
 }

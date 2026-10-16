@@ -174,6 +174,44 @@ class Patient {
   /// Whether a genuine clinical name is recorded for this patient.
   bool get hasValidName => isUsableName(_name, id, legacyPatientId);
 
+  /// Formats a name for display: trims, collapses whitespace, and capitalizes
+  /// each name part while preserving common separators such as hyphens and
+  /// apostrophes (for example, `jOhN dOE` becomes `John Doe`).
+  ///
+  /// This is intentionally separate from [normalizeName], which remains a
+  /// lowercase value used for matching and deduplication.
+  static String formatDisplayName(
+    String raw, {
+    bool preserveWhitespace = false,
+  }) {
+    final collapsed = preserveWhitespace
+        ? raw.toLowerCase()
+        : raw.trim().replaceAll(RegExp(r'\s+'), ' ').toLowerCase();
+    if (collapsed.isEmpty) return '';
+
+    final result = StringBuffer();
+    var capitalizeNext = true;
+    for (final rune in collapsed.runes) {
+      final character = String.fromCharCode(rune);
+      final upper = character.toUpperCase();
+      final lower = character.toLowerCase();
+      final isLetter = upper != lower;
+
+      if (isLetter && capitalizeNext) {
+        result.write(upper);
+        capitalizeNext = false;
+      } else {
+        result.write(character);
+        if (isLetter) capitalizeNext = false;
+      }
+
+      if (character == ' ' || character == '-' || character == '\'' || character == '’') {
+        capitalizeNext = true;
+      }
+    }
+    return result.toString();
+  }
+
   /// Normalizes a name string: trims, lowercases, collapses multi-spaces.
   static String normalizeName(String raw) {
     return raw

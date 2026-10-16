@@ -6,6 +6,12 @@ import 'sync_diagnostics.dart';
 
 /// Abstract service managing canonical cloud patient identity in Supabase.
 abstract class SupabasePatientService {
+  /// Whether a live sync should be attempted now. In-memory test services are
+  /// always ready; the remote service requires a non-expired authenticated
+  /// session so an expired token cannot trigger a long refresh/DNS wait while
+  /// the local SQLite cache is already usable.
+  bool get isReadyForSync => true;
+
   /// Fetches all canonical patients from Supabase.
   Future<List<Patient>> fetchAllPatients();
 
@@ -74,6 +80,12 @@ class RemoteSupabasePatientService implements SupabasePatientService {
   final SupabaseClient client;
 
   RemoteSupabasePatientService(this.client);
+
+  @override
+  bool get isReadyForSync {
+    final session = client.auth.currentSession;
+    return session != null && !session.isExpired;
+  }
 
   @override
   Future<List<Patient>> fetchAllPatients() async {
@@ -413,6 +425,9 @@ class InMemorySupabasePatientService implements SupabasePatientService {
   final Map<String, String> _sourceToPatientId = {};
   // key: patientId -> list of {source, external_id}
   final Map<String, List<({String source, String externalId})>> _patientSources = {};
+
+  @override
+  bool get isReadyForSync => true;
 
   InMemorySupabasePatientService({
     Map<String, Patient>? initialPatients,

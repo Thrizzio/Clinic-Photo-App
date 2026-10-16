@@ -1,8 +1,29 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:uuid/uuid.dart';
 import '../models/patient.dart';
 import '../services/database.dart';
 import '../services/supabase_patient_service.dart';
+
+/// Applies title-case display formatting while the doctor enters a patient
+/// name, without removing spaces needed to continue typing the next word.
+class PatientNameTextInputFormatter extends TextInputFormatter {
+  const PatientNameTextInputFormatter();
+
+  @override
+  TextEditingValue formatEditUpdate(
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
+    final formatted = Patient.formatDisplayName(
+      newValue.text,
+      preserveWhitespace: true,
+    );
+    return formatted == newValue.text
+        ? newValue
+        : newValue.copyWith(text: formatted);
+  }
+}
 
 class NewPatientDialog extends StatefulWidget {
   final AppDatabase database;
@@ -52,7 +73,9 @@ class _NewPatientDialogState extends State<NewPatientDialog> {
   @override
   void initState() {
     super.initState();
-    _nameController = TextEditingController(text: widget.initialName ?? '');
+    _nameController = TextEditingController(
+      text: Patient.formatDisplayName(widget.initialName ?? ''),
+    );
     _phoneController = TextEditingController(text: widget.initialPhone ?? '');
   }
 
@@ -68,7 +91,7 @@ class _NewPatientDialogState extends State<NewPatientDialog> {
       return;
     }
 
-    final rawName = _nameController.text.trim();
+    final rawName = Patient.formatDisplayName(_nameController.text);
     final rawPhone = _phoneController.text.trim();
     final normName = Patient.normalizeName(rawName);
     final normPhone = Patient.normalizePhone(rawPhone);
@@ -189,6 +212,7 @@ class _NewPatientDialogState extends State<NewPatientDialog> {
                 controller: _nameController,
                 autofocus: (widget.initialName == null || widget.initialName!.trim().isEmpty),
                 textCapitalization: TextCapitalization.words,
+                inputFormatters: const [PatientNameTextInputFormatter()],
                 decoration: const InputDecoration(
                   labelText: 'Patient Name *',
                   hintText: 'e.g. Abhijit Gaikwad',

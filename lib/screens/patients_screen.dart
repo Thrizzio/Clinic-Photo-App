@@ -161,7 +161,7 @@ class _PatientsScreenState extends State<PatientsScreen> with WidgetsBindingObse
         // Supabase is supplementary cloud synchronization. A stale/expired
         // session or an unavailable DNS route must not keep the app in a
         // permanent "syncing" state while the SQLite patient cache is usable.
-        await trace.stage(
+        final cloudSyncCompleted = await trace.stage(
           'supabase_reconciliation',
           () => _patientSyncService.syncLocalWithSupabase().timeout(
             const Duration(seconds: 8),
@@ -175,13 +175,18 @@ class _PatientsScreenState extends State<PatientsScreen> with WidgetsBindingObse
           final timeStr = DateFormat('h:mm a').format(now);
           setState(() {
             _isSyncing = false;
-            _isOffline = false;
-            _syncStatusMessage = '✓ Synced $timeStr';
+            _isOffline = !cloudSyncCompleted;
+            _syncStatusMessage = cloudSyncCompleted
+                ? '✓ Synced $timeStr'
+                : 'Local only · Sign in to sync';
           });
         }
         trace.finish(
-          outcome: 'success',
-          fields: <String, Object?>{'visiblePatientCount': _patients.length},
+          outcome: cloudSyncCompleted ? 'success' : 'skipped',
+          fields: <String, Object?>{
+            'cloudSync': cloudSyncCompleted,
+            'visiblePatientCount': _patients.length,
+          },
         );
       } catch (e) {
         trace.finish(

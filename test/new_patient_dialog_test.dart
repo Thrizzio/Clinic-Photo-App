@@ -122,7 +122,44 @@ void main() {
       expect(inDb.source, PatientSource.doctorCreated);
     });
 
-    testWidgets('4. Detects existing patient by (name, phone) and prompts to open existing', (tester) async {
+    testWidgets('4. Formats patient names as title case while entering', (tester) async {
+      Patient? createdPatient;
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Builder(
+              builder: (context) => ElevatedButton(
+                onPressed: () async {
+                  createdPatient = await NewPatientDialog.show(
+                    context,
+                    database: database,
+                  );
+                },
+                child: const Text('Open Dialog'),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.text('Open Dialog'));
+      await tester.pumpAndSettle();
+
+      final nameField = find.byType(TextFormField).first;
+      await tester.enterText(nameField, 'jOhN dOE');
+      expect(find.text('John Doe'), findsOneWidget);
+
+      await tester.enterText(find.byType(TextFormField).last, '9822012345');
+      await tester.tap(find.text('Create Patient'));
+      await tester.pumpAndSettle();
+
+      expect(createdPatient, isNotNull);
+      expect(createdPatient!.displayName, 'John Doe');
+      expect(createdPatient!.normalizedName, 'john doe');
+    });
+
+    testWidgets('5. Detects existing patient by (name, phone) and prompts to open existing', (tester) async {
       final existing = Patient(
         id: 'existing-uuid-123',
         name: 'Abhijit Gaikwad',
