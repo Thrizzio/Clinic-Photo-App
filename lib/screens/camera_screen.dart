@@ -539,22 +539,25 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
       );
     }
 
+    final controller = _controller!;
+    final isFrontCamera = controller.description.lensDirection == CameraLensDirection.front;
+
     return ClipRect(
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          AspectRatio(
-            aspectRatio: _controller!.value.aspectRatio,
-            child: CameraPreview(_controller!),
-          ),
-          if (_referenceBytes != null)
-            ReferenceOverlay(
-              imageBytes: _referenceBytes!,
-              opacity: _referenceOpacity,
-              onOpacityChanged: (value) => setState(() => _referenceOpacity = value),
-              onClear: _clearReference,
-            ),
-        ],
+      child: CameraPreview(
+        controller,
+        // CameraPreview owns the aspect-ratio and rotation transform. Keeping
+        // the reference as its child makes both layers use the same displayed
+        // viewport; the overlay remains Flutter-only and is never captured by
+        // CameraController.takePicture().
+        child: _referenceBytes == null
+            ? null
+            : ReferenceOverlay(
+                imageBytes: _referenceBytes!,
+                opacity: _referenceOpacity,
+                mirror: isFrontCamera,
+                onOpacityChanged: (value) => setState(() => _referenceOpacity = value),
+                onClear: _clearReference,
+              ),
       ),
     );
   }

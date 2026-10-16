@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 class ReferenceOverlay extends StatelessWidget {
   final Uint8List imageBytes;
   final double opacity;
+  final bool mirror;
   final ValueChanged<double> onOpacityChanged;
   final VoidCallback onClear;
 
@@ -14,6 +15,7 @@ class ReferenceOverlay extends StatelessWidget {
     super.key,
     required this.imageBytes,
     required this.opacity,
+    this.mirror = false,
     required this.onOpacityChanged,
     required this.onClear,
   });
@@ -26,10 +28,22 @@ class ReferenceOverlay extends StatelessWidget {
         IgnorePointer(
           child: Opacity(
             opacity: opacity,
-            child: Image.memory(
-              imageBytes,
-              fit: BoxFit.contain,
-              errorBuilder: (context, error, stackTrace) => const SizedBox.shrink(),
+            child: Transform(
+              key: const Key('reference_image_transform'),
+              alignment: Alignment.center,
+              transform: mirror
+                  ? Matrix4.diagonal3Values(-1.0, 1.0, 1.0)
+                  : Matrix4.identity(),
+              child: Image.memory(
+                imageBytes,
+                // CameraPreview crops its texture to the available preview
+                // viewport. Use the same aspect-preserving crop so the
+                // reference tracks the live framing instead of letterboxing
+                // into a different rectangle.
+                fit: BoxFit.cover,
+                errorBuilder: (context, error, stackTrace) =>
+                    const SizedBox.shrink(),
+              ),
             ),
           ),
         ),
@@ -48,7 +62,10 @@ class ReferenceOverlay extends StatelessWidget {
                   const SizedBox(width: 6),
                   const Text(
                     'Reference',
-                    style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
                   Expanded(
                     child: Slider(

@@ -42,6 +42,8 @@ void main() {
     );
     final opacity = tester.widget<Opacity>(find.byType(Opacity));
     expect(opacity.opacity, 0.35);
+    final image = tester.widget<Image>(find.byType(Image));
+    expect(image.fit, BoxFit.cover);
 
     final slider = find.byKey(const Key('reference_opacity_slider'));
     expect(slider, findsOneWidget);
@@ -50,5 +52,29 @@ void main() {
 
     await tester.tap(find.byKey(const Key('clear_reference_button')));
     expect(clearCount, 1);
+  });
+
+  testWidgets('mirrors the reference image for a front-facing camera', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ReferenceOverlay(
+            imageBytes: Uint8List.fromList(const <int>[0x89, 0x50, 0x4E, 0x47]),
+            opacity: 0.5,
+            mirror: true,
+            onOpacityChanged: (_) {},
+            onClear: () {},
+          ),
+        ),
+      ),
+    );
+
+    final transform = tester.widget<Transform>(
+      find.byKey(const Key('reference_image_transform')),
+    );
+    expect(transform.transform.storage[0], -1.0);
+    expect(transform.transform.storage[5], 1.0);
   });
 }
