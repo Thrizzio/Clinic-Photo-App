@@ -258,7 +258,7 @@ class _PatientsScreenState extends State<PatientsScreen> with WidgetsBindingObse
         widget.authService.getAuthenticatedClient,
       );
       if (client == null) {
-        throw Exception('Not signed in');
+        throw Exception(widget.authService.lastStatus.userMessage);
       }
 
       final now = DateTime.now();

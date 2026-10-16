@@ -105,6 +105,18 @@ void main() async {
   if (config.hasCompletedSetup) {
     unawaited(
       SyncDiagnostics.run(
+        SyncDiagnostics.start('google_startup_auth', trigger: 'startup'),
+        () async {
+          final status = await authService.warmUpSilently();
+          SyncDiagnostics.current?.finish(
+            outcome: status.isReady ? 'success' : 'skipped',
+            fields: <String, Object?>{'authState': status.state.name},
+          );
+        },
+      ),
+    );
+    unawaited(
+      SyncDiagnostics.run(
         SyncDiagnostics.start('upload_queue_wake', trigger: 'startup'),
         () async {
           try {

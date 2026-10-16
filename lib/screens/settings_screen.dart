@@ -64,7 +64,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     try {
       final client = await widget.authService.getAuthenticatedClient();
       if (client == null) {
-        throw Exception('Google sign-in session expired.');
+        throw Exception(widget.authService.lastStatus.userMessage);
       }
 
       final result = await widget.sheetsService.validateAndFetchPatients(

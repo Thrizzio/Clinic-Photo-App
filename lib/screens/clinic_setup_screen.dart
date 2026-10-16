@@ -94,7 +94,7 @@ class _ClinicSetupScreenState extends State<ClinicSetupScreen> {
     try {
       final client = await widget.authService.getAuthenticatedClient();
       if (client == null) {
-        throw Exception('Google authorization expired. Please sign in again.');
+        throw Exception(widget.authService.lastStatus.userMessage);
       }
 
       final tabs = await widget.sheetsService.fetchSheetTabs(
@@ -142,7 +142,7 @@ class _ClinicSetupScreenState extends State<ClinicSetupScreen> {
     try {
       final client = await widget.authService.getAuthenticatedClient();
       if (client == null) {
-        throw Exception('Google authorization expired. Please sign in again.');
+        throw Exception(widget.authService.lastStatus.userMessage);
       }
 
       final result = await widget.sheetsService.validateAndFetchPatients(
@@ -198,7 +198,7 @@ class _ClinicSetupScreenState extends State<ClinicSetupScreen> {
     try {
       final client = await widget.authService.getAuthenticatedClient();
       if (client == null) {
-        throw Exception('Google authorization expired. Please sign in again.');
+        throw Exception(widget.authService.lastStatus.userMessage);
       }
 
       final hasAccess = await _driveService.verifyFolderAccess(
