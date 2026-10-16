@@ -219,26 +219,54 @@ class _PatientsScreenState extends State<PatientsScreen> with WidgetsBindingObse
       }
 
       if (!unchanged) {
-        final fullResult = await widget.sheetsService.validateAndFetchPatients(
-          client: client,
-          spreadsheetId: config.spreadsheetId,
-          sheetName: config.sheetTabName,
-        );
-        debugPrint('FULL RECONCILIATION RESULT PATIENTS: ${fullResult.patients.length}');
-        await _patientSyncService.reconcileSheetPatients(fullResult.patients);
-        await widget.configService.saveConfig(
-          config.copyWith(
-            sheetTabName: fullResult.effectiveSheetName ?? config.sheetTabName,
-          ),
-        );
-        await widget.configService.updateLastSync(
-          now,
-          lastSyncedRow: fullResult.totalRows,
-          isFullSync: true,
-          sheetModifiedTime: fingerprint.modifiedTime,
-          sheetVersion: fingerprint.version,
-          patientFingerprint: SheetsService.fingerprintPatients(fullResult.patients),
-        );
+        var incrementalApplied = false;
+        if (!forceFullSync && config.lastSyncedRow > 1) {
+          final incremental = await widget.sheetsService.fetchIncrementalPatients(
+            client: client,
+            spreadsheetId: config.spreadsheetId,
+            sheetName: config.sheetTabName,
+            lastSyncedRow: config.lastSyncedRow,
+          );
+
+          // A non-empty tail is safe to reconcile incrementally. If the
+          // workbook changed without adding rows, fall back to the complete
+          // master view so edits/reordering cannot leave stale patients.
+          if (incremental != null && incremental.newRowsCount > 0) {
+            await _patientSyncService.reconcileSheetPatients(
+              incremental.updatedPatients,
+            );
+            await widget.configService.updateLastSync(
+              now,
+              lastSyncedRow: incremental.newLastSyncedRow,
+              sheetModifiedTime: fingerprint.modifiedTime,
+              sheetVersion: fingerprint.version,
+            );
+            incrementalApplied = true;
+          }
+        }
+
+        if (!incrementalApplied) {
+          final fullResult = await widget.sheetsService.validateAndFetchPatients(
+            client: client,
+            spreadsheetId: config.spreadsheetId,
+            sheetName: config.sheetTabName,
+          );
+          debugPrint('FULL RECONCILIATION RESULT PATIENTS: ${fullResult.patients.length}');
+          await _patientSyncService.reconcileSheetPatients(fullResult.patients);
+          await widget.configService.saveConfig(
+            config.copyWith(
+              sheetTabName: fullResult.effectiveSheetName ?? config.sheetTabName,
+            ),
+          );
+          await widget.configService.updateLastSync(
+            now,
+            lastSyncedRow: fullResult.totalRows,
+            isFullSync: true,
+            sheetModifiedTime: fingerprint.modifiedTime,
+            sheetVersion: fingerprint.version,
+            patientFingerprint: SheetsService.fingerprintPatients(fullResult.patients),
+          );
+        }
       }
 
       await _refreshAll();
