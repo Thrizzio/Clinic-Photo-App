@@ -72,13 +72,6 @@ void main() async {
 
   final config = configService.loadConfig();
 
-  // If already set up, attempt silent sign-in and resume pending uploads
-  if (config.hasCompletedSetup) {
-    await authService.signInSilently();
-    // Wake up queue processor in background to resume any pending uploads
-    unawaited(queueService.wake());
-  }
-
   runApp(ClinicPhotosApp(
     configService: configService,
     database: database,
@@ -89,6 +82,13 @@ void main() async {
     supabaseService: supabaseService,
     hasCompletedSetup: config.hasCompletedSetup,
   ));
+
+  // Do not hold the first frame hostage to Google Credential Manager or a
+  // network retry. SQLite-backed patients must render even when Google auth
+  // is unavailable; the durable queue will retry silently when authorized.
+  if (config.hasCompletedSetup) {
+    unawaited(queueService.wake());
+  }
 }
 
 class ClinicPhotosApp extends StatelessWidget {

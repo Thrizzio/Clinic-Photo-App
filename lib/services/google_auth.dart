@@ -107,7 +107,11 @@ class GoogleAuthService {
   }
 
   Future<AuthClient?> _getAuthenticatedClient({required bool allowInteractive}) async {
-    final account = _currentAccount ?? await signInSilently();
+    // A silent queue/WorkManager request must not start Credential Manager or
+    // any other user-facing authentication flow. Foreground callers retain
+    // the existing lightweight sign-in behavior.
+    final account = _currentAccount ??
+        (allowInteractive ? await signInSilently() : null);
     if (account == null) {
       return null;
     }

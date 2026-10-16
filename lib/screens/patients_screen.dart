@@ -85,9 +85,9 @@ class _PatientsScreenState extends State<PatientsScreen> with WidgetsBindingObse
     };
     widget.queueService.addListener(_onQueueUpdated);
     _loadCachedPatients();
-    unawaited(_syncPatientDatabaseInBackground().then((_) {
-      if (mounted) unawaited(_syncSheetInBackground());
-    }));
+    // Load SQLite immediately. Google Sheets refresh remains explicit so a
+    // missing account/network cannot block or replace the cached patient list.
+    unawaited(_syncPatientDatabaseInBackground());
   }
 
   @override
