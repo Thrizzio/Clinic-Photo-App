@@ -87,8 +87,27 @@ class _AppointmentGroupData {
   String name = '';
   String? phone;
   final Set<String> folderIds = {};
+  final Set<String> normalizedNames = {};
 
   _AppointmentGroupData({required this.externalId});
+}
+
+class _AppointmentRowData {
+  final String externalId;
+  final String? name;
+  final String? phone;
+  final String normalizedName;
+  final String? normalizedPhone;
+  final String? folderId;
+
+  const _AppointmentRowData({
+    required this.externalId,
+    required this.name,
+    required this.phone,
+    required this.normalizedName,
+    required this.normalizedPhone,
+    required this.folderId,
+  });
 }
 
 class SheetsService {
@@ -110,7 +129,10 @@ class SheetsService {
 
     if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
       final uri = Uri.tryParse(trimmed);
-      if (uri == null || !uri.host.contains('drive.google.com')) {
+      final host = uri?.host.toLowerCase();
+      if (uri == null ||
+          (host != 'drive.google.com' &&
+              !(host?.endsWith('.drive.google.com') ?? false))) {
         return null;
       }
       final match = _driveFolderUrlRegex.firstMatch(trimmed);
@@ -120,8 +142,10 @@ class SheetsService {
       return null;
     }
 
-    // Standalone folder ID: Google Drive folder IDs are typically 15+ alphanumeric chars
-    if (RegExp(r'^[a-zA-Z0-9-_]{15,}$').hasMatch(trimmed)) {
+    // Standalone folder IDs are opaque Google resource IDs. Google currently
+    // emits IDs of at least ten URL-safe characters, so do not impose the
+    // older 15-character lower bound used by this parser.
+    if (RegExp(r'^[a-zA-Z0-9-_]{10,}$').hasMatch(trimmed)) {
       return trimmed;
     }
 
@@ -339,7 +363,7 @@ class SheetsService {
     }
     if (headerRow == -1) return const {};
 
-    final groups = <String, _AppointmentGroupData>{};
+    final appointmentRows = <_AppointmentRowData>[];
     for (var r = headerRow + 1; r < rows.length; r++) {
       final row = rows[r];
       final rawName = nameCol >= 0 && nameCol < row.length ? row[nameCol]?.toString().trim() : '';
@@ -358,36 +382,90 @@ class SheetsService {
               ? rawAppointmentId.substring(0, rawAppointmentId.length - 2)
               : rawAppointmentId)
           : 'appointment_row_$r';
-      final key = normalizedPhone != null && normalizedPhone.isNotEmpty
-          ? 'phone:$normalizedPhone'
-          : 'name:$normalizedName';
-      final group = groups.putIfAbsent(
-        key,
-        () => _AppointmentGroupData(externalId: appointmentId),
+      final folderId = folderCol >= 0 && folderCol < row.length
+          ? extractDriveFolderId(row[folderCol]?.toString() ?? '')
+          : null;
+      appointmentRows.add(
+        _AppointmentRowData(
+          externalId: appointmentId,
+          name: cleanName,
+          phone: cleanPhone,
+          normalizedName: normalizedName,
+          normalizedPhone: normalizedPhone,
+          folderId: folderId,
+        ),
       );
-      if (cleanName != null && group.name.isEmpty) group.name = cleanName;
-      if (cleanPhone != null && group.phone == null) group.phone = cleanPhone;
-      if (folderCol >= 0 && folderCol < row.length) {
-        final folder = extractDriveFolderId(row[folderCol]?.toString() ?? '');
-        if (folder != null) group.folderIds.add(folder);
+    }
+
+    final phoneGroups = <String, _AppointmentGroupData>{};
+    final nameOnlyGroups = <String, _AppointmentGroupData>{};
+
+    void addRowToGroup(_AppointmentGroupData group, _AppointmentRowData row) {
+      if (row.name != null && group.name.isEmpty) group.name = row.name!;
+      if (row.phone != null && group.phone == null) group.phone = row.phone;
+      if (row.normalizedName.isNotEmpty) {
+        group.normalizedNames.add(row.normalizedName);
+      }
+      if (row.folderId != null && row.folderId!.isNotEmpty) {
+        group.folderIds.add(row.folderId!);
+      }
+    }
+
+    // Phone is the strongest identity. Rows without a phone are grouped by
+    // normalized name first, then attached to a phone group only when that
+    // name maps to exactly one phone. This handles formula/blank-phone rows
+    // without merging two patients who happen to share a name but have
+    // different phone numbers.
+    for (final row in appointmentRows) {
+      if (row.normalizedPhone != null && row.normalizedPhone!.isNotEmpty) {
+        final group = phoneGroups.putIfAbsent(
+          row.normalizedPhone!,
+          () => _AppointmentGroupData(externalId: row.externalId),
+        );
+        addRowToGroup(group, row);
+      } else {
+        final group = nameOnlyGroups.putIfAbsent(
+          row.normalizedName,
+          () => _AppointmentGroupData(externalId: row.externalId),
+        );
+        addRowToGroup(group, row);
+      }
+    }
+
+    final groups = <_AppointmentGroupData>[...phoneGroups.values];
+    for (final entry in nameOnlyGroups.entries) {
+      final matchingPhoneGroups = phoneGroups.values
+          .where((group) => group.normalizedNames.contains(entry.key))
+          .toList();
+      if (matchingPhoneGroups.length == 1) {
+        final target = matchingPhoneGroups.single;
+        target.name = target.name.isNotEmpty ? target.name : entry.value.name;
+        target.phone ??= entry.value.phone;
+        target.folderIds.addAll(entry.value.folderIds);
+        target.normalizedNames.addAll(entry.value.normalizedNames);
+      } else {
+        groups.add(entry.value);
       }
     }
 
     return {
-      for (final entry in groups.entries)
-        entry.key: Patient(
-          id: entry.value.externalId,
-          name: entry.value.name,
-          displayName: entry.value.name,
-          normalizedName: Patient.normalizeName(entry.value.name),
-          phoneDisplay: entry.value.phone,
-          normalizedPhone: Patient.normalizePhone(entry.value.phone),
-          legacyPatientId: entry.value.externalId,
+      for (final group in groups)
+        (group.phone != null && group.phone!.isNotEmpty
+                ? 'phone:${Patient.normalizePhone(group.phone) ?? group.phone}'
+                : 'name:${Patient.normalizeName(group.name)}'):
+            Patient(
+          id: group.externalId,
+          name: group.name,
+          displayName: group.name,
+          normalizedName: Patient.normalizeName(group.name),
+          phoneDisplay: group.phone,
+          normalizedPhone: Patient.normalizePhone(group.phone),
+          legacyPatientId: group.externalId,
           source: PatientSource.clinicSheet,
-          driveFolderId: entry.value.folderIds.length == 1 ? entry.value.folderIds.first : null,
-          folderStatus: entry.value.folderIds.isEmpty
+          driveFolderId: group.folderIds.length == 1 ? group.folderIds.first : null,
+          folderStatus: group.folderIds.isEmpty
               ? FolderStatus.missing
-              : (entry.value.folderIds.length == 1 ? FolderStatus.available : FolderStatus.conflict),
+              : (group.folderIds.length == 1 ? FolderStatus.available : FolderStatus.conflict),
           createdAt: DateTime.now(),
           updatedAt: DateTime.now(),
         ),
@@ -1100,6 +1178,18 @@ class SheetsService {
       if (matched == null) continue;
 
       final folderId = folders.length == 1 ? folders.single : null;
+      final existingFolderId = matched.driveFolderId?.trim();
+      final hasExistingFolder = existingFolderId != null && existingFolderId.isNotEmpty;
+      final folderConflict = hasExistingFolder &&
+          folderId != null &&
+          folderId.isNotEmpty &&
+          existingFolderId != folderId;
+      final effectiveConflict = matched.folderStatus == FolderStatus.conflict ||
+          conflict ||
+          folderConflict;
+      final effectiveFolderId = effectiveConflict
+          ? null
+          : (hasExistingFolder ? existingFolderId : folderId);
       final updated = Patient(
         id: matched.id,
         name: matched.name,
@@ -1109,8 +1199,8 @@ class SheetsService {
         normalizedPhone: matched.normalizedPhone,
         legacyPatientId: matched.legacyPatientId,
         source: matched.source,
-        driveFolderId: conflict ? null : folderId,
-        folderStatus: conflict ? FolderStatus.conflict : FolderStatus.available,
+        driveFolderId: effectiveFolderId,
+        folderStatus: effectiveConflict ? FolderStatus.conflict : FolderStatus.available,
         createdAt: matched.createdAt,
         updatedAt: DateTime.now(),
         syncStatus: matched.syncStatus,
@@ -1198,11 +1288,19 @@ class SheetsService {
     final sheetsApi = sheets.SheetsApi(client);
 
     try {
+      final tabs = await fetchSheetTabs(
+        client: client,
+        spreadsheetId: spreadsheetId,
+      );
+      final effectiveSheetName = tabs.firstWhere(
+        isAppointmentsTab,
+        orElse: () => sheetName,
+      );
       final batchResponse = await sheetsApi.spreadsheets.values.batchGet(
         spreadsheetId,
         ranges: [
-          '$sheetName!A1:ZZ100',
-          '$sheetName!A${lastSyncedRow + 1}:ZZ',
+          '$effectiveSheetName!A1:ZZ100',
+          '$effectiveSheetName!A${lastSyncedRow + 1}:ZZ',
         ],
       );
 
@@ -1211,10 +1309,33 @@ class SheetsService {
 
       final headerValues = ranges[0].values;
       if (headerValues == null || headerValues.isEmpty) return null;
-      final headerIndices = discoverHeaderIndices(headerValues.cast<List<dynamic>>());
+      final headerRows = headerValues.cast<List<dynamic>>();
+      final isAppointmentMaster = isAppointmentsTab(effectiveSheetName);
+      late final int headerRowNumber;
+      HeaderIndices? headerIndices;
+      List<dynamic>? appointmentHeaderRow;
+
+      if (isAppointmentMaster) {
+        final appointmentHeaderIndex = headerRows.indexWhere((row) {
+          var hasName = false;
+          var hasPhone = false;
+          for (final cell in row) {
+            final header = normalizeHeader(cell?.toString() ?? '');
+            hasName = hasName || header == 'patient name' || header == 'name';
+            hasPhone = hasPhone || isPhoneHeader(header);
+          }
+          return hasName || hasPhone;
+        });
+        if (appointmentHeaderIndex == -1) return null;
+        appointmentHeaderRow = headerRows[appointmentHeaderIndex];
+        headerRowNumber = appointmentHeaderIndex + 1;
+      } else {
+        headerIndices = discoverHeaderIndices(headerRows);
+        headerRowNumber = headerIndices.headerRowNumber;
+      }
 
       // If lastSyncedRow is before the discovered header row, full reconciliation is required
-      if (lastSyncedRow < headerIndices.headerRowNumber) {
+      if (lastSyncedRow < headerRowNumber) {
         return null;
       }
 
@@ -1228,22 +1349,31 @@ class SheetsService {
       }
 
       final newRows = newRowsValues.cast<List<dynamic>>();
-      final resolvedMap = resolvePatientsFromVisits(
-        rows: newRows,
-        headerIndices: headerIndices,
-        startRowIndex: 0,
-      );
+      final Map<String, Patient> resolvedMap;
+      Map<String, AppointmentRecord> appointmentsMap = const {};
+      if (isAppointmentMaster) {
+        final rowsWithHeader = <List<dynamic>>[
+          appointmentHeaderRow!,
+          ...newRows,
+        ];
+        resolvedMap = resolvePatientsFromAppointments(rowsWithHeader);
+        appointmentsMap = parseAppointments(rowsWithHeader);
+      } else {
+        resolvedMap = resolvePatientsFromVisits(
+          rows: newRows,
+          headerIndices: headerIndices!,
+          startRowIndex: 0,
+        );
+      }
 
       try {
-        final tabs = await fetchSheetTabs(client: client, spreadsheetId: spreadsheetId);
-        Map<String, AppointmentRecord> appointmentsMap = const {};
         final apptTabName = tabs.firstWhere(
           (t) =>
               isAppointmentsTab(t) &&
-              t.trim().toLowerCase() != sheetName.trim().toLowerCase(),
+              t.trim().toLowerCase() != effectiveSheetName.trim().toLowerCase(),
           orElse: () => '',
         );
-        if (apptTabName.isNotEmpty) {
+        if (!isAppointmentMaster && apptTabName.isNotEmpty) {
           final apptRange = await sheetsApi.spreadsheets.values.get(
             spreadsheetId,
             '$apptTabName!A1:Z500',
@@ -1264,7 +1394,7 @@ class SheetsService {
         final patientsTabName = tabs.firstWhere(
           (t) =>
               isPatientsTab(t) &&
-              t.trim().toLowerCase() != sheetName.trim().toLowerCase(),
+              t.trim().toLowerCase() != effectiveSheetName.trim().toLowerCase(),
           orElse: () => '',
         );
         if (patientsTabName.isNotEmpty) {

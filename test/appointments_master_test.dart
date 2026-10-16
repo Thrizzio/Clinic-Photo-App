@@ -32,6 +32,35 @@ void main() {
       expect(kajal.folderStatus.name, 'conflict');
     });
 
+    test('joins blank-phone rows to the only matching normalized phone group', () {
+      final patients = SheetsService.resolvePatientsFromAppointments([
+        ['Appointment ID', 'Patient Name', 'Phone Number', 'Photos (Drive)'],
+        ['3000011', '  Nisha   Patil ', '+91 98765 43210', 'folder-nisha-12345'],
+        ['3000012', 'Nisha Patil', '', ''],
+      ]);
+
+      expect(patients, hasLength(1));
+      final patient = patients.values.single;
+      expect(patient.normalizedName, 'nisha patil');
+      expect(patient.normalizedPhone, '9876543210');
+      expect(patient.legacyPatientId, '3000011');
+      expect(patient.driveFolderId, 'folder-nisha-12345');
+    });
+
+    test('does not merge same-name rows when their normalized phones conflict', () {
+      final patients = SheetsService.resolvePatientsFromAppointments([
+        ['Appointment ID', 'Patient Name', 'Phone Number'],
+        ['3000021', 'Same Name', '9876543210'],
+        ['3000022', ' same   name ', '9123456780'],
+      ]);
+
+      expect(patients, hasLength(2));
+      expect(patients.keys, containsAll(<String>[
+        'phone:9876543210',
+        'phone:9123456780',
+      ]));
+    });
+
     test('keeps appointment identity when a directory row supplies the patient ID', () {
       final patients = SheetsService.resolvePatientsFromAppointments([
         ['Appointment ID', 'Patient Name', 'Phone Number'],
@@ -91,6 +120,21 @@ void main() {
       expect(patients['phone:9373264424']!.folderStatus, FolderStatus.available);
       expect(patients['phone:9697980016']!.driveFolderId, isNull);
       expect(patients['phone:9697980016']!.folderStatus, FolderStatus.conflict);
+    });
+
+    test('does not replace an Appointments folder with a different Visits folder', () {
+      final patients = SheetsService.resolvePatientsFromAppointments([
+        ['Appointment ID', 'Patient Name', 'Phone Number', 'Photos (Drive)'],
+        ['2000011', 'Abhijit Gaikwad', '9373264424', 'folder-appointment-12345'],
+      ]);
+
+      SheetsService.enrichPatientsFromVisitsFolders(patients, [
+        ['Patient ID', 'Patient Name', 'Phone Number', 'Photos (Drive)'],
+        ['1000048', 'Abhijit Gaikwad', '9373264424', 'folder-visits-12345'],
+      ]);
+
+      expect(patients['phone:9373264424']!.driveFolderId, isNull);
+      expect(patients['phone:9373264424']!.folderStatus, FolderStatus.conflict);
     });
 
     test('uses the Patients directory link when Visits formula names are blank', () {

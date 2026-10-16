@@ -174,6 +174,62 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
     });
   }
 
+  /// Records Drive-only gallery files as uploaded references without creating
+  /// a pending upload. This lets the camera's reference picker offer photos
+  /// that came from another device, even when this device has no local copy.
+  /// The original Drive file remains authoritative; the SQLite row is only a
+  /// lightweight pointer used for selection and later thumbnail download.
+  Future<void> _cacheRemoteReferenceCandidates(
+    List<drive.File> remotePhotos,
+    Set<String> tombstones,
+  ) async {
+    final localUploads = await widget.queueService.database.getUploadsForPatient(_currentPatient.id);
+    final knownDriveIds = <String>{
+      for (final upload in localUploads)
+        if (upload.driveFileId != null && upload.driveFileId!.isNotEmpty) upload.driveFileId!,
+    };
+    final knownNames = <String>{
+      for (final upload in localUploads) upload.fileName,
+    };
+
+    for (final remote in remotePhotos) {
+      final driveFileId = remote.id;
+      if (driveFileId == null ||
+          driveFileId.isEmpty ||
+          tombstones.contains(driveFileId) ||
+          knownDriveIds.contains(driveFileId)) {
+        continue;
+      }
+
+      final fileName = remote.name?.trim();
+      if (fileName == null || fileName.isEmpty || tombstones.contains(fileName)) {
+        continue;
+      }
+
+      // A local upload with the same name is already a better reference
+      // candidate and will be upgraded to its Drive ID by the normal gallery
+      // merge path when applicable.
+      if (knownNames.contains(fileName)) continue;
+
+      final capturedAt = remote.createdTime?.toLocal() ?? DateTime.now();
+      await widget.queueService.database.insertUpload(
+        UploadItem(
+          id: 'remote_$driveFileId',
+          patientId: _currentPatient.id,
+          driveFolderId: _currentPatient.driveFolderId,
+          localPath: '',
+          fileName: fileName,
+          driveFileId: driveFileId,
+          status: UploadStatus.uploaded,
+          createdAt: capturedAt,
+          capturedAt: capturedAt,
+        ),
+      );
+      knownDriveIds.add(driveFileId);
+      knownNames.add(fileName);
+    }
+  }
+
   void _toggleSelection(String photoId) {
     setState(() {
       if (_selectedPhotoIds.contains(photoId)) {
@@ -312,6 +368,8 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
         folderId: _currentPatient.driveFolderId!,
       );
 
+      await _cacheRemoteReferenceCandidates(remotePhotos, tombstones);
+
       final remoteFileIds = <String>{};
       final remoteFileNames = <String>{};
       for (final p in remotePhotos) {
@@ -337,11 +395,13 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
             if (!presentInDrive) {
               // Deleted on Drive by another device! Clean up local cache and record tombstone.
               await widget.queueService.database.deleteUpload(u.id);
-              final f = File(u.localPath);
-              if (f.existsSync()) {
-                try {
-                  f.deleteSync();
-                } catch (_) {}
+              if (u.localPath.isNotEmpty) {
+                final f = File(u.localPath);
+                if (f.existsSync()) {
+                  try {
+                    f.deleteSync();
+                  } catch (_) {}
+                }
               }
               await widget.queueService.database.recordDeletedPhotoTombstone(
                 driveFileId: u.driveFileId,

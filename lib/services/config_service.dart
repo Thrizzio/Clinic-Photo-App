@@ -68,12 +68,8 @@ class ConfigService {
     await _prefs.setString(_keySheetTabName, config.sheetTabName);
     await _prefs.setString(_keyParentDriveFolderId, config.parentDriveFolderId);
     await _prefs.setInt(_keyLastSyncedRow, config.lastSyncedRow);
-    if (config.lastPatientSync != null) {
-      await _prefs.setString(_keyLastPatientSync, config.lastPatientSync!);
-    }
-    if (config.lastFullSync != null) {
-      await _prefs.setString(_keyLastFullSync, config.lastFullSync!);
-    }
+    await _setOrRemoveString(_keyLastPatientSync, config.lastPatientSync);
+    await _setOrRemoveString(_keyLastFullSync, config.lastFullSync);
     await _saveSheetCheckpoint(config);
   }
 
@@ -103,11 +99,9 @@ class ConfigService {
   }
 
   Future<void> _saveSheetCheckpoint(ClinicConfig config) async {
-    await _saveSheetCheckpointValues(
-      modifiedTime: config.lastSheetModifiedTime,
-      version: config.lastSheetVersion,
-      fingerprint: config.lastPatientFingerprint,
-    );
+    await _setOrRemoveString(_keyLastSheetModifiedTime, config.lastSheetModifiedTime);
+    await _setOrRemoveString(_keyLastSheetVersion, config.lastSheetVersion);
+    await _setOrRemoveString(_keyLastPatientFingerprint, config.lastPatientFingerprint);
   }
 
   Future<void> _saveSheetCheckpointValues({
@@ -118,6 +112,14 @@ class ConfigService {
     if (modifiedTime != null) await _prefs.setString(_keyLastSheetModifiedTime, modifiedTime);
     if (version != null) await _prefs.setString(_keyLastSheetVersion, version);
     if (fingerprint != null) await _prefs.setString(_keyLastPatientFingerprint, fingerprint);
+  }
+
+  Future<void> _setOrRemoveString(String key, String? value) async {
+    if (value == null || value.isEmpty) {
+      await _prefs.remove(key);
+    } else {
+      await _prefs.setString(key, value);
+    }
   }
 
   static const String _keyDoctorEmail = 'doctorEmail';

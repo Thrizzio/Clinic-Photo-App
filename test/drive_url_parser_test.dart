@@ -60,12 +60,17 @@ void main() {
         SheetsService.extractDriveFolderId('1ABCxyz9876543210_-'),
         '1ABCxyz9876543210_-',
       );
+      expect(
+        SheetsService.extractDriveFolderId('abc1234567'),
+        'abc1234567',
+      );
     });
 
     test('rejects non-Google URLs, file URLs, and malformed strings', () {
       expect(SheetsService.extractDriveFolderId(''), isNull);
       expect(SheetsService.extractDriveFolderId('   '), isNull);
       expect(SheetsService.extractDriveFolderId('https://example.com/folders/123456789012345'), isNull);
+      expect(SheetsService.extractDriveFolderId('https://drive.google.com.evil.example/folders/123456789012345'), isNull);
       expect(SheetsService.extractDriveFolderId('https://dropbox.com/s/123456789012345'), isNull);
       expect(SheetsService.extractDriveFolderId('not a drive folder url'), isNull);
       expect(SheetsService.extractDriveFolderId('short'), isNull);

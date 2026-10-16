@@ -78,5 +78,41 @@ void main() {
       expect(currentConfig.spreadsheetId, 'working_sheet_id');
       expect(currentConfig.sheetTabName, 'Patients');
     });
+
+    test('saving a replacement configuration clears checkpoints from the old workbook', () async {
+      final configService = await ConfigService.init();
+      await configService.saveConfig(
+        const ClinicConfig(
+          spreadsheetId: 'old_sheet_id',
+          spreadsheetUrl: 'https://docs.google.com/spreadsheets/d/old_sheet_id/edit',
+          sheetTabName: 'Appointments',
+          hasCompletedSetup: true,
+          lastPatientSync: '2026-09-28T10:00:00.000Z',
+          lastFullSync: '2026-09-28T10:00:00.000Z',
+          lastSheetModifiedTime: 'old-modified-time',
+          lastSheetVersion: 'old-version',
+          lastPatientFingerprint: 'old-fingerprint',
+        ),
+      );
+
+      await configService.saveConfig(
+        const ClinicConfig(
+          spreadsheetId: 'new_sheet_id',
+          spreadsheetUrl: 'https://docs.google.com/spreadsheets/d/new_sheet_id/edit',
+          sheetTabName: 'Appointments',
+          hasCompletedSetup: true,
+          lastPatientSync: '2026-09-29T10:00:00.000Z',
+          lastFullSync: '2026-09-29T10:00:00.000Z',
+          lastSyncedRow: 12,
+        ),
+      );
+
+      final replacement = configService.loadConfig();
+      expect(replacement.spreadsheetId, 'new_sheet_id');
+      expect(replacement.lastSyncedRow, 12);
+      expect(replacement.lastSheetModifiedTime, isNull);
+      expect(replacement.lastSheetVersion, isNull);
+      expect(replacement.lastPatientFingerprint, isNull);
+    });
   });
 }

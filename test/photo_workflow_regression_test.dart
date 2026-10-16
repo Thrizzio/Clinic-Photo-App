@@ -246,6 +246,46 @@ void main() {
 
       await tester.pumpWidget(const SizedBox.shrink());
     });
+
+    testWidgets('Drive-only gallery photos become selectable reference candidates', (tester) async {
+      const patient = Patient(
+        id: 'patient-remote-reference',
+        name: 'Remote Reference Patient',
+        displayName: 'Remote Reference Patient',
+        driveFolderId: 'remote_reference_folder',
+        folderStatus: FolderStatus.available,
+      );
+      await db.upsertPatients([patient]);
+      mockDriveService.folderFiles[patient.driveFolderId!] = [
+        drive.File()
+          ..id = 'drive-reference-file-1'
+          ..name = 'prior-treatment.jpg'
+          ..createdTime = DateTime(2026, 9, 28, 10),
+      ];
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: PatientPhotosScreen(
+            patient: patient,
+            authService: authService,
+            driveService: mockDriveService,
+            folderService: folderService,
+            queueService: queueService,
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.runAsync(() async {
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      });
+      await tester.pump();
+
+      final remoteReference = await db.getUploadByDriveFileId('drive-reference-file-1');
+      expect(remoteReference, isNotNull);
+      expect(remoteReference!.patientId, patient.id);
+      expect(remoteReference.status, UploadStatus.uploaded);
+      expect(remoteReference.localPath, isEmpty);
+    });
   });
 
   group('B. Capture first photo when folder does NOT exist', () {
