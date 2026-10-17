@@ -294,14 +294,47 @@ class DriveService {
         "'$folderId' in parents and trashed = false and mimeType contains 'image/'";
 
     SyncDiagnostics.networkRequest('drive', 'files.list.patient_photos');
-    final fileList = await driveApi.files.list(
-      q: query,
-      $fields: 'files(id, name, createdTime, thumbnailLink, webContentLink, size)',
-      orderBy: 'name asc',
-      pageSize: 100,
-    );
+    final allFiles = <drive.File>[];
+    String? pageToken;
+    do {
+      final fileList = await driveApi.files.list(
+        q: query,
+        $fields: 'nextPageToken, files(id, name, createdTime, thumbnailLink, webContentLink, size)',
+        orderBy: 'name asc',
+        pageSize: 100,
+        pageToken: pageToken,
+      );
+      allFiles.addAll(fileList.files ?? const []);
+      pageToken = fileList.nextPageToken;
+    } while (pageToken != null && pageToken.isNotEmpty);
 
-    return fileList.files ?? <drive.File>[];
+    return allFiles;
+  }
+
+  /// Fetches thumbnail image bytes for a Drive file.
+  /// Attempts to use [thumbnailLink] first, falling back to [getFileBytes].
+  Future<Uint8List?> getThumbnailBytes({
+    required AuthClient client,
+    required String fileId,
+    String? thumbnailLink,
+  }) async {
+    if (thumbnailLink != null && thumbnailLink.isNotEmpty) {
+      try {
+        SyncDiagnostics.networkRequest('drive', 'files.get.thumbnail_link');
+        final response = await client.get(Uri.parse(thumbnailLink)).timeout(const Duration(seconds: 5));
+        if (response.statusCode == 200 && response.bodyBytes.isNotEmpty) {
+          return response.bodyBytes;
+        }
+      } catch (e) {
+        debugPrint('Thumbnail download from thumbnailLink failed ($e); falling back to file bytes.');
+      }
+    }
+    try {
+      return await getFileBytes(client: client, fileId: fileId);
+    } catch (e) {
+      debugPrint('Failed to get thumbnail bytes for $fileId: $e');
+      return null;
+    }
   }
 
   /// Fetches raw file bytes for preview (thumbnail or full image).

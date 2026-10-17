@@ -12,12 +12,14 @@ class CameraScreen extends StatefulWidget {
   final Patient? patient;
   final String? sessionId;
   final UploadQueueService queueService;
+  final Uint8List? initialReferenceBytes;
 
   const CameraScreen({
     super.key,
     this.patient,
     this.sessionId,
     required this.queueService,
+    this.initialReferenceBytes,
   }) : assert(patient != null || sessionId != null, 'Either patient or sessionId must be provided');
 
   @override
@@ -53,10 +55,31 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
     Navigator.of(context).pop(_sessionPhotoCount);
   }
 
+  void Function(Patient patient)? _previousOnFolderCreated;
+
   @override
   void initState() {
     super.initState();
     _currentPatient = widget.patient;
+    _referenceBytes = widget.initialReferenceBytes;
+    if (_referenceBytes != null) {
+      _referenceOpacity = 0.35;
+    }
+    final folderService = widget.queueService.patientFolderService;
+    if (folderService != null) {
+      _previousOnFolderCreated = folderService.onFolderCreated;
+      folderService.onFolderCreated = (patient) {
+        _previousOnFolderCreated?.call(patient);
+        if (mounted &&
+            _currentPatient?.id == patient.id &&
+            patient.driveFolderId != null &&
+            patient.driveFolderId!.trim().isNotEmpty) {
+          setState(() {
+            _currentPatient = patient;
+          });
+        }
+      };
+    }
     widget.queueService.addListener(_onQueueUpdated);
     WidgetsBinding.instance.addObserver(this);
     _initializeCamera();
@@ -64,6 +87,10 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
 
   @override
   void dispose() {
+    final folderService = widget.queueService.patientFolderService;
+    if (folderService != null && _previousOnFolderCreated != null) {
+      folderService.onFolderCreated = _previousOnFolderCreated;
+    }
     widget.queueService.removeListener(_onQueueUpdated);
     WidgetsBinding.instance.removeObserver(this);
     _isAppResumed = false;
@@ -208,81 +235,273 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
     if (_isUnassigned || patient == null) return;
 
     final uploads = await widget.queueService.database.getUploadsForPatient(patient.id);
-    final candidates = uploads
-        .where((item) =>
-            (item.localPath.isNotEmpty && File(item.localPath).existsSync()) ||
-            (item.driveFileId != null && item.driveFileId!.isNotEmpty))
-        .toList()
-      ..sort((a, b) => b.capturedAt.compareTo(a.capturedAt));
+    final tombstones = await widget.queueService.database.getAllDeletedPhotoTombstoneKeys();
 
-    if (!mounted) return;
-    if (candidates.isEmpty) {
+    final candidates = <_ReferenceCandidate>[];
+    final seenDriveIds = <String>{};
+    final seenNames = <String>{};
+
+    for (final item in uploads) {
+      if (tombstones.contains(item.id) ||
+          (item.driveFileId != null && tombstones.contains(item.driveFileId)) ||
+          tombstones.contains(item.fileName)) {
+        continue;
+      }
+      final hasLocal = item.localPath.isNotEmpty && File(item.localPath).existsSync();
+      final hasDrive = item.driveFileId != null && item.driveFileId!.isNotEmpty;
+      if (!hasLocal && !hasDrive) continue;
+
+      if (hasDrive) seenDriveIds.add(item.driveFileId!);
+      seenNames.add(item.fileName);
+
+      candidates.add(_ReferenceCandidate(
+        id: item.id,
+        fileName: item.fileName,
+        capturedAt: item.capturedAt,
+        localPath: hasLocal ? item.localPath : null,
+        driveFileId: item.driveFileId,
+      ));
+    }
+    candidates.sort((a, b) => b.capturedAt.compareTo(a.capturedAt));
+
+    final hasRemoteFolder = patient.driveFolderId != null && patient.driveFolderId!.trim().isNotEmpty;
+    if (candidates.isEmpty && !hasRemoteFolder) {
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('No previous local or Drive photos are available as a reference.')),
       );
       return;
     }
 
-    final selected = await showModalBottomSheet<UploadItem>(
+    if (!mounted) return;
+
+    var isDiscoveringRemote = hasRemoteFolder;
+    var startedDiscovery = false;
+
+    final selected = await showModalBottomSheet<_ReferenceCandidate>(
       context: context,
       isScrollControlled: true,
-      builder: (sheetContext) => SafeArea(
-        child: SizedBox(
-          height: MediaQuery.of(sheetContext).size.height * 0.7,
-          child: Column(
-            children: [
-              const Padding(
-                padding: EdgeInsets.all(16),
-                child: Text(
-                  'Choose reference photo',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                ),
-              ),
-              Expanded(
-                child: ListView.builder(
-                  itemCount: candidates.length,
-                  itemBuilder: (_, index) {
-                    final item = candidates[index];
-                    final local = item.localPath.isNotEmpty ? File(item.localPath) : null;
-                    return ListTile(
-                      leading: SizedBox(
-                        width: 56,
-                        height: 56,
-                        child: local != null && local.existsSync()
-                            ? Image.file(local, fit: BoxFit.cover)
-                            : const Icon(Icons.cloud_outlined),
+      builder: (sheetContext) => StatefulBuilder(
+        builder: (context, setSheetState) {
+          // Asynchronously query Drive folder if available
+          if (hasRemoteFolder && !startedDiscovery) {
+            startedDiscovery = true;
+            Future.microtask(() async {
+              try {
+                final client = await widget.queueService.authService.getAuthenticatedClientSilently();
+                if (client != null) {
+                  final remoteFiles = await widget.queueService.driveService.listPatientPhotos(
+                    client: client,
+                    folderId: patient.driveFolderId!.trim(),
+                  );
+                  bool updatedAny = false;
+                  for (final rf in remoteFiles) {
+                    final fId = rf.id;
+                    final fName = rf.name?.trim() ?? '';
+                    if (fId == null || fId.isEmpty || tombstones.contains(fId) || tombstones.contains(fName)) {
+                      continue;
+                    }
+                    if (seenDriveIds.contains(fId) || seenNames.contains(fName)) {
+                      continue;
+                    }
+
+                    seenDriveIds.add(fId);
+                    seenNames.add(fName);
+                    final created = rf.createdTime?.toLocal() ?? DateTime.now();
+
+                    candidates.add(_ReferenceCandidate(
+                      id: 'remote_$fId',
+                      fileName: fName,
+                      capturedAt: created,
+                      driveFileId: fId,
+                      thumbnailLink: rf.thumbnailLink,
+                    ));
+                    updatedAny = true;
+
+                    unawaited(widget.queueService.database.insertUpload(
+                      UploadItem(
+                        id: 'remote_$fId',
+                        patientId: patient.id,
+                        driveFolderId: patient.driveFolderId,
+                        localPath: '',
+                        fileName: fName,
+                        driveFileId: fId,
+                        status: UploadStatus.uploaded,
+                        createdAt: created,
+                        capturedAt: created,
                       ),
-                      title: Text(item.fileName),
-                      subtitle: Text('Captured ${item.capturedAt.toLocal()}'),
-                      onTap: () => Navigator.of(sheetContext).pop(item),
-                    );
-                  },
-                ),
+                    ));
+                  }
+
+                  if (updatedAny) {
+                    candidates.sort((a, b) => b.capturedAt.compareTo(a.capturedAt));
+                  }
+                }
+              } catch (e) {
+                debugPrint('Remote photo enumeration error: $e');
+              } finally {
+                if (sheetContext.mounted) {
+                  setSheetState(() {
+                    isDiscoveringRemote = false;
+                  });
+                }
+              }
+            });
+          }
+
+          return SafeArea(
+            child: SizedBox(
+              height: MediaQuery.of(sheetContext).size.height * 0.7,
+              child: Column(
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Row(
+                      children: [
+                        const Expanded(
+                          child: Text(
+                            'Choose reference photo',
+                            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                          ),
+                        ),
+                        if (isDiscoveringRemote && !Platform.environment.containsKey('FLUTTER_TEST'))
+                          const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          ),
+                      ],
+                    ),
+                  ),
+                  if (candidates.isEmpty && !isDiscoveringRemote)
+                    const Expanded(
+                      child: Center(
+                        child: Text(
+                          'No previous local or Drive photos are available as a reference.',
+                          style: TextStyle(color: Colors.white70),
+                        ),
+                      ),
+                    )
+                  else
+                    Expanded(
+                      child: ListView.builder(
+                        itemCount: candidates.length,
+                        itemBuilder: (_, index) {
+                          final item = candidates[index];
+                          return ListTile(
+                            leading: SizedBox(
+                              width: 56,
+                              height: 56,
+                              child: _buildCandidateThumbnail(item, patient.id),
+                            ),
+                            title: Text(item.fileName),
+                            subtitle: Text('Captured ${item.capturedAt.toLocal()}'),
+                            onTap: () => Navigator.of(sheetContext).pop(item),
+                          );
+                        },
+                      ),
+                    ),
+                ],
               ),
-            ],
-          ),
-        ),
+            ),
+          );
+        },
       ),
     );
 
     if (selected != null) await _loadReference(selected);
   }
 
-  Future<void> _loadReference(UploadItem item) async {
+  Widget _buildCandidateThumbnail(_ReferenceCandidate item, String patientId) {
+    if (item.localPath != null && item.localPath!.isNotEmpty) {
+      final local = File(item.localPath!);
+      if (local.existsSync()) {
+        return ClipRRect(
+          borderRadius: BorderRadius.circular(6),
+          child: Image.file(local, fit: BoxFit.cover),
+        );
+      }
+    }
+
+    if (item.driveFileId != null && item.driveFileId!.isNotEmpty) {
+      return FutureBuilder<Uint8List?>(
+        future: _fetchReferenceThumbnailBytes(item.driveFileId!, item.thumbnailLink, patientId),
+        builder: (ctx, snapshot) {
+          final bytes = snapshot.data;
+          if (bytes != null && bytes.isNotEmpty) {
+            return ClipRRect(
+              borderRadius: BorderRadius.circular(6),
+              child: Image.memory(bytes, fit: BoxFit.cover),
+            );
+          }
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return Container(
+              decoration: BoxDecoration(
+                color: Colors.white12,
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: const Center(
+                child: Icon(Icons.image_outlined, size: 20, color: Colors.white38),
+              ),
+            );
+          }
+          return const Icon(Icons.cloud_outlined);
+        },
+      );
+    }
+
+    return const Icon(Icons.photo_outlined);
+  }
+
+  Future<Uint8List?> _fetchReferenceThumbnailBytes(
+    String driveFileId,
+    String? thumbnailLink,
+    String patientId,
+  ) async {
+    final cached = await widget.queueService.remotePhotoCacheService.getCachedBytes(
+      driveFileId,
+      'thumbnail',
+    );
+    if (cached != null) return cached;
+
+    final client = await widget.queueService.authService.getAuthenticatedClientSilently();
+    if (client == null) return null;
+
+    return widget.queueService.remotePhotoCacheService.getThumbnail(
+      client: client,
+      driveFileId: driveFileId,
+      thumbnailLink: thumbnailLink,
+      patientId: patientId,
+    );
+  }
+
+  Future<void> _loadReference(_ReferenceCandidate item) async {
     Uint8List? bytes;
-    final localFile = item.localPath.isNotEmpty ? File(item.localPath) : null;
-    if (localFile != null && localFile.existsSync()) {
-      bytes = await localFile.readAsBytes();
-    } else if (item.driveFileId != null && item.driveFileId!.isNotEmpty) {
-      final client = await widget.queueService.authService.getAuthenticatedClient();
-      if (client != null) {
-        try {
-          bytes = await widget.queueService.driveService.getFileBytes(
-            client: client,
-            fileId: item.driveFileId!,
-          );
-        } catch (e) {
-          debugPrint('Reference image download failed: $e');
+    if (item.localPath != null && item.localPath!.isNotEmpty) {
+      final localFile = File(item.localPath!);
+      if (localFile.existsSync()) {
+        bytes = await localFile.readAsBytes();
+      }
+    }
+
+    if (bytes == null && item.driveFileId != null && item.driveFileId!.isNotEmpty) {
+      bytes = await widget.queueService.remotePhotoCacheService.getCachedBytes(
+        item.driveFileId!,
+        'full',
+      );
+      if (bytes == null) {
+        final client = await widget.queueService.authService.getAuthenticatedClientSilently() ??
+            await widget.queueService.authService.getAuthenticatedClient();
+        if (client != null) {
+          try {
+            bytes = await widget.queueService.remotePhotoCacheService.getFullImage(
+              client: client,
+              driveFileId: item.driveFileId!,
+              patientId: _currentPatient?.id ?? widget.patient?.id,
+            );
+          } catch (e) {
+            debugPrint('Reference image download failed: $e');
+          }
         }
       }
     }
@@ -534,8 +753,28 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
     }
 
     if (!_isCameraInitialized || _controller == null) {
-      return const Center(
-        child: CircularProgressIndicator(color: Colors.white),
+      if (_referenceBytes != null) {
+        return Stack(
+          children: [
+            Center(
+              child: Platform.environment.containsKey('FLUTTER_TEST')
+                  ? const SizedBox()
+                  : const CircularProgressIndicator(color: Colors.white),
+            ),
+            ReferenceOverlay(
+              imageBytes: _referenceBytes!,
+              opacity: _referenceOpacity,
+              mirror: false,
+              onOpacityChanged: (value) => setState(() => _referenceOpacity = value),
+              onClear: _clearReference,
+            ),
+          ],
+        );
+      }
+      return Center(
+        child: Platform.environment.containsKey('FLUTTER_TEST')
+            ? const SizedBox()
+            : const CircularProgressIndicator(color: Colors.white),
       );
     }
 
@@ -646,4 +885,22 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
       ),
     );
   }
+}
+
+class _ReferenceCandidate {
+  final String id;
+  final String fileName;
+  final DateTime capturedAt;
+  final String? localPath;
+  final String? driveFileId;
+  final String? thumbnailLink;
+
+  _ReferenceCandidate({
+    required this.id,
+    required this.fileName,
+    required this.capturedAt,
+    this.localPath,
+    this.driveFileId,
+    this.thumbnailLink,
+  });
 }

@@ -518,7 +518,7 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
     // Check local disk cache first
     final upload = _localUploadsByFileId[fileId] ??
         (fileName != null ? _localUploadsByFileName[fileName] : null);
-    if (upload != null) {
+    if (upload != null && upload.localPath.isNotEmpty) {
       final localFile = File(upload.localPath);
       if (localFile.existsSync()) {
         try {
@@ -529,18 +529,63 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
       }
     }
 
+    // Check managed thumbnail cache
+    final cached = await widget.queueService.remotePhotoCacheService.getCachedBytes(fileId, 'thumbnail');
+    if (cached != null) {
+      _thumbnailCache[fileId] = cached;
+      return cached;
+    }
+
     try {
-      // Thumbnail loading is also background work; local files have already
-      // been checked above and remote thumbnails must not trigger an OAuth UI.
       final client = await widget.authService
           .getAuthenticatedClientSilently()
           .timeout(const Duration(seconds: 5), onTimeout: () => null);
       if (client == null) return null;
 
-      final bytes = await widget.driveService.getFileBytes(client: client, fileId: fileId);
-      _thumbnailCache[fileId] = bytes;
+      final bytes = await widget.queueService.remotePhotoCacheService.getThumbnail(
+        client: client,
+        driveFileId: fileId,
+        patientId: _currentPatient.id,
+      );
+      if (bytes != null) {
+        _thumbnailCache[fileId] = bytes;
+      }
       return bytes;
     } catch (_) {
+      return null;
+    }
+  }
+
+  Future<Uint8List?> _fetchFullImageBytes(String fileId, [String? fileName]) async {
+    // 1. Check local upload files
+    final upload = _localUploadsByFileId[fileId] ??
+        (fileName != null ? _localUploadsByFileName[fileName] : null);
+    if (upload != null && upload.localPath.isNotEmpty) {
+      final localFile = File(upload.localPath);
+      if (localFile.existsSync()) {
+        try {
+          return localFile.readAsBytesSync();
+        } catch (_) {}
+      }
+    }
+
+    // 2. Check managed full cache
+    final cached = await widget.queueService.remotePhotoCacheService.getCachedBytes(fileId, 'full');
+    if (cached != null) return cached;
+
+    // 3. Fetch from Drive
+    try {
+      final client = await widget.authService.getAuthenticatedClientSilently() ??
+          await widget.authService.getAuthenticatedClient();
+      if (client == null) return null;
+
+      return await widget.queueService.remotePhotoCacheService.getFullImage(
+        client: client,
+        driveFileId: fileId,
+        patientId: _currentPatient.id,
+      );
+    } catch (e) {
+      debugPrint('Error fetching full image for $fileId: $e');
       return null;
     }
   }
@@ -969,7 +1014,10 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
           photos: _photos,
           initialIndex: initialIndex,
           patient: _currentPatient,
-          fetchImageBytes: _fetchThumbnailBytes,
+          fetchImageBytes: (fileId) => _fetchFullImageBytes(fileId),
+          onUseAsReference: (photo) async {
+            await _handleUseAsReference(photo);
+          },
           onMoveToUnassigned: (photo) async {
             Navigator.of(context).pop();
             await _handleMoveSelectedToUnassigned([photo]);
@@ -981,6 +1029,36 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
         ),
       ),
     );
+  }
+
+  Future<void> _handleUseAsReference(drive.File photo) async {
+    final fileId = photo.id;
+    if (fileId == null || fileId.isEmpty) return;
+
+    final bytes = await _fetchFullImageBytes(fileId, photo.name);
+    if (!mounted) return;
+    if (bytes == null || bytes.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Failed to load reference photo bytes.')),
+      );
+      return;
+    }
+
+    Navigator.of(context).pop();
+
+    await Navigator.of(context).push<int>(
+      MaterialPageRoute<int>(
+        builder: (_) => CameraScreen(
+          patient: _currentPatient,
+          queueService: widget.queueService,
+          initialReferenceBytes: bytes,
+        ),
+      ),
+    );
+
+    if (mounted) {
+      _loadPhotos();
+    }
   }
 
   @override
@@ -1203,6 +1281,7 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
         final isSelected = fileId != null && _selectedPhotoIds.contains(fileId);
 
         return InkWell(
+          key: ValueKey('photo_tile_${photo.id ?? photo.name}'),
           onTap: () {
             if (_isSelectionMode) {
               if (fileId != null) _toggleSelection(fileId);
@@ -1330,6 +1409,7 @@ class _FullScreenPatientPhotoGallery extends StatefulWidget {
   final int initialIndex;
   final Patient patient;
   final Future<Uint8List?> Function(String fileId) fetchImageBytes;
+  final Future<void> Function(drive.File photo)? onUseAsReference;
   final Future<void> Function(drive.File photo)? onMoveToUnassigned;
   final Future<void> Function(drive.File photo)? onDeletePhoto;
 
@@ -1338,6 +1418,7 @@ class _FullScreenPatientPhotoGallery extends StatefulWidget {
     required this.initialIndex,
     required this.patient,
     required this.fetchImageBytes,
+    this.onUseAsReference,
     this.onMoveToUnassigned,
     this.onDeletePhoto,
   });
@@ -1389,6 +1470,13 @@ class _FullScreenPatientPhotoGalleryState extends State<_FullScreenPatientPhotoG
           ],
         ),
         actions: [
+          if (widget.onUseAsReference != null)
+            IconButton(
+              key: const Key('use_as_reference_button'),
+              icon: const Icon(Icons.layers_outlined),
+              tooltip: 'Use as reference',
+              onPressed: () => widget.onUseAsReference!(currentPhoto),
+            ),
           if (widget.onMoveToUnassigned != null)
             IconButton(
               icon: const Icon(Icons.inbox_outlined),
@@ -1480,7 +1568,10 @@ class _ShimmerSkeletonTileState extends State<_ShimmerSkeletonTile>
     _controller = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1200),
-    )..repeat(reverse: true);
+    );
+    if (!Platform.environment.containsKey('FLUTTER_TEST')) {
+      _controller.repeat(reverse: true);
+    }
     _animation = CurvedAnimation(parent: _controller, curve: Curves.easeInOut);
   }
 
