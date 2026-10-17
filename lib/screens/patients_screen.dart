@@ -1,6 +1,6 @@
 import 'dart:async';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
-import 'package:intl/intl.dart';
 import '../models/patient.dart';
 import '../services/config_service.dart';
 import '../services/database.dart';
@@ -27,6 +27,7 @@ class PatientsScreen extends StatefulWidget {
   final UploadQueueService queueService;
   final DriveService? driveService;
   final SupabasePatientService? supabaseService;
+  final Connectivity? connectivity;
 
   const PatientsScreen({
     super.key,
@@ -37,6 +38,7 @@ class PatientsScreen extends StatefulWidget {
     required this.queueService,
     this.driveService,
     this.supabaseService,
+    this.connectivity,
   });
 
   @override
@@ -48,9 +50,8 @@ class _PatientsScreenState extends State<PatientsScreen> with WidgetsBindingObse
   List<Patient> _patients = [];
   int _unassignedSessionsCount = 0;
   bool _isLoadingCache = true;
-  bool _isSyncing = false;
-  String? _syncStatusMessage;
-  bool _isOffline = false;
+  bool _isDeviceDisconnected = false;
+  StreamSubscription<List<ConnectivityResult>>? _connectivitySub;
   bool _isOpeningCamera = false;
   Future<void>? _activeSheetSyncFuture;
   late final PatientFolderService _patientFolderService =
@@ -87,14 +88,48 @@ class _PatientsScreenState extends State<PatientsScreen> with WidgetsBindingObse
     };
     widget.queueService.addListener(_onQueueUpdated);
     _loadCachedPatients();
-    // Load SQLite immediately. Google Sheets refresh remains explicit so a
-    // missing account/network cannot block or replace the cached patient list.
+    _initConnectivityListener();
+    // Background-first synchronization: SQLite loads immediately above;
+    // remote reconciliation runs silently without blocking UI.
     unawaited(_syncPatientDatabaseInBackground());
+    unawaited(_syncSheetInBackground(forceFullSync: false));
+  }
+
+  void _initConnectivityListener() {
+    try {
+      final effectiveConnectivity = widget.connectivity ?? widget.queueService.connectivity;
+      effectiveConnectivity.checkConnectivity().then((results) {
+        if (mounted) {
+          final isDisconnected =
+              results.contains(ConnectivityResult.none) && results.length == 1;
+          setState(() {
+            _isDeviceDisconnected = isDisconnected;
+          });
+        }
+      });
+      _connectivitySub = effectiveConnectivity.onConnectivityChanged.listen((results) {
+        final isDisconnected =
+            results.contains(ConnectivityResult.none) && results.length == 1;
+        if (mounted) {
+          setState(() {
+            _isDeviceDisconnected = isDisconnected;
+          });
+        }
+        if (!isDisconnected) {
+          unawaited(widget.queueService.wake());
+          unawaited(_syncPatientDatabaseInBackground());
+          unawaited(_syncSheetInBackground(forceFullSync: false));
+        }
+      });
+    } catch (_) {
+      // In test environments, connectivity stream may not be available.
+    }
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _connectivitySub?.cancel();
     _patientFolderService.onFolderCreated = _previousOnFolderCreated;
     widget.queueService.removeListener(_onQueueUpdated);
     _searchController.dispose();
@@ -105,6 +140,8 @@ class _PatientsScreenState extends State<PatientsScreen> with WidgetsBindingObse
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       unawaited(widget.queueService.wake());
+      unawaited(_syncPatientDatabaseInBackground());
+      unawaited(_syncSheetInBackground(forceFullSync: false));
     }
   }
 
@@ -153,12 +190,6 @@ class _PatientsScreenState extends State<PatientsScreen> with WidgetsBindingObse
       trigger: 'patients_startup',
     );
     await SyncDiagnostics.run(trace, () async {
-      if (mounted && _activeSheetSyncFuture == null) {
-        setState(() {
-          _isSyncing = true;
-        });
-      }
-
       try {
         // Supabase is supplementary cloud synchronization. A stale/expired
         // session or an unavailable DNS route must not keep the app in a
@@ -179,17 +210,6 @@ class _PatientsScreenState extends State<PatientsScreen> with WidgetsBindingObse
           trace.addCount('localListRefreshSkipped');
         }
 
-        if (mounted && _activeSheetSyncFuture == null) {
-          final now = DateTime.now();
-          final timeStr = DateFormat('h:mm a').format(now);
-          setState(() {
-            _isSyncing = false;
-            if (cloudSyncCompleted) {
-              _isOffline = false;
-              _syncStatusMessage = '✓ Synced $timeStr';
-            }
-          });
-        }
         trace.finish(
           outcome: cloudSyncCompleted ? 'success' : 'skipped',
           fields: <String, Object?>{
@@ -203,11 +223,6 @@ class _PatientsScreenState extends State<PatientsScreen> with WidgetsBindingObse
           fields: <String, Object?>{'errorType': e.runtimeType.toString()},
         );
         debugPrint('Background database sync notice: $e');
-        if (mounted && _activeSheetSyncFuture == null) {
-          setState(() {
-            _isSyncing = false;
-          });
-        }
       }
     });
   }
@@ -256,19 +271,19 @@ class _PatientsScreenState extends State<PatientsScreen> with WidgetsBindingObse
       return;
     }
 
-    if (mounted) {
-      setState(() {
-        _isSyncing = true;
-      });
-    }
-
     try {
       final client = await trace.stage(
         'google_auth',
-        widget.authService.getAuthenticatedClient,
+        forceFullSync
+            ? widget.authService.getAuthenticatedClient
+            : widget.authService.getAuthenticatedClientSilently,
       );
       if (client == null) {
-        throw Exception(widget.authService.lastStatus.userMessage);
+        trace.finish(
+          outcome: 'skipped',
+          fields: <String, Object?>{'reason': 'auth_unavailable'},
+        );
+        return;
       }
 
       final now = DateTime.now();
@@ -373,14 +388,6 @@ class _PatientsScreenState extends State<PatientsScreen> with WidgetsBindingObse
 
       await trace.stage('local_list_refresh', _refreshAll);
 
-      if (mounted) {
-        final timeStr = DateFormat('h:mm a').format(now);
-        setState(() {
-          _isSyncing = false;
-          _isOffline = false;
-          _syncStatusMessage = '✓ Synced $timeStr';
-        });
-      }
       trace.finish(
         outcome: 'success',
         fields: <String, Object?>{
@@ -393,17 +400,7 @@ class _PatientsScreenState extends State<PatientsScreen> with WidgetsBindingObse
         outcome: 'error',
         fields: <String, Object?>{'errorType': e.runtimeType.toString()},
       );
-      if (mounted) {
-        setState(() {
-          _isSyncing = false;
-          final authState = widget.authService.lastStatus.state;
-          _isOffline = authState != GoogleAuthState.notSignedIn && authState != GoogleAuthState.scopesRequired;
-          _syncStatusMessage = !_isOffline
-              ? widget.authService.lastStatus.userMessage
-              : 'Offline · Showing cached list';
-
-        });
-      }
+      debugPrint('Sheet sync notice: $e');
     }
   }
 
@@ -420,6 +417,7 @@ class _PatientsScreenState extends State<PatientsScreen> with WidgetsBindingObse
   }
 
   Future<void> _openPatientPhotos(Patient patient) async {
+    unawaited(widget.database.recordPatientViewed(patient.id));
     final deleted = await Navigator.of(context).push<bool>(
       MaterialPageRoute(
         builder: (_) => PatientPhotosScreen(
@@ -443,6 +441,7 @@ class _PatientsScreenState extends State<PatientsScreen> with WidgetsBindingObse
   Future<void> _handleTakePhotosForPatient(Patient patient) async {
     if (_isOpeningCamera) return;
     _isOpeningCamera = true;
+    unawaited(widget.database.recordPatientViewed(patient.id));
 
     try {
       if (patient.folderStatus == FolderStatus.conflict) {
@@ -784,114 +783,87 @@ class _PatientsScreenState extends State<PatientsScreen> with WidgetsBindingObse
               ),
             ),
 
-            // Sync Status Banner
-            Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (_isSyncing)
-                  const LinearProgressIndicator(minHeight: 2),
-                Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-              color: _isOffline
-                  ? (isDark ? Colors.amber.shade900.withValues(alpha: 0.3) : Colors.amber.shade50)
-                  : theme.colorScheme.surfaceContainerLow,
-              child: Row(
-                children: [
-                  if (_isSyncing) ...[
+            // Offline Notice Banner (unobtrusive, genuine disconnect only)
+            if (_isDeviceDisconnected)
+              Container(
+                key: const Key('offline_notice_banner'),
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                color: isDark
+                    ? Colors.amber.shade900.withValues(alpha: 0.25)
+                    : Colors.amber.shade50,
+                child: Row(
+                  children: [
                     Icon(
-                      Icons.cloud_sync_outlined,
+                      Icons.wifi_off,
                       size: 14,
-                      color: theme.colorScheme.onSurfaceVariant,
+                      color: isDark ? Colors.amber.shade200 : Colors.amber.shade800,
                     ),
                     const SizedBox(width: 8),
-                    const Expanded(
-                      child: Text(
-                        'Updating in background…',
-                        style: TextStyle(fontSize: 12),
-                      ),
-                    ),
-                  ] else ...[
-                    Icon(
-                      _isOffline ? Icons.cloud_off : Icons.cloud_done,
-                      size: 14,
-                      color: _isOffline
-                          ? (isDark ? Colors.amber.shade300 : Colors.amber.shade900)
-                          : Colors.green.shade600,
-                    ),
-                    const SizedBox(width: 6),
                     Expanded(
                       child: Text(
-                        _syncStatusMessage ?? 'Ready',
+                        'Offline · Using local records',
                         style: TextStyle(
                           fontSize: 12,
-                          color: _isOffline
-                              ? (isDark ? Colors.amber.shade200 : Colors.amber.shade900)
-                              : theme.colorScheme.onSurfaceVariant,
-                        ),
-                      ),
-                    ),
-                    InkWell(
-                      onTap: () {
-                        widget.authService.resetRecoveryAttempt();
-                        _syncSheetInBackground(forceFullSync: true);
-                      },
-                      child: const Padding(
-                        padding: EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                        child: Text(
-                          'Refresh',
-                          style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+                          color: isDark ? Colors.amber.shade200 : Colors.amber.shade900,
+                          fontWeight: FontWeight.w500,
                         ),
                       ),
                     ),
                   ],
-                ],
-              ),
                 ),
-              ],
-            ),
+              ),
 
             // Patients List
             Expanded(
               child: _isLoadingCache
                   ? const Center(child: CircularProgressIndicator())
                   : _patients.isEmpty
-                      ? Center(
+                      ? RefreshIndicator(
+                          onRefresh: () async {
+                            widget.authService.resetRecoveryAttempt();
+                            unawaited(_syncSheetInBackground(forceFullSync: true));
+                            await Future.delayed(const Duration(milliseconds: 250));
+                          },
                           child: SingleChildScrollView(
+                            physics: const AlwaysScrollableScrollPhysics(),
                             padding: const EdgeInsets.fromLTRB(32, 32, 32, 88),
-                            child: _searchController.text.trim().isNotEmpty
-                                ? Column(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      Icon(
-                                        Icons.person_search_outlined,
-                                        size: 48,
-                                        color: theme.colorScheme.outline,
-                                      ),
-                                      const SizedBox(height: 12),
-                                      Text(
-                                        'No patients match "${_searchController.text.trim()}"',
-                                        textAlign: TextAlign.center,
-                                        style: TextStyle(
-                                          color: theme.colorScheme.onSurfaceVariant,
-                                          fontSize: 15,
+                            child: Center(
+                              child: _searchController.text.trim().isNotEmpty
+                                  ? Column(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Icon(
+                                          Icons.person_search_outlined,
+                                          size: 48,
+                                          color: theme.colorScheme.outline,
                                         ),
-                                      ),
-                                      const SizedBox(height: 16),
-                                      FilledButton.icon(
-                                        key: const Key('create_new_patient_button'),
-                                        icon: const Icon(Icons.person_add_outlined),
-                                        label: const Text('Create New Patient'),
-                                        onPressed: () => _openNewPatientDialog(
-                                          initialQuery: _searchController.text.trim(),
+                                        const SizedBox(height: 12),
+                                        Text(
+                                          'No patients match "${_searchController.text.trim()}"',
+                                          textAlign: TextAlign.center,
+                                          style: TextStyle(
+                                            color: theme.colorScheme.onSurfaceVariant,
+                                            fontSize: 15,
+                                          ),
                                         ),
-                                      ),
-                                    ],
-                                  )
-                                : Text(
-                                    'No patients found in sheet.\nTap Refresh to sync.',
-                                    textAlign: TextAlign.center,
-                                    style: TextStyle(color: theme.colorScheme.onSurfaceVariant),
-                                  ),
+                                        const SizedBox(height: 16),
+                                        FilledButton.icon(
+                                          key: const Key('create_new_patient_button'),
+                                          icon: const Icon(Icons.person_add_outlined),
+                                          label: const Text('Create New Patient'),
+                                          onPressed: () => _openNewPatientDialog(
+                                            initialQuery: _searchController.text.trim(),
+                                          ),
+                                        ),
+                                      ],
+                                    )
+                                  : Text(
+                                      'No patients found.\nSwipe down to refresh or check configuration in Settings.',
+                                      textAlign: TextAlign.center,
+                                      style: TextStyle(color: theme.colorScheme.onSurfaceVariant),
+                                    ),
+                            ),
                           ),
                         )
                       : RefreshIndicator(
