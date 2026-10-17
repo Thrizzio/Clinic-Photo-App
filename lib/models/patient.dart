@@ -61,6 +61,9 @@ class Patient {
   /// Record last update timestamp.
   final DateTime? updatedAt;
 
+  /// Doctor recent view timestamp.
+  final DateTime? lastViewedAt;
+
   /// Local sync status: 'synced', 'pending_cloud', or 'failed_cloud'.
   final String syncStatus;
 
@@ -79,6 +82,7 @@ class Patient {
     FolderStatus folderStatus = FolderStatus.missing,
     this.createdAt,
     this.updatedAt,
+    this.lastViewedAt,
     this.syncStatus = 'synced',
   })  : _name = displayName ?? name ?? '',
         // ignore: prefer_initializing_formals
@@ -87,6 +91,19 @@ class Patient {
         _normalizedPhone = normalizedPhone ?? phoneNumberNormalized,
         // ignore: prefer_initializing_formals
         _folderStatus = folderStatus;
+
+  /// The canonical effective activity timestamp:
+  /// max(last_viewed_at, updated_at, created_at)
+  DateTime? get effectiveActivityAt {
+    DateTime? maxDt;
+    for (final dt in [lastViewedAt, updatedAt, createdAt]) {
+      if (dt == null) continue;
+      if (maxDt == null || dt.isAfter(maxDt)) {
+        maxDt = dt;
+      }
+    }
+    return maxDt;
+  }
 
   /// Folder status with authoritative derivation:
   /// - conflict if marked conflict
@@ -313,13 +330,13 @@ class Patient {
   /// then canonical ID) so SQLite and the in-memory database expose the same
   /// order on every refresh.
   static int compareByLastModified(Patient a, Patient b) {
-    final aUpdatedAt = a.updatedAt?.toUtc();
-    final bUpdatedAt = b.updatedAt?.toUtc();
+    final aActivity = a.effectiveActivityAt?.toUtc();
+    final bActivity = b.effectiveActivityAt?.toUtc();
 
-    if (aUpdatedAt == null && bUpdatedAt != null) return 1;
-    if (aUpdatedAt != null && bUpdatedAt == null) return -1;
-    if (aUpdatedAt != null && bUpdatedAt != null) {
-      final timestampComparison = bUpdatedAt.compareTo(aUpdatedAt);
+    if (aActivity == null && bActivity != null) return 1;
+    if (aActivity != null && bActivity == null) return -1;
+    if (aActivity != null && bActivity != null) {
+      final timestampComparison = bActivity.compareTo(aActivity);
       if (timestampComparison != 0) return timestampComparison;
     }
 
@@ -448,6 +465,7 @@ class Patient {
       folderStatus: mergedStatus,
       createdAt: existing.createdAt,
       updatedAt: existing.updatedAt ?? incoming.updatedAt,
+      lastViewedAt: existing.lastViewedAt ?? incoming.lastViewedAt,
       syncStatus: mergedSyncStatus,
     );
 
@@ -506,6 +524,7 @@ class Patient {
     final normP = normalizedPhone ?? normalizePhone(cleanP);
     final createdIso = (createdAt ?? DateTime.now()).toIso8601String();
     final updatedIso = updatedAt?.toUtc().toIso8601String();
+    final viewedIso = lastViewedAt?.toUtc().toIso8601String();
     return {
       'id': id,
       'display_name': displayName,
@@ -518,6 +537,7 @@ class Patient {
       'folder_status': folderStatus.name,
       'created_at': createdIso,
       'updated_at': updatedIso,
+      'last_viewed_at': viewedIso,
       'sync_status': syncStatus,
       // Legacy backward-compatibility columns
       'name': _name,
@@ -552,6 +572,7 @@ class Patient {
       folderStatus: FolderStatus.fromString(map['folder_status'] as String? ?? 'available'),
       createdAt: map['created_at'] != null ? DateTime.tryParse(map['created_at'] as String) : null,
       updatedAt: map['updated_at'] != null ? DateTime.tryParse(map['updated_at'] as String) : null,
+      lastViewedAt: map['last_viewed_at'] != null ? DateTime.tryParse(map['last_viewed_at'] as String) : null,
       syncStatus: syncStat,
     );
   }
@@ -569,6 +590,7 @@ class Patient {
     FolderStatus? folderStatus,
     DateTime? createdAt,
     DateTime? updatedAt,
+    DateTime? lastViewedAt,
     String? syncStatus,
     // Legacy parameter aliases
     String? phoneNumber,
@@ -589,6 +611,7 @@ class Patient {
       folderStatus: folderStatus ?? this.folderStatus,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
+      lastViewedAt: lastViewedAt ?? this.lastViewedAt,
       syncStatus: syncStatus ?? this.syncStatus,
     );
   }

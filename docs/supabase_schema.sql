@@ -52,11 +52,15 @@ CREATE TABLE IF NOT EXISTS patients (
     drive_folder_id TEXT,
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_viewed_at TIMESTAMPTZ
 );
 
 CREATE INDEX IF NOT EXISTS idx_patients_clinic_id
     ON patients (clinic_id);
+
+CREATE INDEX IF NOT EXISTS idx_patients_last_viewed_at
+    ON patients (last_viewed_at);
 
 CREATE INDEX IF NOT EXISTS idx_patients_business_identity
     ON patients (normalized_name, normalized_phone);

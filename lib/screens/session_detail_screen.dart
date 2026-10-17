@@ -54,7 +54,7 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
   Future<Uint8List?> _fetchThumbnailBytes(String fileId) async {
     if (_thumbnailCache.containsKey(fileId)) return _thumbnailCache[fileId];
     try {
-      final client = await widget.queueService.authService.getAuthenticatedClient();
+      final client = await widget.queueService.authService.getAuthenticatedClientSilently();
       if (client == null) return null;
       final bytes = await widget.queueService.driveService.getFileBytes(client: client, fileId: fileId);
       _thumbnailCache[fileId] = bytes;

@@ -419,6 +419,7 @@ class RemoteSupabasePatientService implements SupabasePatientService {
     final folderId = row['drive_folder_id']?.toString();
     final createdAt = row['created_at'] != null ? DateTime.tryParse(row['created_at'].toString()) : null;
     final updatedAt = row['updated_at'] != null ? DateTime.tryParse(row['updated_at'].toString()) : null;
+    final lastViewedAt = row['last_viewed_at'] != null ? DateTime.tryParse(row['last_viewed_at'].toString()) : null;
 
     return Patient(
       id: row['id'].toString(),
@@ -431,6 +432,7 @@ class RemoteSupabasePatientService implements SupabasePatientService {
       folderStatus: folderId != null && folderId.isNotEmpty ? FolderStatus.available : FolderStatus.missing,
       createdAt: createdAt,
       updatedAt: updatedAt,
+      lastViewedAt: lastViewedAt,
     );
   }
 }
