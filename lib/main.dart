@@ -58,6 +58,11 @@ void main() async {
         ),
       );
       final client = Supabase.instance.client;
+      if (client.auth.currentSession?.isExpired == true) {
+        try {
+          await client.auth.signOut(scope: SignOutScope.local);
+        } catch (_) {}
+      }
       supabaseService = SupabasePatientService.live(client);
     }
   } catch (e) {

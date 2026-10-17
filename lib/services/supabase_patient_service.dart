@@ -80,11 +80,21 @@ class RemoteSupabasePatientService implements SupabasePatientService {
   final SupabaseClient client;
 
   RemoteSupabasePatientService(this.client);
+  DateTime? _lastNetworkFailureTime;
 
   @override
   bool get isReadyForSync {
     final session = client.auth.currentSession;
-    return session != null && !session.isExpired;
+    if (session == null || session.isExpired) return false;
+    if (_lastNetworkFailureTime != null &&
+        DateTime.now().difference(_lastNetworkFailureTime!) < const Duration(minutes: 2)) {
+      return false;
+    }
+    return true;
+  }
+
+  void markNetworkFailure() {
+    _lastNetworkFailureTime = DateTime.now();
   }
 
   @override
@@ -101,6 +111,7 @@ class RemoteSupabasePatientService implements SupabasePatientService {
       }
       return list;
     } catch (e) {
+      markNetworkFailure();
       debugPrint('Supabase fetchAllPatients error: $e');
       rethrow;
     }
@@ -240,7 +251,8 @@ class RemoteSupabasePatientService implements SupabasePatientService {
           onConflict: 'id',
         );
       } catch (e) {
-        debugPrint('Supabase upsertPatients batch error: $e');
+        markNetworkFailure();
+      debugPrint('Supabase upsertPatients batch error: $e');
         rethrow;
       }
     }

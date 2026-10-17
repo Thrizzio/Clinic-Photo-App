@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:googleapis_auth/googleapis_auth.dart';
 import 'package:uuid/uuid.dart';
@@ -101,18 +102,28 @@ class PatientSyncService {
     // 1. Pre-fetch cloud and local datasets once to avoid N+1 queries
     List<Patient> cloudPatients = const [];
     List<Map<String, String>> cloudSources = const [];
-    try {
+    if (supabaseService.isReadyForSync) {
+      try {
       cloudPatients = await measured(
         'reconcile_supabase_fetch_patients',
-        supabaseService.fetchAllPatients,
+        () => supabaseService.fetchAllPatients().timeout(
+          const Duration(seconds: 4),
+          onTimeout: () => throw TimeoutException('Supabase fetchAllPatients timed out'),
+        ),
       );
       cloudSources = await measured(
         'reconcile_supabase_fetch_sources',
-        supabaseService.fetchAllPatientSources,
+        () => supabaseService.fetchAllPatientSources().timeout(
+          const Duration(seconds: 4),
+          onTimeout: () => throw TimeoutException('Supabase fetchAllPatientSources timed out'),
+        ),
       );
     } catch (e) {
       lastSupabaseError = formatSupabaseError(e);
       debugPrint('Warning: unable to fetch from Supabase during sheet reconciliation: $lastSupabaseError');
+      }
+    } else {
+      trace?.addCount('skippedSupabaseFetchNotReady');
     }
 
     final localPatients = await measured('reconcile_db_get_patients', () {
@@ -308,23 +319,33 @@ class PatientSyncService {
 
     // 4. Batch persist to Supabase
     bool supabaseSuccess = false;
-    try {
+    if (supabaseService.isReadyForSync) {
+      try {
       if (patientsToUpsert.isNotEmpty) {
         await measured(
           'reconcile_supabase_upsert_patients',
-          () => supabaseService.upsertPatients(patientsToUpsert),
+          () => supabaseService.upsertPatients(patientsToUpsert).timeout(
+            const Duration(seconds: 4),
+            onTimeout: () => throw TimeoutException('Supabase upsertPatients timed out'),
+          ),
         );
       }
       if (sourcesToLink.isNotEmpty) {
         await measured(
           'reconcile_supabase_link_sources',
-          () => supabaseService.linkPatientSources(sourcesToLink),
+          () => supabaseService.linkPatientSources(sourcesToLink).timeout(
+            const Duration(seconds: 4),
+            onTimeout: () => throw TimeoutException('Supabase linkPatientSources timed out'),
+          ),
         );
       }
       supabaseSuccess = true;
     } catch (e) {
       lastSupabaseError = formatSupabaseError(e);
       debugPrint('Warning: unable to batch sync reconciled patients to Supabase: $lastSupabaseError');
+      }
+    } else {
+      trace?.addCount('skippedSupabaseUpsertNotReady');
     }
 
     // 5. Batch persist to SQLite
@@ -651,7 +672,10 @@ class PatientSyncService {
         if (sourcesToLink.isNotEmpty) {
           await measured(
             'supabase_push_sources',
-            () => supabaseService.linkPatientSources(sourcesToLink),
+            () => supabaseService.linkPatientSources(sourcesToLink).timeout(
+              const Duration(seconds: 4),
+              onTimeout: () => throw TimeoutException('Supabase linkPatientSources timed out'),
+            ),
           );
         }
         await measured('supabase_db_apply_push', () async {
