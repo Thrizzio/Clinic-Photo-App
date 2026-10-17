@@ -1,20 +1,19 @@
 # Architecture
 
 ## Status
-Version 5 (V5) — Flutter Android single-doctor clinical photo capture app. V5 establishes a robust four-component architecture separating canonical cloud identity, offline-first local working storage, external operational imports, and cloud photo storage:
-1. **Supabase**: Canonical cloud store for patient identity and external source mappings (`patients` and `patient_sources`). Configured for single-clinic direct access using the anon key with `clinic_id NOT NULL DEFAULT 'c0000000-0000-0000-0000-000000000001'` (no Supabase Auth or email/password login required for MVP).
-2. **SQLite**: Offline working store, local patient cache, and persistent photo capture & upload queue.
-3. **Google Sheets**: External operational import stream (read-only clinic spreadsheet).
-4. **Google Drive**: Clinical photo storage organized by patient folders (`<Patient Name> - <Phone Number>` or legacy `<Legacy Patient ID> - <Patient Name>`).
+Version 6 (V6) — Flutter Android clinical photo capture app. V6 introduces shared cloud-photo discovery, camera reference selection from the full-screen photo viewer, background-first synchronization with truthful offline indicators, concurrent-safe silent Google authentication, recent-activity patient sorting (`max(last_viewed_at, updated_at, created_at)`), and a managed remote-photo cache service with 500 MB to 400 MB LRU eviction and 30-day retention.
 
-Key V5 capabilities:
+Key V6 capabilities:
 - Canonical UUID patient identity with business identity deduplication `(normalized_name, normalized_phone)`.
 - Invariant: doctor-created patients are NEVER deleted by Google Sheets synchronization.
 - Day 1 in-app creation + Day 5 Google Sheet addition links seamlessly into the canonical UUID record without duplicates.
-- Offline-first photo capture: shutter saves to disk and SQLite immediately; renders immediately in gallery with status badges (`Pending`, `Uploading`, `Uploaded`, `Failed`); uploads asynchronously in background.
-- Local photo disk cache retention for instant offline viewing.
-- Unassigned capture sessions and multi-select photo moves with zero cellular bandwidth re-upload.
-- Authoritative IST chronology (`UTC+05:30`) and Material 3 design with dark mode.
+- Offline-first photo capture: shutter saves to disk and SQLite immediately; renders immediately in gallery; uploads asynchronously in background.
+- Shared cloud-photo discovery: remote patient photos enumerating directly from Google Drive folders, streaming lightweight thumbnails without full-res download overhead.
+- Reference-image camera overlays: selectable from full-screen viewer or picker; overlay is strictly Flutter UI and never written into captured JPEG bytes.
+- Background-first synchronization: SQLite patient records display immediately; cloud reconciliation runs silently; no technical sync badges or spinners in doctor workflow; non-intrusive offline notice only when network is genuinely disconnected.
+- Concurrent-safe Google authentication: Zone-scoped locking prevents race conditions and repeated consent prompts during background syncing.
+- Recent-activity ordering: SQLite schema v11 deterministic sort by `max(last_viewed_at, updated_at, created_at)` with case-insensitive name and stable UUID tie-breaking. Viewing patients records `last_viewed_at` without marking clinical data dirty or triggering cloud sync.
+- Managed remote-photo cache (`RemotePhotoCacheService`): separate app-private directory `remote_photo_cache/` for thumbnails and full-res photos, 30-day retention, 500 MB budget with LRU eviction to 400 MB, and verified local capture retention (30 days post-verified upload without pending recovery). Cloud originals strictly protected from eviction.
 
 ---
 
@@ -28,20 +27,23 @@ Key V5 capabilities:
 |  |     UI Layer (Screens/Widgets) |       |  UploadQueueService (Worker)    |  |
 |  |  - Instant shutter capture     |       |  - Background upload loop       |  |
 |  |  - Immediate gallery rendering |       |  - Auto-create Drive folders    |  |
-|  |  - Badges (Pending/Uploaded)   |       |  - Exponential retry & backoff  |  |
+|  |  - Camera reference overlays   |       |  - Exponential retry & backoff  |  |
+|  |  - Background-first sync UI    |       |  - Verified capture retention   |  |
 |  +--------------------------------+       +---------------------------------+  |
 |                   |                                       |                    |
-|                   v                                       v                    |
-|  +--------------------------------------------------------------------------+  |
-|  |                     SQLite AppDatabase (Local Cache)                     |  |
-|  |  - patients (UUID, name, phone, source, drive_folder_id, sync_status)   |  |
-|  |  - patient_sources (id, patient_id, source, external_id, created_at)    |  |
-|  |  - capture_sessions (unassigned & assigned capture sessions)             |  |
-|  |  - uploads (upload queue with local_path, drive_file_id, status)         |  |
-|  +--------------------------------------------------------------------------+  |
+|                   |       +-------------------------------+                    |
+|                   v       v                                                    |
+|  +-----------------------------------+    +---------------------------------+  |
+|  | SQLite AppDatabase (Schema v11)   |    | RemotePhotoCacheService         |  |
+|  |  - patients (UUID, name, phone,   |    |  - Thumbnails & full-res cache  |  |
+|  |    source, drive_folder_id,       |    |  - 500 MB budget, 400 MB LRU    |  |
+|  |    updated_at, last_viewed_at)    |    |  - 30-day access TTL            |  |
+|  |  - patient_sources & sessions     |    |  - Cloud originals protected    |  |
+|  |  - uploads & remote_photo_cache   |    +---------------------------------+  |
+|  +-----------------------------------+                                         |
 +--------------------------------------------------------------------------------+
        |                                      |                         |
-       | Sync / Match                         | Sync Patients           | Upload Photos
+       | Sync / Match                         | Sync Patients           | Upload Photos / Cache
        v                                      v                         v
 +-----------------------+          +--------------------+    +-------------------+
 |  Supabase (Cloud DB)  |          |   Google Sheets    |    |   Google Drive    |
@@ -57,27 +59,28 @@ Key V5 capabilities:
 
 - `lib/config.dart`: App-level constants, Drive scopes, table definitions, and sheet column headers.
 - `lib/models/`:
-  - `patient.dart`: Canonical patient model (`id` [UUID], `displayName`, `normalizedName`, `phoneDisplay`, `normalizedPhone`, `legacyPatientId`, `source: clinicSheet | doctorCreated | merged`, `driveFolderId`, `folderStatus`, `syncStatus`, `isUploadable`, `matchesBusinessIdentity`).
+  - `patient.dart`: Canonical patient model (`id` [UUID], `displayName`, `normalizedName`, `phoneDisplay`, `normalizedPhone`, `legacyPatientId`, `source: clinicSheet | doctorCreated | merged`, `driveFolderId`, `folderStatus`, `syncStatus`, `createdAt`, `updatedAt`, `lastViewedAt`, `effectiveActivityAt`, `isUploadable`, `matchesBusinessIdentity`).
   - `capture_session.dart`: Capture session model (`id`, `patientId`, `createdAt`, `status`, `photoCount`, `driveFolderId`).
   - `upload_item.dart`: Persistent photo capture & upload queue record (`id`, `sessionId`, `patientId`, `driveFolderId`, `localPath`, `fileName`, `status: pending | waiting | uploading | uploaded | failed | unassigned`, `retryCount`, `lastError`, `driveFileId`, `capturedAt`, `sequenceNumber`).
+  - `remote_cache_entry.dart`: Managed cache metadata record (`driveFileId`, `cacheType: thumbnail | full`, `filePath`, `fileSize`, `patientId`, `createdAt`, `lastAccessedAt`).
   - `clinic_config.dart`: Settings model (`spreadsheetId`, `spreadsheetUrl`, `sheetTabName`, `parentDriveFolderId`, `hasCompletedSetup`, `lastPatientSync`, `lastSyncedRow`, `lastFullSync`).
 - `lib/services/`:
-  - `supabase_auth_service.dart`: (Deprecated for MVP single-clinic architecture). In the single-clinic MVP, patient cloud sync directly utilizes the Supabase client with the project anon key and default clinic ID (`c0000000-0000-0000-0000-000000000001`). No user password or Supabase Auth session is required. Google Sign-In is preserved solely for Google Drive and Google Sheets access.
+  - `database.dart`: SQLite database (schema v11) with `patients`, `patient_sources`, `capture_sessions`, `uploads`, and `remote_photo_cache` tables. Deterministic patient sorting orders by `effectiveActivityAt DESC, display_name COLLATE NOCASE ASC, id ASC`. Crash recovery resets `uploading` to `waiting`.
+  - `remote_photo_cache.dart`: Managed local cache for remote Drive photos with thumbnail streaming, full-res retrieval, 30-day retention, 500 MB budget, LRU eviction to 400 MB, and verified local capture cleanup.
+  - `drive.dart`: Google Drive API v3 client (folder queries, uploads, server-side moves, deletions, thumbnail streaming, pagination, remote patient photo enumeration).
+  - `google_auth.dart`: Google Sign-In 7.x wrapper and authenticated HTTP client with Zone-scoped concurrency locking and bounded interactive re-authorization.
+  - `upload_queue.dart`: Manages disk persistence (`photo_queue/`), SQLite upload state machine, background uploading, Drive folder auto-creation for offline captures, verified capture retention, and unassigned sessions.
+  - `patient_folder_service.dart`: Idempotent Google Drive folder resolver (`<Patient Name> - <Phone Number>` or legacy `<Legacy Patient ID> - <Patient Name>`).
+  - `sheets.dart`: Google Sheets API v4 metadata discovery, dynamic headers, and read-only import stream.
   - `supabase_patient_service.dart`: Supabase client managing canonical `patients` and `patient_sources` tables, remote business identity lookup, and cross-source reconciliation.
   - `patient_sync_service.dart`: Reconciles external Google Sheets rows with Supabase canonical patients and updates SQLite local cache with truthful sync reporting (detects RLS 42501 violations).
-  - `database.dart`: SQLite database (schema v8) with `patients`, `patient_sources`, `capture_sessions`, and `uploads` tables. `replacePatients()` is deprecated with zero production callers; Sheet sync strictly uses `upsertPatients()`. Patient list is ordered alphabetically (`display_name COLLATE NOCASE ASC, name COLLATE NOCASE ASC`). Crash recovery resets `uploading` to `waiting`.
-  - `upload_queue.dart`: Manages disk persistence (`photo_queue/`), SQLite upload state machine, background uploading, Drive folder auto-creation for offline captures, unassigned sessions, and session assignment.
-  - `patient_folder_service.dart`: Idempotent Google Drive folder resolver (`<Patient Name> - <Phone Number>` or legacy `<Legacy Patient ID> - <Patient Name>`).
-  - `drive.dart`: Google Drive API v3 client (folder queries, uploads, server-side moves, deletions, thumbnail streaming).
-  - `sheets.dart`: Google Sheets API v4 metadata discovery, dynamic headers, and read-only import stream.
-  - `google_auth.dart`: Google Sign-In 7.x wrapper and authenticated HTTP client for Google APIs (Google Drive & Sheets).
   - `config_service.dart`: SharedPreferences settings persistence, doctor credentials storage, and reactive `themeModeNotifier`.
 - `lib/screens/`:
   - `welcome_screen.dart`: Welcome & Google sign-in.
   - `clinic_setup_screen.dart`: Spreadsheet configuration and parent Drive folder setup.
-  - `patients_screen.dart`: Search-first patient selector (All, Name, Phone filters), top-right action buttons, unassigned sessions FAB, and doctor patient creation.
-  - `camera_screen.dart`: Rapid offline-first clinical photo capture with zero blocking shutter.
-  - `patient_photos_screen.dart`: Gallery rendering local disk cache immediately with upload status badges, background Drive sync, multi-select moves, and safe deletions.
+  - `patients_screen.dart`: Search-first patient selector with silent background synchronization, non-intrusive offline indicator on genuine network loss, and activity-sorted list.
+  - `camera_screen.dart`: Rapid offline-first clinical photo capture with zero blocking shutter, reference image overlay, and shared cloud-photo discovery in the reference picker.
+  - `patient_photos_screen.dart`: Gallery rendering local disk cache immediately with upload status badges, background Drive sync, "Use as reference" full-screen viewer action, multi-select moves, and safe deletions.
   - `unassigned_photos_screen.dart`: Unassigned photo sessions list with thumbnail strip, photo counts, and assignment dialog.
   - `session_detail_screen.dart`: Detailed inspection for unassigned sessions.
   - `settings_screen.dart`: Theme settings, clinic configuration, manual reconciliation sync, and sign-out.
@@ -165,3 +168,47 @@ Key V5 capabilities:
   - When a user deletes a photo offline, the UI removes it immediately, local file cache and SQLite records are cleaned up, a tombstone is recorded in `deleted_photo_tombstones`, and a record is added to `pending_photo_deletions`.
   - Background worker `UploadQueueService.processPendingPhotoDeletions` syncs pending deletions to Drive upon reconnecting.
   - When Device A synchronizes with Drive, if an uploaded photo is absent from the Drive folder, Device A reconciles the deletion, removes its local upload record and disk cache, and records a tombstone, ensuring Device A never resurrects the deleted photo.
+
+### 7. Shared Cloud-Photo Discovery & Camera Reference Workflow
+- **Remote Candidate Enumeration**:
+  - `DriveService.listRemotePatientPhotos` queries the patient's Google Drive folder directly, paginating through files matching image MIME types.
+  - Local upload records and cached files are rendered immediately in the candidate picker.
+  - Remote photos captured by other devices appear asynchronously without waiting for local record synchronization.
+  - Photos are deduplicated by `driveFileId` and local filename to avoid duplicate entries.
+- **Lightweight Thumbnail Streaming**:
+  - Remote candidates stream thumbnail bytes lazily via `drive.files.get(alt: Media)` or Drive thumbnail links, caching thumbnails in `remote_photo_cache/thumbnails/`.
+  - Full-resolution photos are NEVER fetched merely to populate the thumbnail picker.
+- **Viewer-to-Camera Reference Handoff**:
+  - The full-screen photo viewer provides a direct "Use as reference" action.
+  - If the image is locally cached or in `photo_queue`, its bytes are passed directly into `CameraScreen(initialReferenceBytes: bytes)`.
+  - If remote, bytes are retrieved on demand from `RemotePhotoCacheService` with non-blocking loading feedback.
+  - The camera reference overlay is strictly a Flutter UI composition layer (`Opacity` widget) and is never written into the captured JPEG image bytes.
+
+### 8. Background-First Synchronization & Doctor-Facing UI
+- **Zero Technical Sync In Doctor Workflow**:
+  - The manual "Refresh" button, "Synced" badges, and "Local only" tech state indicators are removed from the doctor's primary view.
+  - SQLite patients render synchronously/instantly on startup.
+  - Background tasks (`_syncPatientDatabaseInBackground()` and `_syncSheetInBackground()`) run silently without blocking user actions.
+  - Bounded concurrency locks prevent duplicate or overlapping synchronization jobs.
+- **Truthful Network Awareness**:
+  - A subtle offline banner renders only when network connectivity is genuinely absent (`ConnectivityResult.none`).
+  - Google Auth expiration, missing scopes, or server errors are handled as non-blocking technical errors and are never misrepresented as "offline".
+
+### 9. Deterministic Recent-Activity Patient Ordering
+- **Canonical Activity Timestamp**:
+  - Patient sorting orders by `max(last_viewed_at, updated_at, created_at) DESC`.
+  - Deterministic tie-breaker: `display_name COLLATE NOCASE ASC, id ASC`.
+- **Viewing vs. Editing Semantics**:
+  - Opening a patient in `PatientPhotosScreen` updates `last_viewed_at` in SQLite without altering `updated_at` and without marking the patient dirty (`pending_cloud`) for Supabase sync.
+  - `updated_at` changes only when clinical metadata or patient details are modified.
+
+### 10. Managed Remote-Photo Cache & Retention Architecture
+- **Dual-Tier App-Private Storage**:
+  - Remote assets reside in an app-private directory (`remote_photo_cache/`) separate from `photo_queue/`.
+  - Thumbnails (`thumbnails/`) and full-resolution images (`full/`) are tracked in SQLite `remote_photo_cache`.
+- **Budget & LRU Eviction**:
+  - Configurable 500 MB cache budget with hysteresis: when total cache size exceeds 500 MB, least-recently-used (LRU) files are evicted until disk usage falls below 400 MB.
+  - 30-day retention after last access timestamp.
+- **Safety Invariants**:
+  - **Cloud Originals**: Eviction deletes ONLY local cached files. Google Drive originals are NEVER touched or deleted during cache eviction.
+  - **Local Captures**: Local files in `photo_queue/` remain untouched until upload is verified against Google Drive. Verified captures are retained for 30 days before safe cleanup. Pending, failed, or ambiguous uploads are NEVER cleaned up.
