@@ -12,6 +12,9 @@ google-services.json
 GoogleService-Info.plist
 .runtimeconfig.json
 
+
+.opencode/
+
 # ===== OS junk =====
 .DS_Store
 Thumbs.db
