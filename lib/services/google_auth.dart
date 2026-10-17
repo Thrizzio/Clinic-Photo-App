@@ -39,7 +39,6 @@ class GoogleAuthService {
   Future<GoogleSignInAccount?>? _silentAccountFuture;
   Future<AuthClient?>? _silentClientFuture;
   Future<GoogleSignInAccount?>? _interactiveSignInFuture;
-  bool _silentRequest = false;
   bool _interactiveRecoveryAttempted = false;
   GoogleAuthStatus _lastStatus = const GoogleAuthStatus(GoogleAuthState.notSignedIn);
 
@@ -170,12 +169,14 @@ class GoogleAuthService {
     _interactiveRecoveryAttempted = false;
   }
 
+  static const _silentZoneKey = #_googleAuthSilentRequest;
+
   /// Obtains an authenticated HTTP client for Google APIs calls.
   ///
   /// Uses [extension_google_sign_in_as_googleapis_auth] with [GoogleSignInClientAuthorization.authClient].
   Future<AuthClient?> getAuthenticatedClient() async {
-    final allowInteractive = !_silentRequest;
-    _silentRequest = false;
+    final isSilentInZone = Zone.current[_silentZoneKey] == true;
+    final allowInteractive = !isSilentInZone;
     return _getAuthenticatedClient(allowInteractive: allowInteractive);
   }
 
@@ -186,7 +187,10 @@ class GoogleAuthService {
     final active = _silentClientFuture;
     if (active != null) return active;
 
-    final future = _getAuthenticatedClientSilentlyThroughEntryPoint();
+    final future = runZoned(
+      () => getAuthenticatedClient(),
+      zoneValues: {_silentZoneKey: true},
+    );
     _silentClientFuture = future;
     future.then<void>(
       (_) {
@@ -197,17 +201,6 @@ class GoogleAuthService {
       },
     );
     return future;
-  }
-
-  Future<AuthClient?> _getAuthenticatedClientSilentlyThroughEntryPoint() async {
-    _silentRequest = true;
-    try {
-      // Keep this call routed through the overridable public method so test
-      // doubles and platform-specific auth adapters retain their behavior.
-      return await getAuthenticatedClient();
-    } finally {
-      _silentRequest = false;
-    }
   }
 
   /// Warms up the existing Google account and requested scopes without ever
