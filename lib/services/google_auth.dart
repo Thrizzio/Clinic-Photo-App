@@ -40,7 +40,13 @@ class GoogleAuthService {
   Future<AuthClient?>? _silentClientFuture;
   Future<GoogleSignInAccount?>? _interactiveSignInFuture;
   bool _silentRequest = false;
+  bool _interactiveRecoveryAttempted = false;
   GoogleAuthStatus _lastStatus = const GoogleAuthStatus(GoogleAuthState.notSignedIn);
+
+  /// Resets the one-time interactive recovery attempt flag.
+  void resetRecoveryAttempt() {
+    _interactiveRecoveryAttempted = false;
+  }
 
   GoogleAuthService([GoogleSignIn? googleSignIn])
       : _googleSignIn = googleSignIn ?? GoogleSignIn.instance;
@@ -161,6 +167,7 @@ class GoogleAuthService {
     await ensureInitialized();
     await _googleSignIn.signOut();
     _currentAccount = null;
+    _interactiveRecoveryAttempted = false;
   }
 
   /// Obtains an authenticated HTTP client for Google APIs calls.
@@ -215,10 +222,22 @@ class GoogleAuthService {
     // A silent queue/WorkManager request must not start Credential Manager or
     // any other user-facing authentication flow. Foreground callers retain
     // the existing lightweight sign-in behavior.
-    final account = _currentAccount ?? await signInSilently();
+    var account = _currentAccount ?? await signInSilently();
     if (account == null) {
-      _lastStatus = const GoogleAuthStatus(GoogleAuthState.notSignedIn);
-      return null;
+      if (allowInteractive && !_interactiveRecoveryAttempted) {
+        _interactiveRecoveryAttempted = true;
+        try {
+          account = await signIn();
+        } catch (e) {
+          _lastStatus = _classifyError(e);
+          debugPrint('Interactive Google sign-in recovery error: $e');
+          return null;
+        }
+      }
+      if (account == null) {
+        _lastStatus = const GoogleAuthStatus(GoogleAuthState.notSignedIn);
+        return null;
+      }
     }
 
     try {
@@ -237,6 +256,7 @@ class GoogleAuthService {
       authz ??= await account.authorizationClient.authorizeScopes(AppConfig.googleScopes);
 
       _lastStatus = const GoogleAuthStatus(GoogleAuthState.ready);
+      _interactiveRecoveryAttempted = false;
       return authz.authClient(scopes: AppConfig.googleScopes);
     } catch (e) {
       _lastStatus = _classifyError(e);
