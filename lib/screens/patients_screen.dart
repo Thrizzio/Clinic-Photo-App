@@ -52,6 +52,7 @@ class _PatientsScreenState extends State<PatientsScreen> with WidgetsBindingObse
   String? _syncStatusMessage;
   bool _isOffline = false;
   bool _isOpeningCamera = false;
+  Future<void>? _activeSheetSyncFuture;
   late final PatientFolderService _patientFolderService =
       widget.queueService.patientFolderService ??
           PatientFolderService(
@@ -146,12 +147,13 @@ class _PatientsScreenState extends State<PatientsScreen> with WidgetsBindingObse
   /// Normal patient-list sync should primarily be SQLite <-> Supabase.
   /// Does NOT query Google Sheets or Google Drive.
   Future<void> _syncPatientDatabaseInBackground() async {
+    if (_activeSheetSyncFuture != null) return;
     final trace = SyncDiagnostics.start(
       'patient_database_sync',
       trigger: 'patients_startup',
     );
     await SyncDiagnostics.run(trace, () async {
-      if (mounted) {
+      if (mounted && _activeSheetSyncFuture == null) {
         setState(() {
           _isSyncing = true;
         });
@@ -177,15 +179,15 @@ class _PatientsScreenState extends State<PatientsScreen> with WidgetsBindingObse
           trace.addCount('localListRefreshSkipped');
         }
 
-        if (mounted) {
+        if (mounted && _activeSheetSyncFuture == null) {
           final now = DateTime.now();
           final timeStr = DateFormat('h:mm a').format(now);
           setState(() {
             _isSyncing = false;
-            _isOffline = !cloudSyncCompleted;
-            _syncStatusMessage = cloudSyncCompleted
-                ? '✓ Synced $timeStr'
-                : 'Local only · Sign in to sync';
+            if (cloudSyncCompleted) {
+              _isOffline = false;
+              _syncStatusMessage = '✓ Synced $timeStr';
+            }
           });
         }
         trace.finish(
@@ -201,11 +203,9 @@ class _PatientsScreenState extends State<PatientsScreen> with WidgetsBindingObse
           fields: <String, Object?>{'errorType': e.runtimeType.toString()},
         );
         debugPrint('Background database sync notice: $e');
-        if (mounted) {
+        if (mounted && _activeSheetSyncFuture == null) {
           setState(() {
             _isSyncing = false;
-            _isOffline = true;
-            _syncStatusMessage = 'Offline · Showing cached list';
           });
         }
       }
@@ -219,18 +219,28 @@ class _PatientsScreenState extends State<PatientsScreen> with WidgetsBindingObse
   /// the caller explicitly requests a refresh), we fetch and reconcile the
   /// complete master view. We deliberately do not infer row-level deltas from
   /// row numbers because sorting and inserted rows make that unsafe.
-  Future<void> _syncSheetInBackground({bool forceFullSync = false}) async {
+  Future<void> _syncSheetInBackground({bool forceFullSync = false}) {
+    final active = _activeSheetSyncFuture;
+    if (active != null) return active;
+
     final trace = SyncDiagnostics.start(
       'sheet_sync',
       trigger: forceFullSync ? 'manual_refresh' : 'background_refresh',
     );
-    await SyncDiagnostics.run(
+    final future = SyncDiagnostics.run(
       trace,
       () => _syncSheetInBackgroundImpl(
         forceFullSync: forceFullSync,
         trace: trace,
       ),
     );
+    _activeSheetSyncFuture = future;
+    future.whenComplete(() {
+      if (identical(_activeSheetSyncFuture, future)) {
+        _activeSheetSyncFuture = null;
+      }
+    });
+    return future;
   }
 
   Future<void> _syncSheetInBackgroundImpl({
@@ -386,8 +396,12 @@ class _PatientsScreenState extends State<PatientsScreen> with WidgetsBindingObse
       if (mounted) {
         setState(() {
           _isSyncing = false;
-          _isOffline = true;
-          _syncStatusMessage = 'Offline · Showing cached list';
+          final authState = widget.authService.lastStatus.state;
+          _isOffline = authState != GoogleAuthState.notSignedIn && authState != GoogleAuthState.scopesRequired;
+          _syncStatusMessage = !_isOffline
+              ? widget.authService.lastStatus.userMessage
+              : 'Offline · Showing cached list';
+
         });
       }
     }
@@ -771,7 +785,12 @@ class _PatientsScreenState extends State<PatientsScreen> with WidgetsBindingObse
             ),
 
             // Sync Status Banner
-            Container(
+            Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (_isSyncing)
+                  const LinearProgressIndicator(minHeight: 2),
+                Container(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
               color: _isOffline
                   ? (isDark ? Colors.amber.shade900.withValues(alpha: 0.3) : Colors.amber.shade50)
@@ -812,7 +831,10 @@ class _PatientsScreenState extends State<PatientsScreen> with WidgetsBindingObse
                       ),
                     ),
                     InkWell(
-                      onTap: () => _syncSheetInBackground(forceFullSync: true),
+                      onTap: () {
+                        widget.authService.resetRecoveryAttempt();
+                        _syncSheetInBackground(forceFullSync: true);
+                      },
                       child: const Padding(
                         padding: EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                         child: Text(
@@ -824,6 +846,8 @@ class _PatientsScreenState extends State<PatientsScreen> with WidgetsBindingObse
                   ],
                 ],
               ),
+                ),
+              ],
             ),
 
             // Patients List
@@ -871,7 +895,11 @@ class _PatientsScreenState extends State<PatientsScreen> with WidgetsBindingObse
                           ),
                         )
                       : RefreshIndicator(
-                          onRefresh: () => _syncSheetInBackground(forceFullSync: true),
+                          onRefresh: () async {
+                            widget.authService.resetRecoveryAttempt();
+                            unawaited(_syncSheetInBackground(forceFullSync: true));
+                            await Future.delayed(const Duration(milliseconds: 250));
+                          },
                           child: ListView.builder(
                             padding: const EdgeInsets.fromLTRB(0, 0, 0, 88),
                             itemCount: _patients.length,
