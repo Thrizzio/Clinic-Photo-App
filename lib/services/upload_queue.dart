@@ -15,6 +15,7 @@ import 'database.dart';
 import 'drive.dart';
 import 'google_auth.dart';
 import 'patient_folder_service.dart';
+import 'remote_photo_cache.dart';
 
 class QueueStatus {
   final int activeCount;
@@ -52,8 +53,17 @@ class UploadQueueService extends ChangeNotifier {
   final DriveService driveService;
   final Connectivity connectivity;
   final String? customDocsDirectory;
+  final String? customCacheDirectory;
   final Future<void> Function()? scheduleBackgroundWork;
   PatientFolderService? patientFolderService;
+
+  RemotePhotoCacheService? _remotePhotoCacheService;
+  RemotePhotoCacheService get remotePhotoCacheService =>
+      _remotePhotoCacheService ??= RemotePhotoCacheService(
+        database: database,
+        driveService: driveService,
+        customBaseDirectory: customCacheDirectory,
+      );
 
   bool _isProcessing = false;
   bool _disposed = false;
@@ -71,8 +81,11 @@ class UploadQueueService extends ChangeNotifier {
     this.patientFolderService,
     Connectivity? connectivity,
     this.customDocsDirectory,
+    this.customCacheDirectory,
+    RemotePhotoCacheService? remotePhotoCacheService,
     this.scheduleBackgroundWork,
   }) : connectivity = connectivity ?? Connectivity() {
+    _remotePhotoCacheService = remotePhotoCacheService;
     _initConnectivityListener();
     unawaited(recoverOrphanedPhotos());
     _bindFolderServiceListener();
@@ -1115,5 +1128,43 @@ class UploadQueueService extends ChangeNotifier {
     await database.resetFailedToWaiting();
     _safeNotifyListeners();
     await processQueue();
+  }
+
+  /// Safely cleans up local disk files for verified uploads older than [maxAge] (30 days).
+  ///
+  /// INVARIANTS:
+  /// - Only items with status == UploadStatus.uploaded are eligible.
+  /// - Must have a valid non-empty driveFileId.
+  /// - Must not be part of an unassigned session or active session.
+  /// - Never deletes pending, waiting, uploading, failed, or ambiguous uploads.
+  /// - Sets localPath to empty string in SQLite so the record remains a valid remote reference pointer.
+  Future<int> cleanupOldVerifiedUploads({Duration maxAge = const Duration(days: 30)}) async {
+    final cutoff = DateTime.now().subtract(maxAge);
+    final all = await database.getAllUploads();
+    var cleanedCount = 0;
+
+    for (final item in all) {
+      if (item.status != UploadStatus.uploaded) continue;
+      if (item.driveFileId == null || item.driveFileId!.isEmpty) continue;
+      if (item.capturedAt.isAfter(cutoff)) continue;
+      if (item.sessionId != null) {
+        final session = await database.getSession(item.sessionId!);
+        if (session != null && session.status == 'unassigned') continue;
+      }
+
+      if (item.localPath.isNotEmpty) {
+        final file = File(item.localPath);
+        if (file.existsSync()) {
+          try {
+            file.deleteSync();
+            cleanedCount++;
+          } catch (e) {
+            debugPrint('Error deleting old verified local capture ${item.localPath}: $e');
+          }
+        }
+        await database.updateUpload(item.copyWith(localPath: ''));
+      }
+    }
+    return cleanedCount;
   }
 }

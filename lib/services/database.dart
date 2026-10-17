@@ -4,6 +4,7 @@ import 'package:sqflite/sqflite.dart';
 import 'package:uuid/uuid.dart';
 import '../models/capture_session.dart';
 import '../models/patient.dart';
+import '../models/remote_cache_entry.dart';
 import '../models/upload_item.dart';
 import 'sync_diagnostics.dart';
 
@@ -256,6 +257,47 @@ abstract class AppDatabase {
   /// Retrieves an upload item by its file name.
   Future<UploadItem?> getUploadByFileName(String fileName);
 
+  // --- Patient Activity Operations ---
+
+  /// Records that a doctor viewed or opened this patient.
+  /// Updates local `last_viewed_at` without modifying `updated_at` or `sync_status`.
+  Future<void> recordPatientViewed(String patientId, {DateTime? viewedAt});
+
+  // --- Remote Photo Cache Operations ---
+
+  /// Inserts or updates a remote cache metadata entry.
+  Future<void> insertRemoteCacheEntry(RemoteCacheEntry entry);
+
+  /// Retrieves a cache entry by Drive file ID and cache type ('thumbnail' | 'full').
+  Future<RemoteCacheEntry?> getRemoteCacheEntry(String driveFileId, String cacheType);
+
+  /// Updates the last accessed time for a cache entry.
+  Future<void> updateRemoteCacheAccess(String driveFileId, String cacheType, DateTime accessedAt);
+
+  /// Deletes a single cache entry.
+  Future<void> deleteRemoteCacheEntry(String driveFileId, String cacheType);
+
+  /// Deletes all cache entries associated with a Drive file ID.
+  Future<void> deleteRemoteCacheForDriveFile(String driveFileId);
+
+  /// Deletes all cache entries associated with a patient UUID.
+  Future<void> deleteRemoteCacheForPatient(String patientId);
+
+  /// Retrieves expired cache entries older than the cutoff date.
+  Future<List<RemoteCacheEntry>> getExpiredRemoteCacheEntries(DateTime cutoff);
+
+  /// Retrieves all cache entries ordered by last_accessed_at ascending (LRU).
+  Future<List<RemoteCacheEntry>> getLruRemoteCacheEntries();
+
+  /// Calculates total bytes used by cached remote photos.
+  Future<int> getTotalRemoteCacheSize();
+
+  /// Retrieves all cache entries associated with a patient UUID.
+  Future<List<RemoteCacheEntry>> getRemoteCacheEntriesForPatient(String patientId);
+
+  /// Retrieves all cache entries associated with a Drive file ID.
+  Future<List<RemoteCacheEntry>> getRemoteCacheEntriesForDriveFile(String driveFileId);
+
   /// Closes the database connection.
   Future<void> close();
 
@@ -289,7 +331,7 @@ abstract class AppDatabase {
 /// SQLite-backed production database implementation for Android.
 class SqliteAppDatabase implements AppDatabase {
   static const String _dbName = 'clinic_photos.db';
-  static const int _dbVersion = 10;
+  static const int _dbVersion = 11;
 
   final Database db;
 
@@ -320,6 +362,7 @@ class SqliteAppDatabase implements AppDatabase {
               folder_status TEXT NOT NULL,
               created_at TEXT NOT NULL,
               updated_at TEXT,
+              last_viewed_at TEXT,
               sync_status TEXT DEFAULT 'synced',
               name TEXT,
               phone_number TEXT,
@@ -416,6 +459,7 @@ class SqliteAppDatabase implements AppDatabase {
           );
 
           await _ensurePhotoDeletionTables(db);
+          await _ensureRemotePhotoCacheTable(db);
         },
         onUpgrade: (db, oldVersion, newVersion) async {
           if (oldVersion < 2) {
@@ -444,6 +488,10 @@ class SqliteAppDatabase implements AppDatabase {
           if (oldVersion < 10) {
             await _migrateToV10(db);
           }
+
+          if (oldVersion < 11) {
+            await _migrateToV11(db);
+          }
         },
         onOpen: (db) async {
           // Ensure schema compatibility on existing databases
@@ -451,10 +499,12 @@ class SqliteAppDatabase implements AppDatabase {
           await _migrateToV8(db);
           await _migrateToV9(db);
           await _migrateToV10(db);
+          await _migrateToV11(db);
           await _migrateLegacyNonUuidPatients(db);
           await _reconcileStalePlaceholderPatients(db);
           await _ensureUploadsTableSchema(db);
           await _ensurePhotoDeletionTables(db);
+          await _ensureRemotePhotoCacheTable(db);
 
           // Crash recovery: Any upload that was interrupted in 'uploading'
           // status is reset to 'waiting' so processing will resume cleanly.
@@ -540,12 +590,17 @@ class SqliteAppDatabase implements AppDatabase {
         );
       });
     }
+
   }
 
   /// Visible for unit testing legacy schema migration.
   @visibleForTesting
   static Future<void> ensurePatientsTableSchemaForTesting(Database db) =>
       _ensurePatientsTableSchema(db);
+
+  @visibleForTesting
+  static Future<void> migrateToV11ForTesting(Database db) =>
+      _migrateToV11(db);
 
   /// Migrates older database versions to Schema v7:
   /// - Introduces local UUIDs as primary key while copying numeric IDs to legacy_patient_id
@@ -767,6 +822,40 @@ class SqliteAppDatabase implements AppDatabase {
     final info = await db.rawQuery("PRAGMA table_info(uploads)");
     if (info.isEmpty || info.any((c) => c['name'] == 'next_attempt_at')) return;
     await db.execute('ALTER TABLE uploads ADD COLUMN next_attempt_at TEXT');
+  }
+
+  static Future<void> _ensureRemotePhotoCacheTable(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS remote_photo_cache (
+        drive_file_id TEXT NOT NULL,
+        cache_type TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        file_size INTEGER NOT NULL,
+        patient_id TEXT,
+        created_at TEXT NOT NULL,
+        last_accessed_at TEXT NOT NULL,
+        PRIMARY KEY (drive_file_id, cache_type)
+      )
+    ''');
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_remote_cache_patient ON remote_photo_cache(patient_id)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_remote_cache_accessed ON remote_photo_cache(last_accessed_at)',
+    );
+  }
+
+  static Future<void> _migrateToV11(Database db) async {
+    final patientInfo = await db.rawQuery("PRAGMA table_info(patients)");
+    if (patientInfo.isNotEmpty) {
+      final hasLastViewed = patientInfo.any((c) => c['name'] == 'last_viewed_at');
+      if (!hasLastViewed) {
+        try {
+          await db.execute('ALTER TABLE patients ADD COLUMN last_viewed_at TEXT');
+        } catch (_) {}
+      }
+    }
+    await _ensureRemotePhotoCacheTable(db);
   }
 
   /// Migrates older database versions to Schema v8:
@@ -1971,6 +2060,126 @@ class SqliteAppDatabase implements AppDatabase {
     return UploadItem.fromMap(rows.first);
   }
 
+  // --- Patient Activity Operations ---
+
+  @override
+  Future<void> recordPatientViewed(String patientId, {DateTime? viewedAt}) async {
+    final nowIso = (viewedAt ?? DateTime.now()).toUtc().toIso8601String();
+    await db.update(
+      'patients',
+      {'last_viewed_at': nowIso},
+      where: 'id = ?',
+      whereArgs: [patientId],
+    );
+  }
+
+  // --- Remote Photo Cache Operations ---
+
+  @override
+  Future<void> insertRemoteCacheEntry(RemoteCacheEntry entry) async {
+    await db.insert(
+      'remote_photo_cache',
+      entry.toMap(),
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  @override
+  Future<RemoteCacheEntry?> getRemoteCacheEntry(String driveFileId, String cacheType) async {
+    final rows = await db.query(
+      'remote_photo_cache',
+      where: 'drive_file_id = ? AND cache_type = ?',
+      whereArgs: [driveFileId, cacheType],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    return RemoteCacheEntry.fromMap(rows.first);
+  }
+
+  @override
+  Future<void> updateRemoteCacheAccess(String driveFileId, String cacheType, DateTime accessedAt) async {
+    await db.update(
+      'remote_photo_cache',
+      {'last_accessed_at': accessedAt.toUtc().toIso8601String()},
+      where: 'drive_file_id = ? AND cache_type = ?',
+      whereArgs: [driveFileId, cacheType],
+    );
+  }
+
+  @override
+  Future<void> deleteRemoteCacheEntry(String driveFileId, String cacheType) async {
+    await db.delete(
+      'remote_photo_cache',
+      where: 'drive_file_id = ? AND cache_type = ?',
+      whereArgs: [driveFileId, cacheType],
+    );
+  }
+
+  @override
+  Future<void> deleteRemoteCacheForDriveFile(String driveFileId) async {
+    await db.delete(
+      'remote_photo_cache',
+      where: 'drive_file_id = ?',
+      whereArgs: [driveFileId],
+    );
+  }
+
+  @override
+  Future<void> deleteRemoteCacheForPatient(String patientId) async {
+    await db.delete(
+      'remote_photo_cache',
+      where: 'patient_id = ?',
+      whereArgs: [patientId],
+    );
+  }
+
+  @override
+  Future<List<RemoteCacheEntry>> getExpiredRemoteCacheEntries(DateTime cutoff) async {
+    final cutoffIso = cutoff.toUtc().toIso8601String();
+    final rows = await db.query(
+      'remote_photo_cache',
+      where: 'last_accessed_at < ?',
+      whereArgs: [cutoffIso],
+    );
+    return rows.map(RemoteCacheEntry.fromMap).toList();
+  }
+
+  @override
+  Future<List<RemoteCacheEntry>> getLruRemoteCacheEntries() async {
+    final rows = await db.query(
+      'remote_photo_cache',
+      orderBy: 'last_accessed_at ASC',
+    );
+    return rows.map(RemoteCacheEntry.fromMap).toList();
+  }
+
+  @override
+  Future<int> getTotalRemoteCacheSize() async {
+    final result = await db.rawQuery('SELECT SUM(file_size) as total_size FROM remote_photo_cache');
+    if (result.isEmpty || result.first['total_size'] == null) return 0;
+    return (result.first['total_size'] as num).toInt();
+  }
+
+  @override
+  Future<List<RemoteCacheEntry>> getRemoteCacheEntriesForPatient(String patientId) async {
+    final rows = await db.query(
+      'remote_photo_cache',
+      where: 'patient_id = ?',
+      whereArgs: [patientId],
+    );
+    return rows.map(RemoteCacheEntry.fromMap).toList();
+  }
+
+  @override
+  Future<List<RemoteCacheEntry>> getRemoteCacheEntriesForDriveFile(String driveFileId) async {
+    final rows = await db.query(
+      'remote_photo_cache',
+      where: 'drive_file_id = ?',
+      whereArgs: [driveFileId],
+    );
+    return rows.map(RemoteCacheEntry.fromMap).toList();
+  }
+
   @override
   Future<void> close() async {
     await db.close();
@@ -1988,6 +2197,7 @@ class InMemoryAppDatabase implements AppDatabase {
   final List<({String patientId, String? source, String? externalId, DateTime deletedAt})> _deletedTombstones = [];
   final List<Map<String, dynamic>> _pendingPhotoDeletions = [];
   final List<({String? driveFileId, String? fileName, String? patientId, DateTime deletedAt})> _deletedPhotoTombstones = [];
+  final Map<String, RemoteCacheEntry> _remoteCache = {};
 
   InMemoryAppDatabase({
     Map<String, Patient>? initialPatients,
@@ -2628,6 +2838,81 @@ class InMemoryAppDatabase implements AppDatabase {
   Map<String, UploadItem> dumpUploads() => Map.from(_uploads);
   Map<String, CaptureSession> dumpSessions() => Map.from(_sessions);
   Map<String, Patient> dumpPatients() => Map.from(_patients);
+
+  // --- Patient Activity Operations ---
+
+  @override
+  Future<void> recordPatientViewed(String patientId, {DateTime? viewedAt}) async {
+    final patient = _patients[patientId];
+    if (patient != null) {
+      _patients[patientId] = patient.copyWith(
+        lastViewedAt: viewedAt ?? DateTime.now(),
+      );
+    }
+  }
+
+  // --- Remote Photo Cache Operations ---
+
+  @override
+  Future<void> insertRemoteCacheEntry(RemoteCacheEntry entry) async {
+    _remoteCache['${entry.driveFileId}:${entry.cacheType}'] = entry;
+  }
+
+  @override
+  Future<RemoteCacheEntry?> getRemoteCacheEntry(String driveFileId, String cacheType) async {
+    return _remoteCache['$driveFileId:$cacheType'];
+  }
+
+  @override
+  Future<void> updateRemoteCacheAccess(String driveFileId, String cacheType, DateTime accessedAt) async {
+    final key = '$driveFileId:$cacheType';
+    final existing = _remoteCache[key];
+    if (existing != null) {
+      _remoteCache[key] = existing.copyWith(lastAccessedAt: accessedAt);
+    }
+  }
+
+  @override
+  Future<void> deleteRemoteCacheEntry(String driveFileId, String cacheType) async {
+    _remoteCache.remove('$driveFileId:$cacheType');
+  }
+
+  @override
+  Future<void> deleteRemoteCacheForDriveFile(String driveFileId) async {
+    _remoteCache.removeWhere((k, v) => v.driveFileId == driveFileId);
+  }
+
+  @override
+  Future<void> deleteRemoteCacheForPatient(String patientId) async {
+    _remoteCache.removeWhere((k, v) => v.patientId == patientId);
+  }
+
+  @override
+  Future<List<RemoteCacheEntry>> getExpiredRemoteCacheEntries(DateTime cutoff) async {
+    return _remoteCache.values.where((e) => e.lastAccessedAt.isBefore(cutoff)).toList();
+  }
+
+  @override
+  Future<List<RemoteCacheEntry>> getLruRemoteCacheEntries() async {
+    final list = _remoteCache.values.toList();
+    list.sort((a, b) => a.lastAccessedAt.compareTo(b.lastAccessedAt));
+    return list;
+  }
+
+  @override
+  Future<int> getTotalRemoteCacheSize() async {
+    return _remoteCache.values.fold<int>(0, (sum, e) => sum + e.fileSize);
+  }
+
+  @override
+  Future<List<RemoteCacheEntry>> getRemoteCacheEntriesForPatient(String patientId) async {
+    return _remoteCache.values.where((e) => e.patientId == patientId).toList();
+  }
+
+  @override
+  Future<List<RemoteCacheEntry>> getRemoteCacheEntriesForDriveFile(String driveFileId) async {
+    return _remoteCache.values.where((e) => e.driveFileId == driveFileId).toList();
+  }
 
   @override
   Future<void> close() async {
