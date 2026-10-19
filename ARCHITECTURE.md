@@ -72,15 +72,18 @@ Key V6 capabilities:
   - `upload_queue.dart`: Manages disk persistence (`photo_queue/`), SQLite upload state machine, background uploading, Drive folder auto-creation for offline captures, verified capture retention, and unassigned sessions.
   - `patient_folder_service.dart`: Idempotent Google Drive folder resolver (`<Patient Name> - <Phone Number>` or legacy `<Legacy Patient ID> - <Patient Name>`).
   - `sheets.dart`: Google Sheets API v4 metadata discovery, dynamic headers, and read-only import stream.
-  - `supabase_patient_service.dart`: Supabase client managing canonical `patients` and `patient_sources` tables, remote business identity lookup, and cross-source reconciliation.
+  - `supabase_patient_service.dart`: Supabase client managing canonical `patients` and `patient_sources` tables for single-clinic MVP with anon access, remote business identity lookup, and cross-source reconciliation.
   - `patient_sync_service.dart`: Reconciles external Google Sheets rows with Supabase canonical patients and updates SQLite local cache with truthful sync reporting (detects RLS 42501 violations).
+  - `collage_service.dart`: Pure Dart clinical collage generator using `package:image` with EXIF orientation correction (`bakeOrientation`), horizontal side-by-side comparison, and 3–6 image balanced grids.
+  - `photo_export_service.dart`: Cross-platform photo sharing via standard Android share sheet (`ACTION_SEND`, `ACTION_SEND_MULTIPLE`) and public gallery export via scoped MediaStore (`gal`).
   - `config_service.dart`: SharedPreferences settings persistence, doctor credentials storage, and reactive `themeModeNotifier`.
 - `lib/screens/`:
   - `welcome_screen.dart`: Welcome & Google sign-in.
   - `clinic_setup_screen.dart`: Spreadsheet configuration and parent Drive folder setup.
   - `patients_screen.dart`: Search-first patient selector with silent background synchronization, non-intrusive offline indicator on genuine network loss, and activity-sorted list.
   - `camera_screen.dart`: Rapid offline-first clinical photo capture with zero blocking shutter, reference image overlay, and shared cloud-photo discovery in the reference picker.
-  - `patient_photos_screen.dart`: Gallery rendering local disk cache immediately with upload status badges, background Drive sync, "Use as reference" full-screen viewer action, multi-select moves, and safe deletions.
+  - `patient_photos_screen.dart`: Gallery rendering local disk cache immediately with upload status badges, background Drive sync with existing folder discovery, photo sharing, gallery saving, collage creation, "Use as reference" full-screen viewer action, multi-select moves, and safe deletions.
+  - `collage_preview_screen.dart`: High-definition zoom/pan preview screen for generated clinical collages with direct share and gallery saving.
   - `unassigned_photos_screen.dart`: Unassigned photo sessions list with thumbnail strip, photo counts, and assignment dialog.
   - `session_detail_screen.dart`: Detailed inspection for unassigned sessions.
   - `settings_screen.dart`: Theme settings, clinic configuration, manual reconciliation sync, and sign-out.
