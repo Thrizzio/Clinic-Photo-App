@@ -14,7 +14,10 @@ import '../services/google_auth.dart';
 import '../services/patient_folder_service.dart';
 import '../services/upload_queue.dart';
 import '../services/patient_sync_service.dart';
+import '../services/collage_service.dart';
+import '../services/photo_export_service.dart';
 import 'camera_screen.dart';
+import 'collage_preview_screen.dart';
 
 class PatientPhotosScreen extends StatefulWidget {
   final Patient patient;
@@ -23,6 +26,8 @@ class PatientPhotosScreen extends StatefulWidget {
   final PatientFolderService? folderService;
   final UploadQueueService queueService;
   final PatientSyncService? patientSyncService;
+  final PhotoExportService? exportService;
+  final CollageService? collageService;
 
   const PatientPhotosScreen({
     super.key,
@@ -32,6 +37,8 @@ class PatientPhotosScreen extends StatefulWidget {
     this.folderService,
     required this.queueService,
     this.patientSyncService,
+    this.exportService,
+    this.collageService,
   });
 
   /// Authoritative IST timestamp parser from filename (e.g. YYYYMMDD_HHMMSS_SSS) or Drive createdTime.
@@ -87,10 +94,15 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
   bool _isSelectionMode = false;
   final Set<String> _selectedPhotoIds = {};
 
+  late final PhotoExportService _exportService;
+  late final CollageService _collageService;
+
   @override
   void initState() {
     super.initState();
     _currentPatient = widget.patient;
+    _exportService = widget.exportService ?? PhotoExportService();
+    _collageService = widget.collageService ?? CollageService();
     widget.queueService.addListener(_onQueueUpdated);
     _loadPhotos();
   }
@@ -281,7 +293,7 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
     });
   }
 
-  Future<void> _loadPhotos() async {
+  Future<void> _loadPhotos({bool interactiveAuth = false}) async {
     setState(() {
       _isLoading = true;
       _errorMessage = null;
@@ -341,6 +353,24 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
     }
 
     if (_currentPatient.driveFolderId == null || _currentPatient.driveFolderId!.isEmpty) {
+      if (widget.folderService != null) {
+        try {
+          final discovered = await widget.folderService!.discoverExistingPatientFolder(_currentPatient);
+          if (discovered != null &&
+              discovered.driveFolderId != null &&
+              discovered.driveFolderId!.isNotEmpty &&
+              mounted) {
+            setState(() {
+              _currentPatient = discovered;
+            });
+          }
+        } catch (e) {
+          debugPrint('Error attempting to discover existing Drive folder: $e');
+        }
+      }
+    }
+
+    if (_currentPatient.driveFolderId == null || _currentPatient.driveFolderId!.isEmpty) {
       if (mounted) {
         setState(() {
           _isLoading = false;
@@ -352,10 +382,11 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
     // 2. Fetch remote photos from Google Drive in background and reconcile cross-device deletions
     try {
       // Initial gallery refresh is background work. Never open Credential
-      // Manager just because a patient detail screen was opened.
+      // Manager just because a patient detail screen was opened, unless explicitly requested.
       final client = await widget.authService
           .getAuthenticatedClientSilently()
-          .timeout(const Duration(seconds: 5), onTimeout: () => null);
+          .timeout(const Duration(seconds: 5), onTimeout: () => null) ??
+          (interactiveAuth ? await widget.authService.getAuthenticatedClient() : null);
       if (client == null) {
         if (mounted) {
           setState(() {
@@ -1007,6 +1038,368 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
     }
   }
 
+  Future<void> _handleShareSelected() async {
+    final selectedPhotos = _photos.where((p) => p.id != null && _selectedPhotoIds.contains(p.id!)).toList();
+    if (selectedPhotos.isEmpty) return;
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(
+        child: Card(
+          child: Padding(
+            padding: EdgeInsets.all(24.0),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(height: 16),
+                Text('Preparing photos to share...'),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+
+    try {
+      final List<({String? filePath, Uint8List? bytes, String fileName})> exportItems = [];
+      for (final photo in selectedPhotos) {
+        final fileId = photo.id!;
+        final name = photo.name ?? 'photo_${fileId.substring(0, 6)}.jpg';
+        final upload = _localUploadsByFileId[fileId] ??
+            (photo.name != null ? _localUploadsByFileName[photo.name!] : null);
+
+        if (upload != null && upload.localPath.isNotEmpty && File(upload.localPath).existsSync()) {
+          exportItems.add((filePath: upload.localPath, bytes: null, fileName: name));
+        } else {
+          final bytes = await _fetchFullImageBytes(fileId, photo.name);
+          if (bytes != null && bytes.isNotEmpty) {
+            exportItems.add((filePath: null, bytes: bytes, fileName: name));
+          }
+        }
+      }
+
+      if (mounted) Navigator.of(context).pop();
+
+      if (exportItems.isEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Failed to load selected photos for sharing.')),
+          );
+        }
+        return;
+      }
+
+      await _exportService.shareMultiplePhotos(
+        photos: exportItems,
+        text: 'Clinical photos for ${_currentPatient.displayName} (${exportItems.length} photos)',
+        subject: 'Clinical Photos - ${_currentPatient.displayName}',
+      );
+    } catch (e) {
+      if (mounted) {
+        Navigator.of(context).pop();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error sharing photos: $e')),
+        );
+      }
+    }
+  }
+
+  Future<void> _handleSaveSelectedToGallery() async {
+    final selectedPhotos = _photos.where((p) => p.id != null && _selectedPhotoIds.contains(p.id!)).toList();
+    if (selectedPhotos.isEmpty) return;
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(
+        child: Card(
+          child: Padding(
+            padding: EdgeInsets.all(24.0),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(height: 16),
+                Text('Saving photos to device gallery...'),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+
+    int savedCount = 0;
+    String? lastError;
+
+    try {
+      for (final photo in selectedPhotos) {
+        final fileId = photo.id!;
+        final name = photo.name ?? 'photo_${fileId.substring(0, 6)}.jpg';
+        final upload = _localUploadsByFileId[fileId] ??
+            (photo.name != null ? _localUploadsByFileName[photo.name!] : null);
+
+        String? localPath;
+        Uint8List? bytes;
+
+        if (upload != null && upload.localPath.isNotEmpty && File(upload.localPath).existsSync()) {
+          localPath = upload.localPath;
+        } else {
+          bytes = await _fetchFullImageBytes(fileId, photo.name);
+        }
+
+        try {
+          await _exportService.saveToGallery(
+            filePath: localPath,
+            bytes: bytes,
+            fileName: name,
+          );
+          savedCount++;
+        } catch (e) {
+          lastError = e.toString();
+        }
+      }
+    } finally {
+      if (mounted) {
+        Navigator.of(context).pop();
+        if (savedCount == selectedPhotos.length) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Saved $savedCount ${savedCount == 1 ? 'photo' : 'photos'} to device gallery'),
+              backgroundColor: Colors.green.shade800,
+            ),
+          );
+          _exitSelectionMode();
+        } else if (savedCount > 0) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Saved $savedCount photos. Failed to save ${selectedPhotos.length - savedCount}: $lastError'),
+              backgroundColor: Colors.orange.shade800,
+            ),
+          );
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Failed to save photos to gallery: $lastError'),
+              backgroundColor: Colors.red.shade800,
+            ),
+          );
+        }
+      }
+    }
+  }
+
+  Future<void> _handleCreateCollage([List<drive.File>? specificPhotos]) async {
+    final photosToCollage = specificPhotos ??
+        _photos.where((p) => p.id != null && _selectedPhotoIds.contains(p.id!)).toList();
+
+    if (photosToCollage.length < 2 || photosToCollage.length > 6) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please select between 2 and 6 photos to create a collage.')),
+      );
+      return;
+    }
+
+    // Sort chronologically (oldest first so before is on left, after on right)
+    photosToCollage.sort((a, b) {
+      final timeA = PatientPhotosScreen.parsePhotoTimestamp(a);
+      final timeB = PatientPhotosScreen.parsePhotoTimestamp(b);
+      return timeA.compareTo(timeB);
+    });
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(
+        child: Card(
+          child: Padding(
+            padding: EdgeInsets.all(24.0),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(height: 16),
+                Text('Generating clinical collage...'),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+
+    try {
+      final List<CollageItem> collageItems = [];
+      for (final photo in photosToCollage) {
+        final fileId = photo.id!;
+        final bytes = await _fetchFullImageBytes(fileId, photo.name);
+        if (bytes == null || bytes.isEmpty) {
+          throw StateError('Could not load image bytes for ${photo.name ?? fileId}');
+        }
+        collageItems.add(CollageItem(
+          bytes: bytes,
+          label: photo.name,
+          capturedAt: PatientPhotosScreen.parsePhotoTimestamp(photo),
+        ));
+      }
+
+      final result = await _collageService.createCollage(items: collageItems);
+
+      if (mounted) {
+        Navigator.of(context).pop();
+        _exitSelectionMode();
+        await Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (_) => CollagePreviewScreen(
+              patient: _currentPatient,
+              collageResult: result,
+              exportService: _exportService,
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        Navigator.of(context).pop();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to generate collage: $e'),
+            backgroundColor: Colors.red.shade800,
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _handleShareSingle(drive.File photo) async {
+    final fileId = photo.id;
+    if (fileId == null) return;
+    final name = photo.name ?? 'photo_${fileId.substring(0, 6)}.jpg';
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(
+        child: Card(
+          child: Padding(
+            padding: EdgeInsets.all(24.0),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(height: 16),
+                Text('Preparing photo to share...'),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+
+    try {
+      final upload = _localUploadsByFileId[fileId] ??
+          (photo.name != null ? _localUploadsByFileName[photo.name!] : null);
+
+      String? localPath;
+      Uint8List? bytes;
+
+      if (upload != null && upload.localPath.isNotEmpty && File(upload.localPath).existsSync()) {
+        localPath = upload.localPath;
+      } else {
+        bytes = await _fetchFullImageBytes(fileId, photo.name);
+      }
+
+      if (mounted) Navigator.of(context).pop();
+
+      await _exportService.shareSinglePhoto(
+        filePath: localPath,
+        bytes: bytes,
+        fileName: name,
+        text: 'Clinical photo for ${_currentPatient.displayName} ($name)',
+        subject: 'Clinical Photo - ${_currentPatient.displayName}',
+      );
+    } catch (e) {
+      if (mounted) {
+        Navigator.of(context).pop();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to share photo: $e')),
+        );
+      }
+    }
+  }
+
+  Future<void> _handleSaveSingleToGallery(drive.File photo) async {
+    final fileId = photo.id;
+    if (fileId == null) return;
+    final name = photo.name ?? 'photo_${fileId.substring(0, 6)}.jpg';
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(
+        child: Card(
+          child: Padding(
+            padding: EdgeInsets.all(24.0),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(height: 16),
+                Text('Saving photo to device gallery...'),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+
+    try {
+      final upload = _localUploadsByFileId[fileId] ??
+          (photo.name != null ? _localUploadsByFileName[photo.name!] : null);
+
+      String? localPath;
+      Uint8List? bytes;
+
+      if (upload != null && upload.localPath.isNotEmpty && File(upload.localPath).existsSync()) {
+        localPath = upload.localPath;
+      } else {
+        bytes = await _fetchFullImageBytes(fileId, photo.name);
+      }
+
+      await _exportService.saveToGallery(
+        filePath: localPath,
+        bytes: bytes,
+        fileName: name,
+      );
+
+      if (mounted) {
+        Navigator.of(context).pop();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Row(
+              children: [
+                Icon(Icons.check_circle, color: Colors.white),
+                SizedBox(width: 8),
+                Text('Photo saved to device gallery'),
+              ],
+            ),
+            backgroundColor: Colors.green.shade800,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        Navigator.of(context).pop();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to save to gallery: $e'),
+            backgroundColor: Colors.red.shade800,
+          ),
+        );
+      }
+    }
+  }
+
   void _openFullScreenViewer(int initialIndex) {
     Navigator.of(context).push(
       MaterialPageRoute(
@@ -1017,6 +1410,22 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
           fetchImageBytes: (fileId) => _fetchFullImageBytes(fileId),
           onUseAsReference: (photo) async {
             await _handleUseAsReference(photo);
+          },
+          onSharePhoto: (photo) async {
+            await _handleShareSingle(photo);
+          },
+          onSaveToGallery: (photo) async {
+            await _handleSaveSingleToGallery(photo);
+          },
+          onCreateCollage: (photo) async {
+            Navigator.of(context).pop();
+            _enterSelectionMode(photo.id);
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Select 1 to 5 additional photos to create a collage.'),
+                duration: Duration(seconds: 4),
+              ),
+            );
           },
           onMoveToUnassigned: (photo) async {
             Navigator.of(context).pop();
@@ -1086,6 +1495,27 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
                   ),
                 ),
                 IconButton(
+                  icon: const Icon(Icons.auto_awesome),
+                  tooltip: 'Create Collage',
+                  onPressed: (_selectedPhotoIds.length >= 2 && _selectedPhotoIds.length <= 6)
+                      ? () => _handleCreateCollage()
+                      : null,
+                ),
+                IconButton(
+                  icon: const Icon(Icons.share_outlined),
+                  tooltip: 'Share Selected',
+                  onPressed: _selectedPhotoIds.isEmpty
+                      ? null
+                      : () => _handleShareSelected(),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.file_download_outlined),
+                  tooltip: 'Save to Gallery',
+                  onPressed: _selectedPhotoIds.isEmpty
+                      ? null
+                      : () => _handleSaveSelectedToGallery(),
+                ),
+                IconButton(
                   icon: const Icon(Icons.inbox_outlined),
                   tooltip: 'Move to Unassigned',
                   onPressed: _selectedPhotoIds.isEmpty
@@ -1116,6 +1546,20 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
                 ],
               ),
               actions: [
+                if (_photos.length >= 2)
+                  IconButton(
+                    icon: const Icon(Icons.auto_awesome),
+                    tooltip: 'Create Collage',
+                    onPressed: () {
+                      _enterSelectionMode();
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('Select 2 to 6 photos to create a collage.'),
+                          duration: Duration(seconds: 3),
+                        ),
+                      );
+                    },
+                  ),
                 if (_photos.isNotEmpty)
                   IconButton(
                     icon: const Icon(Icons.checklist),
@@ -1130,7 +1574,7 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
                 IconButton(
                   icon: const Icon(Icons.refresh),
                   tooltip: 'Refresh',
-                  onPressed: _loadPhotos,
+                  onPressed: () => _loadPhotos(interactiveAuth: true),
                 ),
                 if (widget.patientSyncService != null)
                   PopupMenuButton<String>(
@@ -1157,7 +1601,7 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
               ],
             ),
       body: RefreshIndicator(
-        onRefresh: _loadPhotos,
+        onRefresh: () => _loadPhotos(interactiveAuth: true),
         child: _buildBody(theme),
       ),
       floatingActionButton: _isSelectionMode
@@ -1410,6 +1854,9 @@ class _FullScreenPatientPhotoGallery extends StatefulWidget {
   final Patient patient;
   final Future<Uint8List?> Function(String fileId) fetchImageBytes;
   final Future<void> Function(drive.File photo)? onUseAsReference;
+  final Future<void> Function(drive.File photo)? onSharePhoto;
+  final Future<void> Function(drive.File photo)? onSaveToGallery;
+  final Future<void> Function(drive.File photo)? onCreateCollage;
   final Future<void> Function(drive.File photo)? onMoveToUnassigned;
   final Future<void> Function(drive.File photo)? onDeletePhoto;
 
@@ -1419,6 +1866,9 @@ class _FullScreenPatientPhotoGallery extends StatefulWidget {
     required this.patient,
     required this.fetchImageBytes,
     this.onUseAsReference,
+    this.onSharePhoto,
+    this.onSaveToGallery,
+    this.onCreateCollage,
     this.onMoveToUnassigned,
     this.onDeletePhoto,
   });
@@ -1476,6 +1926,24 @@ class _FullScreenPatientPhotoGalleryState extends State<_FullScreenPatientPhotoG
               icon: const Icon(Icons.layers_outlined),
               tooltip: 'Use as reference',
               onPressed: () => widget.onUseAsReference!(currentPhoto),
+            ),
+          if (widget.onCreateCollage != null)
+            IconButton(
+              icon: const Icon(Icons.auto_awesome),
+              tooltip: 'Create collage with this photo',
+              onPressed: () => widget.onCreateCollage!(currentPhoto),
+            ),
+          if (widget.onSaveToGallery != null)
+            IconButton(
+              icon: const Icon(Icons.file_download_outlined),
+              tooltip: 'Save to device',
+              onPressed: () => widget.onSaveToGallery!(currentPhoto),
+            ),
+          if (widget.onSharePhoto != null)
+            IconButton(
+              icon: const Icon(Icons.share_outlined),
+              tooltip: 'Share photo',
+              onPressed: () => widget.onSharePhoto!(currentPhoto),
             ),
           if (widget.onMoveToUnassigned != null)
             IconButton(
