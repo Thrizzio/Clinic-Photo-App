@@ -45,6 +45,9 @@ dependencies:
   cupertino_icons: ^1.0.8
   supabase_flutter: ^2.18.0
   workmanager: ^0.10.10
+  share_plus: ^13.3.1
+  gal: ^2.3.3
+  image: ^4.12.0
 
 dev_dependencies:
   flutter_test:
