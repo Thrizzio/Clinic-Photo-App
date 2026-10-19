@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
+import 'package:googleapis/drive/v3.dart' as drive;
 import 'package:googleapis_auth/googleapis_auth.dart';
 import '../models/patient.dart';
 import 'config_service.dart';
@@ -147,11 +148,11 @@ class PatientFolderService {
 
     debugPrint('Resolving patient folder: target canonical name "$canonicalName" under parent: $parentFolderId');
 
-    // 3. Search the configured parent for exact canonical name
-    var matches = await driveService.findFoldersByName(
+    // 3. Search the configured parent and known subfolders for exact canonical name
+    var matches = await _findMatchingFolders(
       client: client,
       parentFolderId: parentFolderId,
-      folderName: canonicalName,
+      targetName: canonicalName,
     );
 
     // 3b. Legacy folder compatibility: If not found and patient has legacy ID, check `<LegacyId> - <Patient Name>`
@@ -159,10 +160,10 @@ class PatientFolderService {
         (patient.source != PatientSource.doctorCreated ? patient.id : null);
     if (matches.isEmpty && legacyId != null && legacyId.isNotEmpty) {
       final legacyName = '$legacyId - ${patient.displayName}';
-      final legacyMatches = await driveService.findFoldersByName(
+      final legacyMatches = await _findMatchingFolders(
         client: client,
         parentFolderId: parentFolderId,
-        folderName: legacyName,
+        targetName: legacyName,
       );
       if (legacyMatches.isNotEmpty) {
         debugPrint('Found matching legacy Drive folder "$legacyName" under configured parent.');
@@ -230,5 +231,117 @@ class PatientFolderService {
       driveFolderId: resolvedFolderId,
       createdNew: createdNew,
     );
+  }
+
+  Future<List<drive.File>> _findMatchingFolders({
+    required AuthClient client,
+    required String parentFolderId,
+    required String targetName,
+  }) async {
+    // 1. Direct parent search
+    var matches = await driveService.findFoldersByName(
+      client: client,
+      parentFolderId: parentFolderId,
+      folderName: targetName,
+    );
+    if (matches.isNotEmpty) return matches;
+
+    // 2. Subfolder search (e.g. Patient_Photos, Patient Photos, Photos)
+    for (final subName in const ['Patient_Photos', 'Patient Photos', 'Photos']) {
+      final subMatches = await driveService.findFoldersByName(
+        client: client,
+        parentFolderId: parentFolderId,
+        folderName: subName,
+      );
+      if (subMatches.isNotEmpty) {
+        final nested = await driveService.findFoldersByName(
+          client: client,
+          parentFolderId: subMatches.first.id!,
+          folderName: targetName,
+        );
+        if (nested.isNotEmpty) {
+          return nested;
+        }
+      }
+    }
+    return const [];
+  }
+
+  /// Discovers an existing Google Drive folder for [patient] without creating a new folder.
+  ///
+  /// Searches for `<Patient Name> - <Phone>` (or `<Patient Name>`) and legacy `<LegacyId> - <Patient Name>`
+  /// under the configured parent folder and known subfolders.
+  /// If exactly one match is found, persists `driveFolderId` to SQLite, pushes to Supabase,
+  /// and returns the updated patient.
+  /// If zero matches are found or Drive is unavailable, returns null without modifying the patient.
+  Future<Patient?> discoverExistingPatientFolder(
+    Patient patient, {
+    AuthClient? clientOverride,
+  }) async {
+    if (patient.driveFolderId != null && patient.driveFolderId!.trim().isNotEmpty) {
+      return patient;
+    }
+
+    final client = clientOverride ??
+        await authService.getAuthenticatedClientSilently() ??
+        await authService.getAuthenticatedClient();
+    if (client == null) return null;
+
+    final config = configService.loadConfig();
+    final parentFolderId = config.parentDriveFolderId.trim();
+    if (parentFolderId.isEmpty) return null;
+
+    final phone = patient.phoneDisplay?.trim() ?? '';
+    final canonicalName = phone.isNotEmpty
+        ? '${patient.displayName} - $phone'
+        : patient.displayName;
+
+    var matches = await _findMatchingFolders(
+      client: client,
+      parentFolderId: parentFolderId,
+      targetName: canonicalName,
+    );
+
+    final legacyId = patient.legacyPatientId ??
+        (patient.source != PatientSource.doctorCreated ? patient.id : null);
+    if (matches.isEmpty && legacyId != null && legacyId.isNotEmpty) {
+      final legacyName = '$legacyId - ${patient.displayName}';
+      matches = await _findMatchingFolders(
+        client: client,
+        parentFolderId: parentFolderId,
+        targetName: legacyName,
+      );
+    }
+
+    if (matches.length == 1) {
+      final resolvedFolderId = matches.first.id!;
+      final updatedPatient = patient.copyWith(
+        driveFolderId: resolvedFolderId,
+        folderStatus: FolderStatus.available,
+        syncStatus: 'pending_cloud',
+        updatedAt: DateTime.now(),
+      );
+      await database.updatePatient(updatedPatient);
+      if (supabaseService != null && Patient.isValidUuid(updatedPatient.id)) {
+        unawaited(() async {
+          try {
+            await supabaseService!.upsertPatient(updatedPatient);
+            await database.updatePatient(updatedPatient.copyWith(syncStatus: 'synced'));
+          } catch (_) {}
+        }());
+      }
+      onFolderCreated?.call(updatedPatient);
+      return updatedPatient;
+    } else if (matches.length > 1) {
+      final conflictPatient = patient.copyWith(
+        folderStatus: FolderStatus.conflict,
+        driveFolderId: null,
+        updatedAt: DateTime.now(),
+      );
+      await database.updatePatient(conflictPatient);
+      return conflictPatient;
+    }
+
+    return null;
   }
 }

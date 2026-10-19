@@ -85,7 +85,7 @@ class RemoteSupabasePatientService implements SupabasePatientService {
   @override
   bool get isReadyForSync {
     final session = client.auth.currentSession;
-    if (session == null || session.isExpired) return false;
+    if (session != null && session.isExpired) return false;
     if (_lastNetworkFailureTime != null &&
         DateTime.now().difference(_lastNetworkFailureTime!) < const Duration(minutes: 2)) {
       return false;

@@ -197,7 +197,7 @@ class _PatientsScreenState extends State<PatientsScreen> with WidgetsBindingObse
         final cloudSyncCompleted = await trace.stage(
           'supabase_reconciliation',
           () => _patientSyncService.syncLocalWithSupabase().timeout(
-            const Duration(seconds: 8),
+            const Duration(seconds: 15),
             onTimeout: () => throw TimeoutException('Supabase patient sync timed out'),
           ),
         );

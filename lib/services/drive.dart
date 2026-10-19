@@ -44,6 +44,8 @@ class DriveService {
       $fields: 'files(id, name, parents, createdTime)',
       pageSize: 10,
       orderBy: 'createdTime desc',
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
     );
     final files = response.files ?? const <drive.File>[];
     for (final file in files) {
@@ -79,6 +81,7 @@ class DriveService {
         fileMetadata,
         uploadMedia: media,
         $fields: 'id, name',
+        supportsAllDrives: true,
       );
 
       final fileId = response.id;
@@ -113,6 +116,8 @@ class DriveService {
     final fileList = await driveApi.files.list(
       q: query,
       $fields: 'files(id, name, parents)',
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
     );
 
     final rawFiles = fileList.files ?? <drive.File>[];
@@ -140,6 +145,7 @@ class DriveService {
     final created = await driveApi.files.create(
       folderMetadata,
       $fields: 'id, name, parents',
+      supportsAllDrives: true,
     );
 
     final id = created.id;
@@ -303,6 +309,8 @@ class DriveService {
         orderBy: 'name asc',
         pageSize: 100,
         pageToken: pageToken,
+        supportsAllDrives: true,
+        includeItemsFromAllDrives: true,
       );
       allFiles.addAll(fileList.files ?? const []);
       pageToken = fileList.nextPageToken;
@@ -347,6 +355,7 @@ class DriveService {
     final media = await driveApi.files.get(
       fileId,
       downloadOptions: drive.DownloadOptions.fullMedia,
+      supportsAllDrives: true,
     ) as drive.Media;
 
     final List<int> bytes = [];
@@ -367,6 +376,7 @@ class DriveService {
       final file = await driveApi.files.get(
         folderId,
         $fields: 'id, name, mimeType',
+        supportsAllDrives: true,
       ) as drive.File;
       return file.id != null && file.mimeType == 'application/vnd.google-apps.folder';
     } catch (e) {
@@ -386,6 +396,8 @@ class DriveService {
         q: "mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false",
         $fields: 'files(id, name, webViewLink)',
         pageSize: 50,
+        supportsAllDrives: true,
+        includeItemsFromAllDrives: true,
       );
       return response.files ?? [];
     } catch (e) {
