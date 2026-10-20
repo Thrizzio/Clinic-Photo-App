@@ -284,6 +284,75 @@ class UploadQueueService extends ChangeNotifier {
     return item;
   }
 
+  /// Formats deterministic collage filename in Indian Standard Time (UTC+05:30):
+  /// `Collage_YYYY-MM-DD_HHmmss.jpg`
+  static String formatCollageFileName(DateTime timestamp) {
+    final ist = timestamp.isUtc
+        ? timestamp.add(const Duration(hours: 5, minutes: 30))
+        : timestamp.toUtc().add(const Duration(hours: 5, minutes: 30));
+    final dateStr = DateFormat('yyyy-MM-dd_HHmmss').format(ist);
+    return 'Collage_$dateStr.jpg';
+  }
+
+  /// Persists a generated clinical collage into durable app storage for [patient],
+  /// registers an UploadItem record in SQLite, and wakes the Drive upload queue.
+  Future<UploadItem> enqueueCollage({
+    required Patient patient,
+    required String sourceCollagePath,
+    DateTime? createdAt,
+  }) async {
+    final sourceFile = File(sourceCollagePath);
+    if (!sourceFile.existsSync() || sourceFile.lengthSync() == 0) {
+      throw FileSystemException('Generated collage source file is missing or empty', sourceCollagePath);
+    }
+
+    final now = createdAt ?? DateTime.now();
+    final requestedFileName = formatCollageFileName(now);
+
+    final basePath = await _getBasePath();
+    final patientDir = Directory(
+      p.join(basePath, AppConfig.photoQueueDirName, 'patients', patient.id),
+    );
+    if (!patientDir.existsSync()) {
+      patientDir.createSync(recursive: true);
+    }
+
+    final allocated = _allocatePhotoPath(patientDir, requestedFileName);
+    final fileName = allocated.fileName;
+    final durableLocalPath = allocated.localPath;
+
+    sourceFile.copySync(durableLocalPath);
+    final savedFile = File(durableLocalPath);
+    if (!savedFile.existsSync()) {
+      throw FileSystemException('Failed to verify saved collage in durable storage', durableLocalPath);
+    }
+
+    final hasDriveFolder = patient.driveFolderId != null && patient.driveFolderId!.isNotEmpty;
+    final item = UploadItem(
+      id: _uuid.v4(),
+      sessionId: 'collage',
+      patientId: patient.id,
+      driveFolderId: patient.driveFolderId,
+      localPath: durableLocalPath,
+      fileName: fileName,
+      status: hasDriveFolder ? UploadStatus.waiting : UploadStatus.pending,
+      retryCount: 0,
+      createdAt: now,
+      capturedAt: now,
+      sequenceNumber: 1,
+    );
+
+    await database.insertUpload(item);
+    _safeNotifyListeners();
+
+    if (scheduleBackgroundWork != null) {
+      unawaited(scheduleBackgroundWork!());
+    }
+    unawaited(processQueue());
+
+    return item;
+  }
+
   /// Workflow B: Creates a new unassigned capture session.
   Future<CaptureSession> createUnassignedSession() async {
     final session = CaptureSession(

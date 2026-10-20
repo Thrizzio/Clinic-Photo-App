@@ -1254,9 +1254,13 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
               patient: _currentPatient,
               collageResult: result,
               exportService: _exportService,
+              queueService: widget.queueService,
             ),
           ),
         );
+        if (mounted) {
+          _refreshLocalUploads();
+        }
       }
     } catch (e) {
       if (mounted) {
@@ -1711,7 +1715,7 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
     }
 
     return GridView.builder(
-      padding: const EdgeInsets.all(12),
+      padding: EdgeInsets.fromLTRB(12, 12, 12, 88 + MediaQuery.paddingOf(context).bottom),
       gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
         crossAxisCount: 3,
         crossAxisSpacing: 8,
@@ -1723,6 +1727,9 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
         final fileId = photo.id;
         final dateStr = PatientPhotosScreen.formatPhotoGridTimestamp(photo);
         final isSelected = fileId != null && _selectedPhotoIds.contains(fileId);
+        final isCollage = photo.name?.toLowerCase().startsWith('collage_') == true ||
+            (_localUploadsByFileId[photo.id]?.isCollage ?? false) ||
+            (photo.name != null && (_localUploadsByFileName[photo.name!]?.isCollage ?? false));
 
         return InkWell(
           key: ValueKey('photo_tile_${photo.id ?? photo.name}'),
@@ -1837,6 +1844,35 @@ class _PatientPhotosScreenState extends State<PatientPhotosScreen> {
                       isSelected ? Icons.check : null,
                       size: 14,
                       color: Colors.white,
+                    ),
+                  ),
+                ),
+              if (isCollage)
+                Positioned(
+                  top: 6,
+                  left: 6,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.75),
+                      borderRadius: BorderRadius.circular(4),
+                      border: Border.all(color: Colors.white38, width: 0.5),
+                    ),
+                    child: const Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.auto_awesome, size: 10, color: Colors.amberAccent),
+                        SizedBox(width: 3),
+                        Text(
+                          'COLLAGE',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 9,
+                            fontWeight: FontWeight.bold,
+                            letterSpacing: 0.5,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ),

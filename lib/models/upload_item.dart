@@ -61,6 +61,9 @@ class UploadItem {
 
   String? get driveParentFolderId => driveFolderId;
 
+  /// True if this upload represents a generated clinical photo collage.
+  bool get isCollage => sessionId == 'collage' || fileName.toLowerCase().startsWith('collage_');
+
   UploadItem copyWith({
     String? id,
     Object? sessionId = _unsetUploadField,
