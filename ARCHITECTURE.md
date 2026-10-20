@@ -215,3 +215,20 @@ Key V6 capabilities:
 - **Safety Invariants**:
   - **Cloud Originals**: Eviction deletes ONLY local cached files. Google Drive originals are NEVER touched or deleted during cache eviction.
   - **Local Captures**: Local files in `photo_queue/` remain untouched until upload is verified against Google Drive. Verified captures are retained for 30 days before safe cleanup. Pending, failed, or ambiguous uploads are NEVER cleaned up.
+
+### 11. Collage Persistence, Patient Gallery Integration & Safe-Area Ergonomics
+- **Durable Collage Persistence**:
+  - Generating a clinical collage and selecting "Save to Patient" copies the generated JPEG to `photo_queue/patients/<patientId>/Collage_YYYY-MM-DD_HHmmss.jpg`.
+  - Enqueues an `UploadItem` into SQLite `uploads` with `sessionId: 'collage'`.
+  - Seamlessly participates in existing background upload workers, crash recovery, and offline caching without a parallel table.
+  - Gallery immediately shows persisted collages with a distinct `COLLAGE` badge.
+  - "To Device Photos" remains an independent action exporting to public MediaStore via `Gal`.
+- **Phone-Based Drive Folder Discovery & Transliteration Search**:
+  - `PatientFolderService.discoverExistingPatientFolder` and `_resolvePatientFolder` execute phone-based Drive queries (`name contains '<phone>'`) under the configured parent folder. Resolves folders named with spelling or transliteration variations (e.g. `Rajni Suttati - 9422301089` for `Rajani Suttati`).
+  - `Patient.matchesNameVowelTolerant` builds dynamic vowel-flexible regular expressions allowing search to find patients even when vowel transliterations vary (`rajni` <-> `rajani`).
+  - `database.searchPatients` incorporates vowel-tolerant matching while strictly honoring `SearchFilterMode` boundaries.
+- **Phone Deduplication Prompt**:
+  - `NewPatientDialog` verifies phone numbers against `database.getPatientByNormalizedPhone`. If an existing patient is found, the doctor is prompted to view the existing patient rather than creating a duplicate.
+- **Android Safe-Area & Keyboard Ergonomics**:
+  - Wrapped bottom bars in `SafeArea(bottom: true)`.
+  - Dynamically hide fixed bottom bars during active keyboard input (`viewInsets.bottom > 0`) in `PatientsScreen` to preserve screen real estate and prevent input obstruction on gesture-navigation devices.
