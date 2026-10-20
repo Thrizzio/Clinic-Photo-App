@@ -741,6 +741,22 @@ class MockV4DriveService extends DriveService {
   }
 
   @override
+  Future<List<drive.File>> findFoldersByPartialName({
+    required AuthClient client,
+    required String parentFolderId,
+    required String queryPart,
+  }) async {
+    final list = parentFolders[parentFolderId] ?? [];
+    return list.where((f) {
+      if (f.name == null || !f.name!.contains(queryPart)) return false;
+      if (f.parents != null && f.parents!.isNotEmpty) {
+        return f.parents!.contains(parentFolderId);
+      }
+      return true;
+    }).toList();
+  }
+
+  @override
   Future<String> createFolder({
     required AuthClient client,
     required String parentFolderId,

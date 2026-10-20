@@ -62,6 +62,9 @@ abstract class AppDatabase {
   /// Retrieves a patient by exact business identity (normalized name + normalized phone).
   Future<Patient?> getPatientByBusinessIdentity(String normalizedName, String? normalizedPhone);
 
+  /// Retrieves a patient by exact normalized phone (e.g. '9422301089').
+  Future<Patient?> getPatientByNormalizedPhone(String normalizedPhone);
+
   /// Retrieves all cached patients sorted by canonical last-modified time.
   Future<List<Patient>> getPatients();
 
@@ -212,6 +215,9 @@ abstract class AppDatabase {
   Future<void> removePendingPhotoDeletion(String id);
 
   // --- Upload Queue Operations ---
+
+  /// Retrieves an upload item by its ID.
+  Future<UploadItem?> getUpload(String id);
 
   /// Inserts a new upload item.
   Future<void> insertUpload(UploadItem item);
@@ -1447,6 +1453,20 @@ class SqliteAppDatabase implements AppDatabase {
   }
 
   @override
+  Future<Patient?> getPatientByNormalizedPhone(String normalizedPhone) async {
+    if (normalizedPhone.isEmpty) return null;
+    SyncDiagnostics.databaseOperation('sqlite.getPatientByNormalizedPhone');
+    final rows = await db.query(
+      'patients',
+      where: 'normalized_phone = ?',
+      whereArgs: [normalizedPhone],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    return Patient.fromMap(rows.first);
+  }
+
+  @override
   Future<List<Patient>> getPatients() async {
     SyncDiagnostics.databaseOperation('sqlite.getPatients');
     final rows = await db.query('patients');
@@ -1508,6 +1528,20 @@ class SqliteAppDatabase implements AppDatabase {
       whereArgs: whereArgs,
     );
     final patients = rows.map(Patient.fromMap).toList();
+
+    // Vowel-tolerant phonetic fallback:
+    // Ensure variations like 'Rajni' <-> 'Rajani' match even if strict SQL LIKE fails
+    if (mode == SearchFilterMode.all || mode == SearchFilterMode.name) {
+      final foundIds = patients.map((p) => p.id).toSet();
+      final all = await getPatients();
+      for (final p in all) {
+        if (!foundIds.contains(p.id) && p.matchesNameVowelTolerant(trimmed)) {
+          patients.add(p);
+          foundIds.add(p.id);
+        }
+      }
+    }
+
     patients.sort(Patient.compareByLastModified);
     return patients;
   }
@@ -2049,6 +2083,18 @@ class SqliteAppDatabase implements AppDatabase {
   }
 
   @override
+  Future<UploadItem?> getUpload(String id) async {
+    final rows = await db.query(
+      'uploads',
+      where: 'id = ?',
+      whereArgs: [id],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    return UploadItem.fromMap(rows.first);
+  }
+
+  @override
   Future<UploadItem?> getUploadByFileName(String fileName) async {
     final rows = await db.query(
       'uploads',
@@ -2390,6 +2436,17 @@ class InMemoryAppDatabase implements AppDatabase {
   }
 
   @override
+  Future<Patient?> getPatientByNormalizedPhone(String normalizedPhone) async {
+    if (normalizedPhone.isEmpty) return null;
+    for (final patient in _patients.values) {
+      if (patient.normalizedPhone == normalizedPhone) {
+        return patient;
+      }
+    }
+    return null;
+  }
+
+  @override
   Future<List<Patient>> getPatients() async {
     final list = _patients.values.toList();
     list.sort(Patient.compareByLastModified);
@@ -2415,10 +2472,12 @@ class InMemoryAppDatabase implements AppDatabase {
           p.normalizedName.contains(lower);
       final matchesPhone = (p.phoneDisplay != null && p.phoneDisplay!.toLowerCase().contains(lower)) ||
           (normPhone != null && p.normalizedPhone != null && p.normalizedPhone!.contains(normPhone));
+      final matchesVowelTolerant = (mode == SearchFilterMode.all || mode == SearchFilterMode.name) &&
+          p.matchesNameVowelTolerant(trimmed);
 
       return switch (mode) {
-        SearchFilterMode.all => matchesId || matchesName || matchesPhone,
-        SearchFilterMode.name => matchesName,
+        SearchFilterMode.all => matchesId || matchesName || matchesPhone || matchesVowelTolerant,
+        SearchFilterMode.name => matchesName || matchesVowelTolerant,
         SearchFilterMode.phone => matchesPhone,
         SearchFilterMode.patientId => matchesId,
       };
@@ -2825,6 +2884,11 @@ class InMemoryAppDatabase implements AppDatabase {
       if (u.driveFileId == driveFileId) return u;
     }
     return null;
+  }
+
+  @override
+  Future<UploadItem?> getUpload(String id) async {
+    return _uploads[id];
   }
 
   @override

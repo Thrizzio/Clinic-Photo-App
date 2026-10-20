@@ -109,11 +109,12 @@ class _NewPatientDialogState extends State<NewPatientDialog> {
     });
 
     try {
-      // Real-time deduplication check against local SQLite
+      // Real-time deduplication check against local SQLite (both business identity and normalized phone)
       final existing = await widget.database.getPatientByBusinessIdentity(normName, normPhone);
+      final match = existing ?? await widget.database.getPatientByNormalizedPhone(normPhone);
       if (!mounted) return;
 
-      if (existing != null) {
+      if (match != null) {
         setState(() {
           _isChecking = false;
         });
@@ -123,9 +124,9 @@ class _NewPatientDialogState extends State<NewPatientDialog> {
           builder: (ctx) => AlertDialog(
             title: const Text('Patient Already Exists'),
             content: Text(
-              'A patient with this name and phone number already exists:\n\n'
-              '${existing.displayName}\n'
-              'Phone: ${existing.phoneDisplay ?? normPhone}\n\n'
+              'A patient with this phone number already exists:\n\n'
+              '${match.displayName}\n'
+              'Phone: ${match.phoneDisplay ?? normPhone}\n\n'
               'Would you like to open this existing patient instead?',
             ),
             actions: [
@@ -142,7 +143,7 @@ class _NewPatientDialogState extends State<NewPatientDialog> {
         );
 
         if (shouldOpen == true && mounted) {
-          Navigator.of(context).pop(existing);
+          Navigator.of(context).pop(match);
         }
         return;
       }

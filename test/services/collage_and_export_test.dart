@@ -60,6 +60,22 @@ class FakeDriveService extends DriveService {
     final key = '$parentFolderId:$folderName';
     return foldersByName[key] ?? [];
   }
+
+  @override
+  Future<List<drive.File>> findFoldersByPartialName({
+    required AuthClient client,
+    required String parentFolderId,
+    required String queryPart,
+  }) async {
+    final prefix = '$parentFolderId:';
+    final results = <drive.File>[];
+    for (final entry in foldersByName.entries) {
+      if (entry.key.startsWith(prefix) && entry.key.substring(prefix.length).contains(queryPart)) {
+        results.addAll(entry.value);
+      }
+    }
+    return results;
+  }
 }
 
 class FakeSheetsService implements SheetsService {

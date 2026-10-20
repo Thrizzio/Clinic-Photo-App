@@ -323,6 +323,65 @@ class Patient {
     return normalizedPhone == otherNormPhone;
   }
 
+  /// Checks whether a query matches this patient's name with vowel-tolerant transliteration (e.g. 'Rajni' <-> 'Rajani').
+  bool matchesNameVowelTolerant(String query) {
+    final lowerQuery = query.trim().toLowerCase();
+    if (lowerQuery.length < 3) return false;
+    final queryConsonants = lowerQuery.replaceAll(RegExp(r'[aeiou\s]'), '');
+    if (queryConsonants.length < 2) return false;
+
+    final buffer = StringBuffer();
+    for (int i = 0; i < lowerQuery.length; i++) {
+      final char = lowerQuery[i];
+      if (char == 'a' || char == 'e' || char == 'i' || char == 'o' || char == 'u') {
+        buffer.write('[aeiou]*');
+      } else {
+        buffer.write(RegExp.escape(char));
+        buffer.write('[aeiou]*');
+      }
+    }
+    try {
+      final regex = RegExp(buffer.toString(), caseSensitive: false);
+      return regex.hasMatch(displayName) || regex.hasMatch(normalizedName);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Checks whether a search query matches this patient's identity.
+  /// Supports:
+  /// - Direct substring of display name or normalized name
+  /// - Direct substring of phone display or normalized phone
+  /// - Direct substring of patient ID or legacy ID
+  /// - Vowel-relaxed phonetic transliteration matching (e.g. 'Rajni' <-> 'Rajani')
+  bool matchesSearchQuery(String query) {
+    final trimmed = query.trim();
+    if (trimmed.isEmpty) return true;
+    final lowerQuery = trimmed.toLowerCase();
+
+    // 1. Direct substring checks
+    if (displayName.toLowerCase().contains(lowerQuery) ||
+        normalizedName.contains(lowerQuery)) {
+      return true;
+    }
+
+    if (id.toLowerCase().contains(lowerQuery) ||
+        (legacyPatientId != null && legacyPatientId!.toLowerCase().contains(lowerQuery))) {
+      return true;
+    }
+
+    final queryDigits = trimmed.replaceAll(RegExp(r'\D'), '');
+    if (queryDigits.isNotEmpty) {
+      if ((normalizedPhone != null && normalizedPhone!.contains(queryDigits)) ||
+          (phoneDisplay != null && phoneDisplay!.replaceAll(RegExp(r'\D'), '').contains(queryDigits))) {
+        return true;
+      }
+    }
+
+    // 2. Vowel-tolerant phonetic matching for common Indian name transliterations
+    return matchesNameVowelTolerant(lowerQuery);
+  }
+
   /// Compares patients for the patient selector: newest records first.
   ///
   /// Records without a timestamp are treated as oldest. Patients with the

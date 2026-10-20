@@ -171,6 +171,21 @@ class PatientFolderService {
       }
     }
 
+    // 3c. Phone-based folder discovery: If exact names did not match, check if a folder exists containing the patient's unique 10-digit phone
+    final normPhone = patient.normalizedPhone;
+    if (matches.isEmpty && normPhone != null && normPhone.length >= 10) {
+      final phoneMatches = await _findMatchingFoldersByPhone(
+        client: client,
+        parentFolderId: parentFolderId,
+        normalizedPhone: normPhone,
+        patient: patient,
+      );
+      if (phoneMatches.isNotEmpty) {
+        debugPrint('Discovered Drive folder by phone ($normPhone): "${phoneMatches.first.name}"');
+        matches = phoneMatches;
+      }
+    }
+
     String resolvedFolderId;
     bool createdNew = false;
 
@@ -267,6 +282,52 @@ class PatientFolderService {
     return const [];
   }
 
+  Future<List<drive.File>> _findMatchingFoldersByPhone({
+    required AuthClient client,
+    required String parentFolderId,
+    required String normalizedPhone,
+    required Patient patient,
+  }) async {
+    if (normalizedPhone.length < 10) return const [];
+
+    final rawMatches = <drive.File>[];
+    // 1. Direct parent search
+    final direct = await driveService.findFoldersByPartialName(
+      client: client,
+      parentFolderId: parentFolderId,
+      queryPart: normalizedPhone,
+    );
+    rawMatches.addAll(direct);
+
+    // 2. Subfolder search (e.g. Patient_Photos, Patient Photos, Photos)
+    for (final subName in const ['Patient_Photos', 'Patient Photos', 'Photos']) {
+      final sub = await driveService.findFoldersByName(
+        client: client,
+        parentFolderId: parentFolderId,
+        folderName: subName,
+      );
+      if (sub.isNotEmpty) {
+        final nested = await driveService.findFoldersByPartialName(
+          client: client,
+          parentFolderId: sub.first.id!,
+          queryPart: normalizedPhone,
+        );
+        rawMatches.addAll(nested);
+      }
+    }
+
+    final seenIds = <String>{};
+    final uniqueMatches = <drive.File>[];
+    for (final f in rawMatches) {
+      if (f.id != null && !seenIds.contains(f.id!)) {
+        seenIds.add(f.id!);
+        uniqueMatches.add(f);
+      }
+    }
+
+    return uniqueMatches;
+  }
+
   /// Discovers an existing Google Drive folder for [patient] without creating a new folder.
   ///
   /// Searches for `<Patient Name> - <Phone>` (or `<Patient Name>`) and legacy `<LegacyId> - <Patient Name>`
@@ -306,11 +367,28 @@ class PatientFolderService {
         (patient.source != PatientSource.doctorCreated ? patient.id : null);
     if (matches.isEmpty && legacyId != null && legacyId.isNotEmpty) {
       final legacyName = '$legacyId - ${patient.displayName}';
-      matches = await _findMatchingFolders(
+      final legacyMatches = await _findMatchingFolders(
         client: client,
         parentFolderId: parentFolderId,
         targetName: legacyName,
       );
+      if (legacyMatches.isNotEmpty) {
+        matches = legacyMatches;
+      }
+    }
+
+    final normPhone = patient.normalizedPhone;
+    if (matches.isEmpty && normPhone != null && normPhone.length >= 10) {
+      final phoneMatches = await _findMatchingFoldersByPhone(
+        client: client,
+        parentFolderId: parentFolderId,
+        normalizedPhone: normPhone,
+        patient: patient,
+      );
+      if (phoneMatches.isNotEmpty) {
+        debugPrint('discoverExistingPatientFolder: matched by phone ($normPhone): "${phoneMatches.first.name}"');
+        matches = phoneMatches;
+      }
     }
 
     if (matches.length == 1) {

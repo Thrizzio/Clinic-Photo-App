@@ -129,6 +129,34 @@ class DriveService {
     }).toList();
   }
 
+  /// Searches for non-trashed folders containing [queryPart] in their name inside [parentFolderId].
+  Future<List<drive.File>> findFoldersByPartialName({
+    required AuthClient client,
+    required String parentFolderId,
+    required String queryPart,
+  }) async {
+    final driveApi = drive.DriveApi(client);
+    final safeQuery = queryPart.replaceAll(r'\', r'\\').replaceAll("'", r"\'");
+    final query =
+        "mimeType = 'application/vnd.google-apps.folder' and '$parentFolderId' in parents and name contains '$safeQuery' and trashed = false";
+
+    SyncDiagnostics.networkRequest('drive', 'files.list.folders_partial');
+    final fileList = await driveApi.files.list(
+      q: query,
+      $fields: 'files(id, name, parents)',
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
+    );
+
+    final rawFiles = fileList.files ?? <drive.File>[];
+    return rawFiles.where((f) {
+      if (f.parents != null && f.parents!.isNotEmpty) {
+        return f.parents!.contains(parentFolderId);
+      }
+      return true;
+    }).toList();
+  }
+
   /// Creates a new Google Drive folder with [folderName] inside [parentFolderId].
   Future<String> createFolder({
     required AuthClient client,
