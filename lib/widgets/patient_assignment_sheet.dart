@@ -147,7 +147,7 @@ class _PatientAssignmentSheetState extends State<PatientAssignmentSheet> {
         top: 16,
         left: 16,
         right: 16,
-        bottom: mediaQuery.viewInsets.bottom + 16,
+        bottom: mediaQuery.viewInsets.bottom + mediaQuery.padding.bottom + 16,
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,

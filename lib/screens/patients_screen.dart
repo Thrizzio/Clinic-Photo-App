@@ -698,6 +698,8 @@ class _PatientsScreenState extends State<PatientsScreen> with WidgetsBindingObse
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final isDark = theme.brightness == Brightness.dark;
+    final keyboardVisible = MediaQuery.viewInsetsOf(context).bottom > 0;
+    final bottomInset = MediaQuery.paddingOf(context).bottom;
 
     return Scaffold(
       appBar: AppBar(
@@ -710,47 +712,51 @@ class _PatientsScreenState extends State<PatientsScreen> with WidgetsBindingObse
           ),
         ],
       ),
-      floatingActionButton: FloatingActionButton(
-        heroTag: 'unassigned_photos_fab',
-        onPressed: _showUnassignedMenu,
-        tooltip: 'Unassigned photos',
-        child: Badge(
-          isLabelVisible: _unassignedSessionsCount > 0,
-          label: Text(
-            '$_unassignedSessionsCount',
-            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 11),
-          ),
-          offset: const Offset(6, -6),
-          backgroundColor: theme.colorScheme.error,
-          textColor: theme.colorScheme.onError,
-          child: const Icon(Icons.inbox_outlined, size: 26),
-        ),
-      ),
-      bottomNavigationBar: SafeArea(
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-          decoration: BoxDecoration(
-            color: theme.colorScheme.surface,
-            border: Border(
-              top: BorderSide(color: theme.dividerColor.withValues(alpha: 0.3)),
+      floatingActionButton: keyboardVisible
+          ? null
+          : FloatingActionButton(
+              heroTag: 'unassigned_photos_fab',
+              onPressed: _showUnassignedMenu,
+              tooltip: 'Unassigned photos',
+              child: Badge(
+                isLabelVisible: _unassignedSessionsCount > 0,
+                label: Text(
+                  '$_unassignedSessionsCount',
+                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 11),
+                ),
+                offset: const Offset(6, -6),
+                backgroundColor: theme.colorScheme.error,
+                textColor: theme.colorScheme.onError,
+                child: const Icon(Icons.inbox_outlined, size: 26),
+              ),
             ),
-          ),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text(
-                '${_patients.length} ${_patients.length == 1 ? "patient" : "patients"}',
-                style: TextStyle(
-                  fontSize: 13,
-                  color: theme.colorScheme.onSurfaceVariant,
-                  fontWeight: FontWeight.w500,
+      bottomNavigationBar: keyboardVisible
+          ? null
+          : SafeArea(
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.surface,
+                  border: Border(
+                    top: BorderSide(color: theme.dividerColor.withValues(alpha: 0.3)),
+                  ),
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      '${_patients.length} ${_patients.length == 1 ? "patient" : "patients"}',
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: theme.colorScheme.onSurfaceVariant,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    const SizedBox.shrink(),
+                  ],
                 ),
               ),
-               const SizedBox.shrink(),
-            ],
-          ),
-        ),
-      ),
+            ),
       body: SafeArea(
         child: Column(
           children: [
@@ -827,42 +833,42 @@ class _PatientsScreenState extends State<PatientsScreen> with WidgetsBindingObse
                           },
                           child: SingleChildScrollView(
                             physics: const AlwaysScrollableScrollPhysics(),
-                            padding: const EdgeInsets.fromLTRB(32, 32, 32, 88),
+                            padding: EdgeInsets.fromLTRB(32, 32, 32, 88 + bottomInset),
                             child: Center(
                               child: _searchController.text.trim().isNotEmpty
-                                  ? Column(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        Icon(
-                                          Icons.person_search_outlined,
-                                          size: 48,
-                                          color: theme.colorScheme.outline,
-                                        ),
-                                        const SizedBox(height: 12),
-                                        Text(
-                                          'No patients match "${_searchController.text.trim()}"',
-                                          textAlign: TextAlign.center,
-                                          style: TextStyle(
-                                            color: theme.colorScheme.onSurfaceVariant,
-                                            fontSize: 15,
-                                          ),
-                                        ),
-                                        const SizedBox(height: 16),
-                                        FilledButton.icon(
-                                          key: const Key('create_new_patient_button'),
-                                          icon: const Icon(Icons.person_add_outlined),
-                                          label: const Text('Create New Patient'),
-                                          onPressed: () => _openNewPatientDialog(
-                                            initialQuery: _searchController.text.trim(),
-                                          ),
-                                        ),
-                                      ],
-                                    )
-                                  : Text(
-                                      'No patients found.\nSwipe down to refresh or check configuration in Settings.',
-                                      textAlign: TextAlign.center,
-                                      style: TextStyle(color: theme.colorScheme.onSurfaceVariant),
-                                    ),
+                                   ? Column(
+                                       mainAxisSize: MainAxisSize.min,
+                                       children: [
+                                         Icon(
+                                           Icons.person_search_outlined,
+                                           size: 48,
+                                           color: theme.colorScheme.outline,
+                                         ),
+                                         const SizedBox(height: 12),
+                                         Text(
+                                           'No patients match "${_searchController.text.trim()}"',
+                                           textAlign: TextAlign.center,
+                                           style: TextStyle(
+                                             color: theme.colorScheme.onSurfaceVariant,
+                                             fontSize: 15,
+                                           ),
+                                         ),
+                                         const SizedBox(height: 16),
+                                         FilledButton.icon(
+                                           key: const Key('create_new_patient_button'),
+                                           icon: const Icon(Icons.person_add_outlined),
+                                           label: const Text('Create New Patient'),
+                                           onPressed: () => _openNewPatientDialog(
+                                             initialQuery: _searchController.text.trim(),
+                                           ),
+                                         ),
+                                       ],
+                                     )
+                                   : Text(
+                                       'No patients found.\nSwipe down to refresh or check configuration in Settings.',
+                                       textAlign: TextAlign.center,
+                                       style: TextStyle(color: theme.colorScheme.onSurfaceVariant),
+                                     ),
                             ),
                           ),
                         )
@@ -873,7 +879,7 @@ class _PatientsScreenState extends State<PatientsScreen> with WidgetsBindingObse
                             await Future.delayed(const Duration(milliseconds: 250));
                           },
                           child: ListView.builder(
-                            padding: const EdgeInsets.fromLTRB(0, 0, 0, 88),
+                            padding: EdgeInsets.fromLTRB(0, 0, 0, 88 + bottomInset),
                             itemCount: _patients.length,
                             itemBuilder: (context, index) {
                               final patient = _patients[index];
